@@ -73,6 +73,8 @@ class _ReplContext:
         messages: Conversation message history (mutated in place).
         session_manager: Session persistence manager.
         system_prompt: The system prompt string used to reset on /clear.
+        rag_engine: Optional RAG engine for context augmentation.
+        rag_topk: Number of RAG results per query.
     """
 
     __slots__ = (
@@ -82,6 +84,8 @@ class _ReplContext:
         "messages",
         "session_manager",
         "system_prompt",
+        "rag_engine",
+        "rag_topk",
     )
 
     def __init__(
@@ -92,6 +96,8 @@ class _ReplContext:
         messages: list[dict],
         session_manager: SessionManager,
         system_prompt: str,
+        rag_engine: object | None = None,
+        rag_topk: int = 5,
     ) -> None:
         self.config = config
         self.client = client
@@ -99,6 +105,8 @@ class _ReplContext:
         self.messages = messages
         self.session_manager = session_manager
         self.system_prompt = system_prompt
+        self.rag_engine = rag_engine
+        self.rag_topk = rag_topk
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
@@ -268,6 +276,8 @@ def run_repl(
     config: Config,
     client: OllamaClient,
     tools: list[Tool],
+    rag_engine: object | None = None,
+    rag_topk: int = 5,
 ) -> None:
     """Run the interactive REPL loop.
 
@@ -281,11 +291,15 @@ def run_repl(
         config: Application configuration.
         client: An :class:`OllamaClient` instance.
         tools: A list of :class:`Tool` instances available to the agent.
+        rag_engine: Optional :class:`RAGEngine` for context augmentation.
+        rag_topk: Number of RAG results per query.
     """
     # Print welcome banner.
     tool_names = ", ".join(t.name for t in tools)
     print(f"local-cli v{__version__} | model: {config.model}")
     print(f"Tools: {tool_names}")
+    if rag_engine is not None:
+        print("RAG: enabled")
     print("Type /help for commands, /exit to quit.\n")
 
     # Build system prompt with tool descriptions.
@@ -307,6 +321,8 @@ def run_repl(
         messages=messages,
         session_manager=session_manager,
         system_prompt=system_prompt,
+        rag_engine=rag_engine,
+        rag_topk=rag_topk,
     )
 
     while True:
@@ -329,8 +345,19 @@ def run_repl(
                 break
             continue
 
+        # Augment prompt with RAG context if available.
+        prompt_content = stripped
+        if ctx.rag_engine is not None:
+            try:
+                prompt_content = ctx.rag_engine.augment_prompt(
+                    stripped, top_k=ctx.rag_topk,
+                )
+            except Exception:
+                # RAG failure is non-fatal; fall back to the raw prompt.
+                pass
+
         # Build user message and add to history.
-        messages.append({"role": "user", "content": stripped})
+        messages.append({"role": "user", "content": prompt_content})
 
         # Run the agent loop (streams response to stdout).
         try:
