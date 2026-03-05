@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "local-cli"
+version = "0.1.0"
+description = "Local-first, offline-capable AI coding agent CLI tool powered by Ollama"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+local-cli = "local_cli.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["local_cli*"]
