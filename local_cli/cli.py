@@ -11,6 +11,7 @@ import sys
 from local_cli import __version__
 from local_cli.agent import agent_loop
 from local_cli.config import Config
+from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.session import SessionManager
 from local_cli.tools.base import Tool
@@ -60,6 +61,8 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/model <name>": "Switch to a different model.",
     "/status": "Show current model, message count, connection status.",
     "/save": "Save the current session.",
+    "/checkpoint": "Create a git checkpoint (tagged commit).",
+    "/rollback [tag]": "Roll back to a checkpoint (latest if no tag given).",
 }
 
 
@@ -75,6 +78,7 @@ class _ReplContext:
         system_prompt: The system prompt string used to reset on /clear.
         rag_engine: Optional RAG engine for context augmentation.
         rag_topk: Number of RAG results per query.
+        git_ops: GitOps instance for checkpoint/rollback commands.
     """
 
     __slots__ = (
@@ -86,6 +90,7 @@ class _ReplContext:
         "system_prompt",
         "rag_engine",
         "rag_topk",
+        "git_ops",
     )
 
     def __init__(
@@ -107,6 +112,7 @@ class _ReplContext:
         self.system_prompt = system_prompt
         self.rag_engine = rag_engine
         self.rag_topk = rag_topk
+        self.git_ops = GitOps()
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
@@ -132,7 +138,7 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
     if cmd == "/help":
         print("\nAvailable commands:")
         for name, description in _SLASH_COMMANDS.items():
-            print(f"  {name:<16} {description}")
+            print(f"  {name:<20} {description}")
         print()
         return True
 
@@ -199,6 +205,48 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print(f"Session saved: {session_id}")
         except OSError as exc:
             print(f"Failed to save session: {exc}")
+        return True
+
+    # -- /checkpoint --------------------------------------------------------
+    if cmd == "/checkpoint":
+        # Optional message from the rest of the input.
+        checkpoint_msg = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            if not ctx.git_ops.is_git_repo():
+                print("Not a git repository. Cannot create checkpoint.")
+                return True
+            tag = ctx.git_ops.create_checkpoint(checkpoint_msg)
+            print(f"Checkpoint created: {tag}")
+        except GitNotInstalledError:
+            print("git is not installed. Cannot create checkpoint.")
+        except GitError as exc:
+            print(f"Checkpoint failed: {exc}")
+        return True
+
+    # -- /rollback [tag] ----------------------------------------------------
+    if cmd == "/rollback":
+        try:
+            if not ctx.git_ops.is_git_repo():
+                print("Not a git repository. Cannot rollback.")
+                return True
+
+            # Determine which tag to roll back to.
+            if len(parts) > 1 and parts[1].strip():
+                target_tag = parts[1].strip()
+            else:
+                # Use the most recent checkpoint.
+                checkpoints = ctx.git_ops.list_checkpoints()
+                if not checkpoints:
+                    print("No checkpoints found. Use /checkpoint first.")
+                    return True
+                target_tag = checkpoints[0]
+
+            ctx.git_ops.rollback_to_checkpoint(target_tag)
+            print(f"Rolled back to checkpoint: {target_tag}")
+        except GitNotInstalledError:
+            print("git is not installed. Cannot rollback.")
+        except GitError as exc:
+            print(f"Rollback failed: {exc}")
         return True
 
     # -- Unknown command ----------------------------------------------------
