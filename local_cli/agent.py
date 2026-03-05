@@ -19,6 +19,28 @@ from local_cli.tools.base import Tool
 # Maximum characters of a tool result to print to the console.
 _MAX_DISPLAY_RESULT = 200
 
+# ---------------------------------------------------------------------------
+# Context compaction thresholds
+# ---------------------------------------------------------------------------
+
+# Compact when message count exceeds this threshold.
+_COMPACT_MESSAGE_THRESHOLD = 50
+
+# Approximate characters-per-token estimate (conservative).
+_CHARS_PER_TOKEN = 4
+
+# Compact when estimated token count exceeds this threshold.
+_COMPACT_TOKEN_THRESHOLD = 24_000
+
+# Maximum characters to keep from a compacted tool result.
+_COMPACT_TOOL_RESULT_MAX = 200
+
+# Maximum characters to keep from a compacted assistant message.
+_COMPACT_ASSISTANT_MAX = 500
+
+# Number of recent messages to preserve uncompacted.
+_COMPACT_KEEP_RECENT = 10
+
 
 # ---------------------------------------------------------------------------
 # Streaming response collector
@@ -156,6 +178,158 @@ def _execute_tool(
 
 
 # ---------------------------------------------------------------------------
+# Context compaction
+# ---------------------------------------------------------------------------
+
+
+def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate the number of tokens in a message list.
+
+    Uses a rough characters-per-token heuristic.  This is intentionally
+    conservative (under-estimates tokens) so that compaction triggers
+    before actually hitting the model's context window limit.
+
+    Args:
+        messages: The conversation message list.
+
+    Returns:
+        Estimated token count.
+    """
+    total_chars = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if content:
+            total_chars += len(content)
+        # Account for tool call arguments (they consume tokens too).
+        for tc in msg.get("tool_calls", []):
+            func = tc.get("function", {})
+            args = func.get("arguments", {})
+            total_chars += len(str(args))
+    return total_chars // _CHARS_PER_TOKEN
+
+
+def _compact_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Compact a single message by truncating its content.
+
+    Preserves the message role and structure but reduces content length.
+    System messages are never compacted.  Tool results are truncated
+    aggressively.  Assistant messages are truncated moderately.
+
+    Args:
+        message: A conversation message dict.
+
+    Returns:
+        A new dict with truncated content (or the original if no
+        compaction was needed).
+    """
+    role = message.get("role", "")
+
+    # Never compact system messages -- they contain the system prompt.
+    if role == "system":
+        return message
+
+    content = message.get("content", "")
+
+    if role == "tool":
+        max_len = _COMPACT_TOOL_RESULT_MAX
+    elif role == "assistant":
+        max_len = _COMPACT_ASSISTANT_MAX
+    else:
+        # User messages: keep them intact (they're typically short).
+        return message
+
+    if len(content) <= max_len:
+        return message
+
+    # Build a compacted copy.
+    compacted = dict(message)
+    compacted["content"] = content[:max_len] + "\n... [truncated for context]"
+
+    # Strip tool_calls from old assistant messages to save space.
+    # The tool results are already recorded in subsequent tool messages.
+    if role == "assistant" and "tool_calls" in compacted:
+        tc_count = len(compacted["tool_calls"])
+        compacted.pop("tool_calls")
+        compacted["content"] += f"\n[{tc_count} tool call(s) omitted]"
+
+    return compacted
+
+
+def _needs_compaction(messages: list[dict[str, Any]]) -> bool:
+    """Check whether the message list should be compacted.
+
+    Returns ``True`` if either the message count or estimated token
+    count exceeds their respective thresholds.
+
+    Args:
+        messages: The conversation message list.
+
+    Returns:
+        True if compaction is warranted.
+    """
+    if len(messages) > _COMPACT_MESSAGE_THRESHOLD:
+        return True
+    if _estimate_tokens(messages) > _COMPACT_TOKEN_THRESHOLD:
+        return True
+    return False
+
+
+def compact_messages(
+    messages: list[dict[str, Any]],
+    debug: bool = False,
+) -> None:
+    """Compact the conversation history in place to preserve context space.
+
+    Keeps the system message(s) at the start and the most recent
+    ``_COMPACT_KEEP_RECENT`` messages intact.  Older messages in between
+    are truncated to reduce token usage.
+
+    This is called automatically by :func:`agent_loop` when thresholds
+    are exceeded.
+
+    Args:
+        messages: The conversation history (mutated in place).
+        debug: If True, print compaction details to stderr.
+    """
+    total = len(messages)
+    if total <= _COMPACT_KEEP_RECENT:
+        return
+
+    # Identify the boundary between "old" and "recent" messages.
+    # System messages at the start are always preserved fully.
+    system_end = 0
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system":
+            system_end = i + 1
+        else:
+            break
+
+    # Recent messages to keep intact.
+    recent_start = max(system_end, total - _COMPACT_KEEP_RECENT)
+
+    if recent_start <= system_end:
+        # Not enough old messages to compact.
+        return
+
+    old_tokens = _estimate_tokens(messages[system_end:recent_start])
+
+    compacted_count = 0
+    for i in range(system_end, recent_start):
+        original = messages[i]
+        compacted = _compact_message(original)
+        if compacted is not original:
+            messages[i] = compacted
+            compacted_count += 1
+
+    if debug and compacted_count > 0:
+        new_tokens = _estimate_tokens(messages[system_end:recent_start])
+        sys.stderr.write(
+            f"[debug] Compacted {compacted_count} messages "
+            f"(~{old_tokens} -> ~{new_tokens} tokens)\n"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Agent loop
 # ---------------------------------------------------------------------------
 
@@ -193,6 +367,12 @@ def agent_loop(
     tool_defs: list[dict[str, Any]] = [t.to_ollama_tool() for t in tools]
 
     while True:
+        # ---------------------------------------------------------------
+        # 0. Compact conversation history if thresholds are exceeded.
+        # ---------------------------------------------------------------
+        if _needs_compaction(messages):
+            compact_messages(messages, debug=debug)
+
         # ---------------------------------------------------------------
         # 1. Send messages to the LLM and collect the streaming response.
         # ---------------------------------------------------------------
