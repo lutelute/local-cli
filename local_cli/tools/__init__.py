@@ -17,11 +17,13 @@ def get_default_tools() -> list[Tool]:
     Returns:
         A list of :class:`Tool` instances.
     """
+    from local_cli.tools.ask_user_tool import AskUserTool
     from local_cli.tools.bash_tool import BashTool
     from local_cli.tools.edit_tool import EditTool
     from local_cli.tools.glob_tool import GlobTool
     from local_cli.tools.grep_tool import GrepTool
     from local_cli.tools.read_tool import ReadTool
+    from local_cli.tools.web_fetch_tool import WebFetchTool
     from local_cli.tools.write_tool import WriteTool
 
     tools: list[Tool] = [
@@ -31,6 +33,8 @@ def get_default_tools() -> list[Tool]:
         EditTool(),
         GlobTool(),
         GrepTool(),
+        WebFetchTool(),
+        AskUserTool(),
     ]
     return tools
 
