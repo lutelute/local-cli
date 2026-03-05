@@ -11,19 +11,42 @@ import sys
 from local_cli import __version__
 from local_cli.agent import agent_loop
 from local_cli.config import Config
-from local_cli.ollama_client import OllamaClient
+from local_cli.ollama_client import OllamaClient, OllamaConnectionError
+from local_cli.session import SessionManager
 from local_cli.tools.base import Tool
 
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = (
-    "You are a helpful AI coding assistant running locally via Ollama. "
-    "You have access to tools for reading files, writing files, editing "
-    "files, and running shell commands. Use these tools to help the user "
-    "with their coding tasks. Be concise and accurate."
-)
+
+def _build_system_prompt(tools: list[Tool]) -> str:
+    """Build the system prompt including tool descriptions.
+
+    Generates a system prompt that describes the assistant's capabilities
+    and lists all available tools with their descriptions so the LLM
+    knows what it can use.
+
+    Args:
+        tools: The list of tool instances available to the agent.
+
+    Returns:
+        The full system prompt string.
+    """
+    tool_lines = []
+    for tool in tools:
+        tool_lines.append(f"- {tool.name}: {tool.description}")
+
+    tool_section = "\n".join(tool_lines)
+
+    return (
+        "You are a helpful AI coding assistant running locally via Ollama. "
+        "You have access to the following tools:\n\n"
+        f"{tool_section}\n\n"
+        "Use these tools to help the user with their coding tasks. "
+        "Be concise and accurate."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Slash commands
@@ -33,32 +56,145 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show this help message.",
     "/exit": "Exit the REPL.",
     "/quit": "Exit the REPL (alias for /exit).",
+    "/clear": "Clear conversation history.",
+    "/model <name>": "Switch to a different model.",
+    "/status": "Show current model, message count, connection status.",
+    "/save": "Save the current session.",
 }
 
 
-def _handle_slash_command(command: str) -> bool:
+class _ReplContext:
+    """Mutable state shared between the REPL loop and slash command handler.
+
+    Attributes:
+        config: Application configuration.
+        client: The Ollama client instance.
+        tools: Available tool instances.
+        messages: Conversation message history (mutated in place).
+        session_manager: Session persistence manager.
+        system_prompt: The system prompt string used to reset on /clear.
+    """
+
+    __slots__ = (
+        "config",
+        "client",
+        "tools",
+        "messages",
+        "session_manager",
+        "system_prompt",
+    )
+
+    def __init__(
+        self,
+        config: Config,
+        client: OllamaClient,
+        tools: list[Tool],
+        messages: list[dict],
+        session_manager: SessionManager,
+        system_prompt: str,
+    ) -> None:
+        self.config = config
+        self.client = client
+        self.tools = tools
+        self.messages = messages
+        self.session_manager = session_manager
+        self.system_prompt = system_prompt
+
+
+def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
     """Handle a slash command.
 
     Args:
         command: The raw user input starting with ``/``.
+        ctx: The REPL context containing shared state.
 
     Returns:
         True if the REPL should continue, False if it should exit.
     """
-    cmd = command.strip().lower()
+    stripped = command.strip()
+    parts = stripped.split(maxsplit=1)
+    cmd = parts[0].lower()
 
+    # -- /exit, /quit -------------------------------------------------------
     if cmd in ("/exit", "/quit"):
         print("Goodbye!")
         return False
 
+    # -- /help --------------------------------------------------------------
     if cmd == "/help":
         print("\nAvailable commands:")
         for name, description in _SLASH_COMMANDS.items():
-            print(f"  {name:<12} {description}")
+            print(f"  {name:<16} {description}")
         print()
         return True
 
-    print(f"Unknown command: {command.strip()}")
+    # -- /clear -------------------------------------------------------------
+    if cmd == "/clear":
+        ctx.messages.clear()
+        ctx.messages.append({"role": "system", "content": ctx.system_prompt})
+        print("Conversation history cleared.")
+        return True
+
+    # -- /model <name> ------------------------------------------------------
+    if cmd == "/model":
+        if len(parts) < 2 or not parts[1].strip():
+            print("Usage: /model <name>")
+            return True
+
+        new_model = parts[1].strip()
+
+        # Validate the model exists on the Ollama server.
+        try:
+            models = ctx.client.list_models()
+            model_names = [m.get("name", "") for m in models]
+            model_found = any(
+                new_model == name or new_model == name.split(":")[0]
+                for name in model_names
+            )
+            if not model_found:
+                print(f"Model '{new_model}' not found on Ollama server.")
+                if model_names:
+                    print(f"Available models: {', '.join(model_names)}")
+                return True
+        except OllamaConnectionError:
+            print("Warning: could not connect to Ollama to validate model.")
+            print(f"Switching to '{new_model}' anyway.")
+
+        ctx.config.model = new_model
+        print(f"Switched to model: {new_model}")
+        return True
+
+    # -- /status ------------------------------------------------------------
+    if cmd == "/status":
+        # Count user messages (exclude system and tool messages).
+        user_msg_count = sum(
+            1 for m in ctx.messages if m.get("role") == "user"
+        )
+        print(f"\nModel: {ctx.config.model}")
+        print(f"Messages: {user_msg_count}")
+
+        # Check Ollama connection status.
+        try:
+            version_info = ctx.client.get_version()
+            version = version_info.get("version", "unknown")
+            print(f"Ollama: connected (v{version})")
+        except OllamaConnectionError:
+            print("Ollama: disconnected")
+
+        print()
+        return True
+
+    # -- /save --------------------------------------------------------------
+    if cmd == "/save":
+        try:
+            session_id = ctx.session_manager.save_session(ctx.messages)
+            print(f"Session saved: {session_id}")
+        except OSError as exc:
+            print(f"Failed to save session: {exc}")
+        return True
+
+    # -- Unknown command ----------------------------------------------------
+    print(f"Unknown command: {stripped}")
     print("Type /help for a list of commands.")
     return True
 
@@ -152,10 +288,26 @@ def run_repl(
     print(f"Tools: {tool_names}")
     print("Type /help for commands, /exit to quit.\n")
 
+    # Build system prompt with tool descriptions.
+    system_prompt = _build_system_prompt(tools)
+
     # Conversation history (persists across the session).
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
     ]
+
+    # Session manager for /save command.
+    session_manager = SessionManager(config.state_dir)
+
+    # Build the REPL context for slash commands.
+    ctx = _ReplContext(
+        config=config,
+        client=client,
+        tools=tools,
+        messages=messages,
+        session_manager=session_manager,
+        system_prompt=system_prompt,
+    )
 
     while True:
         # Read user input.
@@ -172,7 +324,7 @@ def run_repl(
 
         # Handle slash commands.
         if stripped.startswith("/"):
-            should_continue = _handle_slash_command(stripped)
+            should_continue = _handle_slash_command(stripped, ctx)
             if not should_continue:
                 break
             continue
