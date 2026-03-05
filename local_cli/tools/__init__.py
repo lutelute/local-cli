@@ -18,11 +18,15 @@ def get_default_tools() -> list[Tool]:
         A list of :class:`Tool` instances.
     """
     from local_cli.tools.bash_tool import BashTool
+    from local_cli.tools.edit_tool import EditTool
     from local_cli.tools.read_tool import ReadTool
+    from local_cli.tools.write_tool import WriteTool
 
     tools: list[Tool] = [
         BashTool(),
         ReadTool(),
+        WriteTool(),
+        EditTool(),
     ]
     return tools
 
