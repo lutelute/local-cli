@@ -109,7 +109,7 @@ class SessionManager:
                         continue
                     try:
                         obj = json.loads(line)
-                        if isinstance(obj, dict):
+                        if isinstance(obj, dict) and "role" in obj:
                             messages.append(obj)
                     except (json.JSONDecodeError, ValueError):
                         # Skip corrupt / incomplete lines gracefully.

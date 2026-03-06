@@ -5,16 +5,25 @@ parent directories as needed (equivalent to ``mkdir -p``).  Validates
 paths to prevent directory traversal attacks.
 """
 
+import os
 from pathlib import Path
 
 from local_cli.tools.base import Tool
 
 
-def _is_path_safe(file_path: str) -> bool:
-    """Check that a file path does not contain directory traversal.
+_BLOCKED_PREFIXES = (
+    "/etc/", "/boot/", "/sbin/", "/usr/sbin/",
+    "/dev/", "/proc/", "/sys/",
+)
 
-    Resolves the path and verifies it does not escape the current
-    working directory via ``..`` components.
+
+def _is_path_safe(file_path: str) -> bool:
+    """Check that a file path does not contain directory traversal or target
+    sensitive system directories.
+
+    For relative paths, the resolved path must remain within the current
+    working directory.  For absolute paths, sensitive system directories
+    are blocked.
 
     Args:
         file_path: The file path string to validate.
@@ -24,11 +33,18 @@ def _is_path_safe(file_path: str) -> bool:
     """
     try:
         resolved = Path(file_path).resolve()
-        cwd = Path.cwd().resolve()
-        # Allow absolute paths, but reject paths with '..' that escape cwd
-        # when the path is relative.
+        resolved_str = str(resolved)
+
+        # Block writes to sensitive system directories.
+        for prefix in _BLOCKED_PREFIXES:
+            if resolved_str.startswith(prefix) or resolved_str == prefix.rstrip("/"):
+                return False
+
+        # For relative paths, enforce cwd boundary.
         if not Path(file_path).is_absolute():
-            return str(resolved).startswith(str(cwd))
+            cwd = Path.cwd().resolve()
+            return resolved == cwd or resolved_str.startswith(str(cwd) + os.sep)
+
         return True
     except (OSError, ValueError):
         return False

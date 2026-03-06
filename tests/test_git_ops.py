@@ -161,13 +161,15 @@ class TestCreateCheckpoint(unittest.TestCase):
                 self.assertTrue(tag.startswith(_TAG_PREFIX))
                 # Extract timestamp portion.
                 timestamp = tag[len(_TAG_PREFIX):]
-                # Format: YYYYMMDD-HHMMSS
+                # Format: YYYYMMDD-HHMMSS-ffffff
                 parts = timestamp.split("-")
-                self.assertEqual(len(parts), 2)
+                self.assertEqual(len(parts), 3)
                 self.assertEqual(len(parts[0]), 8)  # YYYYMMDD
                 self.assertEqual(len(parts[1]), 6)  # HHMMSS
+                self.assertEqual(len(parts[2]), 6)  # ffffff (microseconds)
                 self.assertTrue(parts[0].isdigit())
                 self.assertTrue(parts[1].isdigit())
+                self.assertTrue(parts[2].isdigit())
             finally:
                 os.chdir(original_cwd)
 

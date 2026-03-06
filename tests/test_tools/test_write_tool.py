@@ -208,6 +208,27 @@ class TestWriteToolSecurity(unittest.TestCase):
         self.assertIn("Error", result)
         self.assertIn("traversal", result.lower())
 
+    def test_absolute_path_to_etc_blocked(self) -> None:
+        """Absolute paths to /etc/ are blocked."""
+        result = self.tool.execute(
+            file_path="/etc/passwd", content="hacked"
+        )
+        self.assertIn("Error", result)
+
+    def test_absolute_path_to_dev_blocked(self) -> None:
+        """Absolute paths to /dev/ are blocked."""
+        result = self.tool.execute(
+            file_path="/dev/sda", content="hacked"
+        )
+        self.assertIn("Error", result)
+
+    def test_absolute_path_to_boot_blocked(self) -> None:
+        """Absolute paths to /boot/ are blocked."""
+        result = self.tool.execute(
+            file_path="/boot/vmlinuz", content="hacked"
+        )
+        self.assertIn("Error", result)
+
 
 if __name__ == "__main__":
     unittest.main()

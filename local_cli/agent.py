@@ -386,6 +386,10 @@ def agent_loop(
             full_response = collect_streaming_response(stream)
         except OllamaStreamError as exc:
             sys.stderr.write(f"Error from Ollama: {exc}\n")
+            messages.append({
+                "role": "assistant",
+                "content": f"[Error from Ollama: {exc}]",
+            })
             break
         except KeyboardInterrupt:
             sys.stderr.write("\nInterrupted.\n")
@@ -432,6 +436,12 @@ def agent_loop(
                 except KeyboardInterrupt:
                     result = "Error: tool execution interrupted by user."
                     sys.stderr.write(f"  Tool {tool_name} interrupted.\n")
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "content": result,
+                    })
+                    raise
 
                 # Show a truncated preview of the result to the user.
                 preview = _truncate(

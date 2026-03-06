@@ -8,6 +8,7 @@ import hashlib
 import math
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -339,7 +340,10 @@ class RAGEngine:
                 # Compute embeddings for all chunks.
                 try:
                     embeddings = self.client.embed(model, chunks)
-                except Exception:
+                except Exception as exc:
+                    sys.stderr.write(
+                        f"Warning: embedding failed for {file_path}: {exc}\n"
+                    )
                     stats["files_skipped"] += 1
                     continue
 

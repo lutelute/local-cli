@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Generator
 
-from local_cli.security import validate_ollama_host
+from local_cli.security import validate_model_name, validate_ollama_host
 
 # ---------------------------------------------------------------------------
 # Default timeouts (seconds)
@@ -214,6 +214,18 @@ class OllamaClient:
         result = self._request("GET", "/api/tags")
         return result.get("models", [])
 
+    def _validate_model(self, model: str) -> None:
+        """Validate a model name before sending to the API.
+
+        Args:
+            model: Model name to validate.
+
+        Raises:
+            ValueError: If the model name is invalid.
+        """
+        if not validate_model_name(model):
+            raise ValueError(f"Invalid model name: {model!r}")
+
     def chat_stream(
         self,
         model: str,
@@ -239,7 +251,9 @@ class OllamaClient:
         Raises:
             OllamaConnectionError: On connection failure or timeout.
             OllamaStreamError: If an error is received mid-stream.
+            ValueError: If the model name is invalid.
         """
+        self._validate_model(model)
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -271,7 +285,9 @@ class OllamaClient:
         Raises:
             OllamaConnectionError: On connection failure or timeout.
             OllamaRequestError: On error response.
+            ValueError: If the model name is invalid.
         """
+        self._validate_model(model)
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -299,7 +315,9 @@ class OllamaClient:
         Raises:
             OllamaConnectionError: On connection failure or timeout.
             OllamaRequestError: On error response.
+            ValueError: If the model name is invalid.
         """
+        self._validate_model(model)
         payload: dict[str, Any] = {
             "model": model,
             "input": input,
@@ -326,7 +344,9 @@ class OllamaClient:
         Raises:
             OllamaConnectionError: On connection failure.
             OllamaStreamError: If an error is received mid-stream.
+            ValueError: If the model name is invalid.
         """
+        self._validate_model(model)
         payload: dict[str, Any] = {
             "model": model,
             "stream": True,

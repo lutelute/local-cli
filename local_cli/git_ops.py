@@ -118,13 +118,14 @@ class GitOps:
     def _generate_tag_name(self) -> str:
         """Generate a unique checkpoint tag name based on the current time.
 
-        Format: ``local-cli-checkpoint-YYYYMMDD-HHMMSS`` (UTC).
+        Format: ``local-cli-checkpoint-YYYYMMDD-HHMMSS-ffffff`` (UTC).
+        Includes microseconds to avoid collisions on rapid calls.
 
         Returns:
             A tag name string.
         """
         now = datetime.now(timezone.utc)
-        timestamp = now.strftime("%Y%m%d-%H%M%S")
+        timestamp = now.strftime("%Y%m%d-%H%M%S-%f")
         return f"{_TAG_PREFIX}{timestamp}"
 
     # ------------------------------------------------------------------

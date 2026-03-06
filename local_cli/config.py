@@ -14,6 +14,10 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "config_file": "~/.config/local-cli/config",
     "auto_approve": False,
     "debug": False,
+    "rag": False,
+    "rag_path": ".",
+    "rag_topk": 5,
+    "rag_model": "all-minilm",
 }
 
 # Mapping of environment variable names to config keys.
@@ -149,3 +153,7 @@ class Config:
         self.config_file: str = str(Path(cfg_path).expanduser())
         self.auto_approve: bool = _parse_bool(merged["auto_approve"])
         self.debug: bool = _parse_bool(merged["debug"])
+        self.rag: bool = _parse_bool(merged["rag"])
+        self.rag_path: str = str(merged["rag_path"])
+        self.rag_topk: int = int(merged["rag_topk"])
+        self.rag_model: str = str(merged["rag_model"])
