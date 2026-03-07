@@ -105,8 +105,8 @@ export default function App() {
             ready: true,
           })
           // Read has_claude from ready message.
-          if ((msg as any).has_claude !== undefined) {
-            setHasClaude(!!(msg as any).has_claude)
+          if (msg.has_claude !== undefined) {
+            setHasClaude(!!msg.has_claude)
           }
           // Fetch catalog.
           window.api.sendToPython({ id: nextId(), type: 'catalog' })

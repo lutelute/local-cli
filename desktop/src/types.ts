@@ -49,6 +49,7 @@ export type PythonMessage = {
   tools?: string[]
   message?: string
   provider?: string
+  has_claude?: boolean
   has_updates?: boolean
   success?: boolean
 }
