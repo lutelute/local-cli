@@ -17,6 +17,7 @@ __pycache__/
 *.egg
 dist/
 build/
+!desktop/build/
 .eggs/
 
 # Virtual environments
@@ -37,3 +38,8 @@ Thumbs.db
 
 # Local CLI state
 .local-cli-state/
+
+# Desktop (Electron)
+desktop/node_modules/
+desktop/dist/
+desktop/dist-electron/

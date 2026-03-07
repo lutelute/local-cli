@@ -172,7 +172,13 @@ def main() -> None:
     else:
         rag_topk = 5
 
-    # 12. Start the interactive REPL.
+    # 12. Server mode (for desktop GUI).
+    if getattr(args, "server", False):
+        from local_cli.server import run_server
+        run_server()
+        return
+
+    # 13. Start the interactive REPL.
     run_repl(
         config,
         client,

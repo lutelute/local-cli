@@ -543,6 +543,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to model registry JSON file.",
     )
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        default=False,
+        help="Run in JSON-line server mode (for desktop GUI).",
+    )
     return parser
 
 
