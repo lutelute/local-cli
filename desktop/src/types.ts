@@ -57,6 +57,7 @@ export type PythonMessage = {
 declare global {
   interface Window {
     api: {
+      signalReady: () => void
       sendToPython: (data: object) => void
       onPythonMessage: (cb: (msg: PythonMessage) => void) => () => void
       onPythonStderr: (cb: (text: string) => void) => () => void

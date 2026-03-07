@@ -7,6 +7,8 @@ import path from 'path'
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
 let lineBuffer = ''
+let pendingMessages: object[] = []
+let rendererReady = false
 
 function findPython(): string {
   // Try python3 first, then python.
@@ -46,7 +48,12 @@ function startPythonServer() {
       if (!line.trim()) continue
       try {
         const msg = JSON.parse(line)
-        mainWindow?.webContents.send('python-message', msg)
+        if (rendererReady && mainWindow) {
+          mainWindow.webContents.send('python-message', msg)
+        } else {
+          // Buffer messages until renderer is ready.
+          pendingMessages.push(msg)
+        }
       } catch {
         console.error('Invalid JSON from Python:', line)
       }
@@ -106,6 +113,15 @@ ipcMain.on('send-to-python', (_event, data) => {
 
 ipcMain.handle('get-python-status', () => {
   return { running: pythonProcess !== null && !pythonProcess.killed }
+})
+
+ipcMain.on('renderer-ready', () => {
+  rendererReady = true
+  // Flush any messages that arrived before the renderer was ready.
+  for (const msg of pendingMessages) {
+    mainWindow?.webContents.send('python-message', msg)
+  }
+  pendingMessages = []
 })
 
 ipcMain.handle('open-directory-dialog', async () => {

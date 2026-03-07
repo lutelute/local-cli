@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('api', {
   sendToPython: (data: object) => {
     ipcRenderer.send('send-to-python', data)
   },
+  signalReady: () => {
+    ipcRenderer.send('renderer-ready')
+  },
   onPythonMessage: (callback: (msg: PythonMessage) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, msg: PythonMessage) => callback(msg)
     ipcRenderer.on('python-message', handler)

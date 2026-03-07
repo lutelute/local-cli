@@ -264,6 +264,10 @@ export default function App() {
       }
     })
 
+    // Signal to main process that renderer is ready to receive messages.
+    // This flushes any buffered messages (e.g. the 'ready' message from Python).
+    window.api.signalReady()
+
     return cleanup
   }, [])
 
