@@ -164,3 +164,13 @@ class Config:
         self.provider: str = str(merged["provider"])
         self.model_registry_file: str = str(merged["model_registry_file"])
         self.orchestrator_model: str = str(merged["orchestrator_model"])
+
+    @property
+    def has_claude_access(self) -> bool:
+        """Check whether an Anthropic API key is available.
+
+        Reads ``ANTHROPIC_API_KEY`` from the environment at call time and
+        never stores the key value.  Returns ``True`` only when the
+        variable is set to a non-empty string.
+        """
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))

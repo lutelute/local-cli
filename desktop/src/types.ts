@@ -27,6 +27,16 @@ export type AppStatus = {
   ready: boolean
 }
 
+export type FileEntry = {
+  name: string
+  isDirectory: boolean
+  isSymlink: boolean
+}
+
+export type ReadFileResult =
+  | { content: string; error?: never; size?: never }
+  | { error: 'too_large'; size: number; content?: never }
+
 export type PythonMessage = {
   id?: number
   type: string
@@ -39,6 +49,7 @@ export type PythonMessage = {
   tools?: string[]
   message?: string
   provider?: string
+  has_claude?: boolean
   has_updates?: boolean
   success?: boolean
 }
@@ -51,6 +62,11 @@ declare global {
       onPythonStderr: (cb: (text: string) => void) => () => void
       onPythonExit: (cb: (code: number | null) => void) => () => void
       getPythonStatus: () => Promise<{ running: boolean }>
+      listDir: (dirPath: string) => Promise<FileEntry[]>
+      readFile: (filePath: string) => Promise<ReadFileResult>
+      openDirectoryDialog: () => Promise<Electron.OpenDialogReturnValue>
+      getHomeDir: () => Promise<string>
+      hasClaudeAccess: () => Promise<boolean>
     }
   }
 }

@@ -1,5 +1,7 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'path'
 
 let mainWindow: BrowserWindow | null = null
@@ -104,6 +106,48 @@ ipcMain.on('send-to-python', (_event, data) => {
 
 ipcMain.handle('get-python-status', () => {
   return { running: pythonProcess !== null && !pythonProcess.killed }
+})
+
+ipcMain.handle('open-directory-dialog', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+  return result
+})
+
+ipcMain.handle('list-directory', async (_event, dirPath: string) => {
+  const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+  const results = await Promise.all(
+    entries.map(async (entry) => {
+      const fullPath = path.join(dirPath, entry.name)
+      let isSymlink = false
+      try {
+        const stat = await fs.promises.lstat(fullPath)
+        isSymlink = stat.isSymbolicLink()
+      } catch {
+        // Ignore stat errors for individual entries.
+      }
+      return { name: entry.name, isDirectory: entry.isDirectory(), isSymlink }
+    })
+  )
+  return results
+})
+
+const MAX_FILE_SIZE = 1_000_000 // 1MB
+
+ipcMain.handle('read-file', async (_event, filePath: string) => {
+  const stat = await fs.promises.stat(filePath)
+  if (stat.size > MAX_FILE_SIZE) {
+    return { error: 'too_large' as const, size: stat.size }
+  }
+  const content = await fs.promises.readFile(filePath, 'utf-8')
+  return { content }
+})
+
+ipcMain.handle('get-home-dir', () => {
+  return os.homedir()
+})
+
+ipcMain.handle('has-claude-access', () => {
+  return !!process.env.ANTHROPIC_API_KEY
 })
 
 app.whenReady().then(() => {
