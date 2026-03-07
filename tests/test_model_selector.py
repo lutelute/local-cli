@@ -1,13 +1,19 @@
 """Tests for local_cli.model_selector module."""
 
+import curses
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
+from local_cli.cli import _SLASH_COMMANDS, _ReplContext, _handle_slash_command, build_parser
+from local_cli.config import Config
 from local_cli.model_selector import (
     _build_model_display_data,
+    _curses_main,
     _format_size,
     _select_model_simple,
+    select_model_interactive,
 )
+from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 
 
 class TestFormatSize(unittest.TestCase):
@@ -307,6 +313,560 @@ class TestSelectModelSimple(unittest.TestCase):
         result = _select_model_simple(self._make_models())
 
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Shared test data helper
+# ---------------------------------------------------------------------------
+
+
+def _make_sample_models() -> list[dict]:
+    """Create a reusable sample list of model info dicts."""
+    return [
+        {
+            "name": "qwen3:8b",
+            "size": 5_200_000_000,
+            "details": {
+                "parameter_size": "8B",
+                "quantization_level": "Q4_K_M",
+                "family": "qwen3",
+            },
+        },
+        {
+            "name": "gemma3:4b",
+            "size": 3_300_000_000,
+            "details": {
+                "parameter_size": "4B",
+                "quantization_level": "Q4_0",
+                "family": "gemma3",
+            },
+        },
+        {
+            "name": "llama3.2:latest",
+            "size": 2_000_000_000,
+            "details": {
+                "parameter_size": "3B",
+                "quantization_level": "Q4_K_M",
+                "family": "llama",
+            },
+        },
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tests for select_model_interactive() routing
+# ---------------------------------------------------------------------------
+
+
+class TestSelectModelInteractiveRouting(unittest.TestCase):
+    """Tests for routing logic in select_model_interactive()."""
+
+    def setUp(self) -> None:
+        self.client = MagicMock(spec=OllamaClient)
+        self.client.list_models.return_value = _make_sample_models()
+
+    @patch("local_cli.model_selector._select_model_curses", return_value="qwen3:8b")
+    @patch("local_cli.model_selector.sys.stdin")
+    @patch("local_cli.model_selector._CURSES_AVAILABLE", True)
+    def test_tty_routes_to_curses(
+        self, mock_stdin: MagicMock, mock_curses_sel: MagicMock
+    ) -> None:
+        """TTY terminal with curses available routes to _select_model_curses."""
+        mock_stdin.isatty.return_value = True
+
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertEqual(result, "qwen3:8b")
+        mock_curses_sel.assert_called_once_with(
+            _make_sample_models(), "qwen3:8b"
+        )
+
+    @patch("local_cli.model_selector._select_model_simple", return_value="gemma3:4b")
+    @patch("local_cli.model_selector.sys.stdin")
+    @patch("local_cli.model_selector._CURSES_AVAILABLE", True)
+    def test_non_tty_routes_to_simple(
+        self, mock_stdin: MagicMock, mock_simple_sel: MagicMock
+    ) -> None:
+        """Non-TTY terminal routes to _select_model_simple even if curses available."""
+        mock_stdin.isatty.return_value = False
+
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertEqual(result, "gemma3:4b")
+        mock_simple_sel.assert_called_once_with(
+            _make_sample_models(), "qwen3:8b"
+        )
+
+    @patch("local_cli.model_selector._select_model_simple", return_value="gemma3:4b")
+    @patch("local_cli.model_selector.sys.stdin")
+    @patch("local_cli.model_selector._CURSES_AVAILABLE", False)
+    def test_curses_unavailable_routes_to_simple(
+        self, mock_stdin: MagicMock, mock_simple_sel: MagicMock
+    ) -> None:
+        """When curses is not available, routes to _select_model_simple."""
+        mock_stdin.isatty.return_value = True
+
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertEqual(result, "gemma3:4b")
+        mock_simple_sel.assert_called_once()
+
+    @patch("local_cli.model_selector._select_model_simple", return_value="llama3.2:latest")
+    @patch(
+        "local_cli.model_selector._select_model_curses",
+        side_effect=curses.error("Terminal too small"),
+    )
+    @patch("local_cli.model_selector.sys.stdin")
+    @patch("local_cli.model_selector._CURSES_AVAILABLE", True)
+    def test_curses_error_falls_back_to_simple(
+        self,
+        mock_stdin: MagicMock,
+        mock_curses_sel: MagicMock,
+        mock_simple_sel: MagicMock,
+    ) -> None:
+        """curses.error during TUI falls back to _select_model_simple."""
+        mock_stdin.isatty.return_value = True
+
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertEqual(result, "llama3.2:latest")
+        mock_curses_sel.assert_called_once()
+        mock_simple_sel.assert_called_once()
+
+    @patch("local_cli.model_selector._select_model_curses", return_value=None)
+    @patch("local_cli.model_selector.sys.stdin")
+    @patch("local_cli.model_selector._CURSES_AVAILABLE", True)
+    def test_cancel_returns_none(
+        self, mock_stdin: MagicMock, mock_curses_sel: MagicMock
+    ) -> None:
+        """Cancelled selection returns None."""
+        mock_stdin.isatty.return_value = True
+
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests for empty model list handling
+# ---------------------------------------------------------------------------
+
+
+class TestSelectModelNoModels(unittest.TestCase):
+    """Tests for select_model_interactive() with no models available."""
+
+    def setUp(self) -> None:
+        self.client = MagicMock(spec=OllamaClient)
+        self.client.list_models.return_value = []
+
+    @patch("local_cli.model_selector.sys.stderr")
+    def test_empty_list_returns_none(self, mock_stderr: MagicMock) -> None:
+        """Empty model list returns None."""
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertIsNone(result)
+
+    @patch("local_cli.model_selector.sys.stderr")
+    def test_empty_list_shows_message(self, mock_stderr: MagicMock) -> None:
+        """Empty model list writes a helpful message to stderr."""
+        select_model_interactive(self.client, "qwen3:8b")
+
+        output = "".join(
+            call_arg.args[0] for call_arg in mock_stderr.write.call_args_list
+        )
+        self.assertIn("No models found", output)
+        self.assertIn("ollama pull", output)
+
+
+# ---------------------------------------------------------------------------
+# Tests for OllamaConnectionError handling
+# ---------------------------------------------------------------------------
+
+
+class TestSelectModelConnectionError(unittest.TestCase):
+    """Tests for select_model_interactive() when Ollama is unreachable."""
+
+    def setUp(self) -> None:
+        self.client = MagicMock(spec=OllamaClient)
+        self.client.list_models.side_effect = OllamaConnectionError(
+            "Connection refused"
+        )
+
+    @patch("local_cli.model_selector.sys.stderr")
+    def test_connection_error_returns_none(
+        self, mock_stderr: MagicMock
+    ) -> None:
+        """OllamaConnectionError returns None instead of raising."""
+        result = select_model_interactive(self.client, "qwen3:8b")
+
+        self.assertIsNone(result)
+
+    @patch("local_cli.model_selector.sys.stderr")
+    def test_connection_error_shows_message(
+        self, mock_stderr: MagicMock
+    ) -> None:
+        """OllamaConnectionError writes a helpful error message to stderr."""
+        select_model_interactive(self.client, "qwen3:8b")
+
+        output = "".join(
+            call_arg.args[0] for call_arg in mock_stderr.write.call_args_list
+        )
+        self.assertIn("Could not connect to Ollama", output)
+
+
+# ---------------------------------------------------------------------------
+# Tests for curses TUI (mocked)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectModelCursesBasic(unittest.TestCase):
+    """Tests for _curses_main() curses TUI with mocked stdscr.
+
+    ``_draw_curses_ui`` is patched out because ``curses.ACS_VLINE`` and
+    other curses constants are only initialised after ``curses.initscr()``,
+    which is not available in headless test environments.  This allows us
+    to test the key-handling and navigation logic in isolation.
+    """
+
+    def _make_stdscr(self, max_y: int = 24, max_x: int = 80) -> MagicMock:
+        """Create a mock curses stdscr with configurable dimensions."""
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (max_y, max_x)
+        return stdscr
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_enter_selects_first_model(self, mock_draw: MagicMock) -> None:
+        """Pressing Enter immediately selects the first model."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("\n")
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "qwen3:8b")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_enter_selects_current_model(self, mock_draw: MagicMock) -> None:
+        """Pressing Enter with current_model set selects that model."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("\n")
+
+        result = _curses_main(stdscr, _make_sample_models(), "gemma3:4b")
+
+        # The cursor starts on the current model.
+        self.assertEqual(result, "gemma3:4b")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_escape_cancels(self, mock_draw: MagicMock) -> None:
+        """Pressing Escape returns None (cancel)."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = 27  # Escape
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertIsNone(result)
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_q_cancels(self, mock_draw: MagicMock) -> None:
+        """Pressing 'q' returns None (cancel)."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("q")
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertIsNone(result)
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_uppercase_q_cancels(self, mock_draw: MagicMock) -> None:
+        """Pressing 'Q' returns None (cancel)."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("Q")
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertIsNone(result)
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_down_arrow_then_enter(self, mock_draw: MagicMock) -> None:
+        """Down arrow moves selection down, Enter selects it."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = [curses.KEY_DOWN, ord("\n")]
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "gemma3:4b")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_multiple_down_arrows(self, mock_draw: MagicMock) -> None:
+        """Multiple Down arrows navigate to later models."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = [
+            curses.KEY_DOWN,
+            curses.KEY_DOWN,
+            ord("\n"),
+        ]
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "llama3.2:latest")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_up_arrow_at_top_stays(self, mock_draw: MagicMock) -> None:
+        """Up arrow at top of list does not move past the first item."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = [curses.KEY_UP, ord("\n")]
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "qwen3:8b")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_down_arrow_at_bottom_stays(self, mock_draw: MagicMock) -> None:
+        """Down arrow at bottom of list does not move past the last item."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = [
+            curses.KEY_DOWN,
+            curses.KEY_DOWN,
+            curses.KEY_DOWN,  # Past the end — should stay on last.
+            ord("\n"),
+        ]
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "llama3.2:latest")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_up_down_navigation(self, mock_draw: MagicMock) -> None:
+        """Up and Down arrows navigate correctly in combination."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = [
+            curses.KEY_DOWN,   # -> index 1 (gemma3:4b)
+            curses.KEY_DOWN,   # -> index 2 (llama3.2:latest)
+            curses.KEY_UP,     # -> index 1 (gemma3:4b)
+            ord("\n"),
+        ]
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "gemma3:4b")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_carriage_return_selects(self, mock_draw: MagicMock) -> None:
+        """Carriage return (\\r) also confirms selection."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("\r")
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertEqual(result, "qwen3:8b")
+
+    def test_terminal_too_small_raises(self) -> None:
+        """Terminal smaller than minimum dimensions raises curses.error."""
+        stdscr = self._make_stdscr(max_y=5, max_x=40)
+
+        with self.assertRaises(curses.error):
+            _curses_main(stdscr, _make_sample_models(), "")
+
+    def test_terminal_too_narrow_raises(self) -> None:
+        """Terminal too narrow raises curses.error."""
+        stdscr = self._make_stdscr(max_y=24, max_x=50)
+
+        with self.assertRaises(curses.error):
+            _curses_main(stdscr, _make_sample_models(), "")
+
+    def test_terminal_too_short_raises(self) -> None:
+        """Terminal too short raises curses.error."""
+        stdscr = self._make_stdscr(max_y=8, max_x=80)
+
+        with self.assertRaises(curses.error):
+            _curses_main(stdscr, _make_sample_models(), "")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_keyboard_interrupt_returns_none(
+        self, mock_draw: MagicMock
+    ) -> None:
+        """KeyboardInterrupt during getch returns None."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = KeyboardInterrupt
+
+        result = _curses_main(stdscr, _make_sample_models(), "")
+
+        self.assertIsNone(result)
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_single_model_enter_selects(self, mock_draw: MagicMock) -> None:
+        """Single model in list can be selected with Enter."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("\n")
+        models = [_make_sample_models()[0]]
+
+        result = _curses_main(stdscr, models, "")
+
+        self.assertEqual(result, "qwen3:8b")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_current_model_starts_highlighted(
+        self, mock_draw: MagicMock
+    ) -> None:
+        """Current model is initially highlighted when it exists in the list."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.return_value = ord("\n")
+
+        # Current model is the third one.
+        result = _curses_main(
+            stdscr, _make_sample_models(), "llama3.2:latest"
+        )
+
+        self.assertEqual(result, "llama3.2:latest")
+
+    @patch("local_cli.model_selector._draw_curses_ui")
+    def test_draw_ui_called_each_iteration(
+        self, mock_draw: MagicMock
+    ) -> None:
+        """_draw_curses_ui is called on each key press iteration."""
+        stdscr = self._make_stdscr()
+        stdscr.getch.side_effect = [curses.KEY_DOWN, ord("\n")]
+
+        _curses_main(stdscr, _make_sample_models(), "")
+
+        # Called once for initial draw, once after KEY_DOWN.
+        self.assertEqual(mock_draw.call_count, 2)
+
+
+# ---------------------------------------------------------------------------
+# Tests for /models slash command
+# ---------------------------------------------------------------------------
+
+
+class TestSlashModelsCommand(unittest.TestCase):
+    """Tests for /models slash command in _handle_slash_command()."""
+
+    def _make_ctx(self) -> _ReplContext:
+        """Create a minimal _ReplContext for testing."""
+        config = MagicMock(spec=Config)
+        config.model = "qwen3:8b"
+        client = MagicMock(spec=OllamaClient)
+        tools: list = []
+        messages = [{"role": "system", "content": "test"}]
+        session_manager = MagicMock()
+        return _ReplContext(
+            config=config,
+            client=client,
+            tools=tools,
+            messages=messages,
+            session_manager=session_manager,
+            system_prompt="test",
+        )
+
+    def test_models_in_slash_commands_dict(self) -> None:
+        """/models is registered in _SLASH_COMMANDS."""
+        self.assertIn("/models", _SLASH_COMMANDS)
+
+    @patch(
+        "local_cli.model_selector.select_model_interactive",
+        return_value="gemma3:4b",
+    )
+    def test_models_command_updates_config(
+        self, mock_selector: MagicMock
+    ) -> None:
+        """/models command updates ctx.config.model on selection."""
+        ctx = self._make_ctx()
+
+        result = _handle_slash_command("/models", ctx)
+
+        self.assertTrue(result)
+        self.assertEqual(ctx.config.model, "gemma3:4b")
+        mock_selector.assert_called_once_with(ctx.client, "qwen3:8b")
+
+    @patch(
+        "local_cli.model_selector.select_model_interactive",
+        return_value=None,
+    )
+    def test_models_command_cancel_keeps_model(
+        self, mock_selector: MagicMock
+    ) -> None:
+        """/models command keeps current model when user cancels."""
+        ctx = self._make_ctx()
+
+        result = _handle_slash_command("/models", ctx)
+
+        self.assertTrue(result)
+        self.assertEqual(ctx.config.model, "qwen3:8b")
+
+    @patch(
+        "local_cli.model_selector.select_model_interactive",
+        side_effect=Exception("unexpected error"),
+    )
+    def test_models_command_handles_exception(
+        self, mock_selector: MagicMock
+    ) -> None:
+        """/models command handles unexpected exceptions gracefully."""
+        ctx = self._make_ctx()
+
+        result = _handle_slash_command("/models", ctx)
+
+        # Should continue REPL, not crash.
+        self.assertTrue(result)
+        # Model should be unchanged.
+        self.assertEqual(ctx.config.model, "qwen3:8b")
+
+    def test_models_command_continues_repl(self) -> None:
+        """/models command returns True to continue the REPL."""
+        ctx = self._make_ctx()
+
+        with patch(
+            "local_cli.model_selector.select_model_interactive",
+            return_value=None,
+        ):
+            result = _handle_slash_command("/models", ctx)
+
+        self.assertTrue(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests for --select-model CLI flag
+# ---------------------------------------------------------------------------
+
+
+class TestSelectModelFlag(unittest.TestCase):
+    """Tests for --select-model argparse flag in build_parser()."""
+
+    def test_flag_parsed_true(self) -> None:
+        """--select-model flag sets select_model to True."""
+        parser = build_parser()
+        args = parser.parse_args(["--select-model"])
+
+        self.assertTrue(args.select_model)
+
+    def test_flag_default_none(self) -> None:
+        """Without --select-model, select_model defaults to None."""
+        parser = build_parser()
+        args = parser.parse_args([])
+
+        self.assertIsNone(args.select_model)
+
+    def test_flag_coexists_with_model(self) -> None:
+        """--select-model can be used together with --model."""
+        parser = build_parser()
+        args = parser.parse_args(["--select-model", "--model", "gemma3:4b"])
+
+        self.assertTrue(args.select_model)
+        self.assertEqual(args.model, "gemma3:4b")
+
+    def test_flag_in_help_output(self) -> None:
+        """--select-model appears in the parser's help output."""
+        parser = build_parser()
+        help_text = parser.format_help()
+
+        self.assertIn("--select-model", help_text)
+
+    def test_flag_with_other_flags(self) -> None:
+        """--select-model works alongside --debug and --rag flags."""
+        parser = build_parser()
+        args = parser.parse_args(["--select-model", "--debug", "--rag"])
+
+        self.assertTrue(args.select_model)
+        self.assertTrue(args.debug)
+        self.assertTrue(args.rag)
 
 
 if __name__ == "__main__":
