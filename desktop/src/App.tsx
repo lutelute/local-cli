@@ -40,6 +40,22 @@ export default function App() {
 
   useEffect(() => { scrollToBottom() }, [messages, scrollToBottom])
 
+  // Ctrl+, keyboard shortcut for app update.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+        e.preventDefault()
+        if (!appUpdating) {
+          window.api.sendToPython({ id: nextId(), type: 'do_update' })
+          setAppUpdating(true)
+          setAppUpdateResult('')
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [appUpdating])
+
   const handleTerminalClick = useCallback(() => {
     inputRef.current?.focus()
   }, [])

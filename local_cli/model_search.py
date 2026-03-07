@@ -9,7 +9,6 @@ import html as html_mod
 import re
 import urllib.request
 import urllib.parse
-import json
 from typing import Any
 
 _USER_AGENT = "local-cli/0.2.0"
@@ -35,45 +34,54 @@ def _parse_pull_count(text: str) -> int:
 
 def _extract_models_from_html(page_html: str) -> list[dict[str, Any]]:
     """Extract model entries from Ollama search page HTML."""
-    cards = re.findall(r"<li[^>]*>(.*?)</li>", page_html, re.DOTALL)
+    # Match model cards using the x-test-model attribute on <li> elements.
+    cards = re.findall(
+        r"<li\s+x-test-model[^>]*>(.*?)</li>", page_html, re.DOTALL
+    )
     results: list[dict[str, Any]] = []
 
     for card in cards:
-        # Model name from link.
+        # Model name from /library/<name> link.
         name_m = re.search(r'href="/library/([^"]+)"', card)
         if not name_m:
             continue
         name = name_m.group(1)
 
-        # Description.
+        # Description from <p> tag.
         desc_m = re.search(r"<p[^>]*>([^<]+)</p>", card)
         desc = html_mod.unescape(desc_m.group(1).strip()) if desc_m else ""
 
-        # Extract all spans for tags and pull counts.
-        spans = [
-            s.strip()
-            for s in re.findall(r"<span[^>]*>([^<]*)</span>", card)
-            if s.strip() and s.strip() != "&nbsp;Pulls" and s.strip() != "&nbsp;Tag"
-        ]
-
-        # Pull count: look for number patterns like "922.1K" near "Pulls".
+        # Pull count from x-test-pull-count span.
         pulls = 0
         pull_m = re.search(
-            r'<span[^>]*>([\d,.]+[KMBkmb]?)</span>\s*<span[^>]*>&nbsp;Pulls</span>',
-            card,
+            r"<span\s+x-test-pull-count[^>]*>([^<]+)</span>", card
         )
         if pull_m:
             pulls = _parse_pull_count(pull_m.group(1))
 
-        # Tags: known capability tags.
-        known_tags = {"tools", "vision", "thinking", "embedding", "code", "cloud"}
-        tags = [s for s in spans if s.lower() in known_tags]
-
-        # Available sizes from the card content.
-        size_matches = re.findall(
-            r"(?:^|\s)(\d+\.?\d*[bB])(?:\s|$|,)", card
+        # Tags from x-test-capability spans.
+        tags = re.findall(
+            r"<span\s+x-test-capability[^>]*>([^<]+)</span>", card
         )
-        sizes = list(dict.fromkeys(s.lower() for s in size_matches))
+        tags = [t.strip().lower() for t in tags if t.strip()]
+
+        # Check for cloud-only (cloud badge without x-test-capability).
+        if re.search(r">cloud</span>", card) and "cloud" not in tags:
+            tags.append("cloud")
+
+        # Sizes from x-test-size spans.
+        sizes = re.findall(
+            r"<span\s+x-test-size[^>]*>([^<]+)</span>", card
+        )
+        sizes = [s.strip().lower() for s in sizes if s.strip()]
+
+        # Updated time.
+        updated = ""
+        updated_m = re.search(
+            r"<span\s+x-test-updated[^>]*>([^<]+)</span>", card
+        )
+        if updated_m:
+            updated = updated_m.group(1).strip()
 
         results.append({
             "name": name,
@@ -82,7 +90,8 @@ def _extract_models_from_html(page_html: str) -> list[dict[str, Any]]:
             "pulls_display": _format_pulls(pulls),
             "tags": tags,
             "sizes": sizes,
-            "cloud_only": "cloud" in [t.lower() for t in tags] and not sizes,
+            "updated": updated,
+            "cloud_only": "cloud" in tags and not sizes,
         })
 
     return results
