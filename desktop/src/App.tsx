@@ -3,6 +3,9 @@ import type { Message, AppStatus, PythonMessage, ToolCall, ToolResult } from './
 import { Banner } from './components/Banner'
 import { MessageBlock } from './components/MessageBlock'
 import { ModelPicker, CatalogModel, SearchResult } from './components/ModelPicker'
+import { FileExplorer } from './components/FileExplorer'
+import { ProviderSelector } from './components/ProviderSelector'
+import { FileViewer } from './components/FileViewer'
 
 let reqIdCounter = 0
 function nextId() { return ++reqIdCounter }
@@ -27,6 +30,10 @@ export default function App() {
   const [updateMessage, setUpdateMessage] = useState('')
   const [appUpdating, setAppUpdating] = useState(false)
   const [appUpdateResult, setAppUpdateResult] = useState('')
+  const [explorerOpen, setExplorerOpen] = useState(true)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [hasClaude, setHasClaude] = useState(false)
+  const [rootDir, setRootDir] = useState<string | null>(null)
   const terminalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const activeMessageId = useRef('')
@@ -39,6 +46,13 @@ export default function App() {
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, scrollToBottom])
+
+  // Initialize hasClaude and rootDir on mount.
+  useEffect(() => {
+    if (!window.api) return
+    window.api.hasClaudeAccess().then(setHasClaude)
+    window.api.getHomeDir().then(setRootDir)
+  }, [])
 
   // Ctrl+, keyboard shortcut for app update.
   useEffect(() => {
@@ -55,6 +69,18 @@ export default function App() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [appUpdating])
+
+  // Cmd/Ctrl+B keyboard shortcut to toggle file explorer.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
+        e.preventDefault()
+        setExplorerOpen(prev => !prev)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
 
   const handleTerminalClick = useCallback(() => {
     inputRef.current?.focus()
@@ -78,6 +104,10 @@ export default function App() {
             tools: msg.tools || [],
             ready: true,
           })
+          // Read has_claude from ready message.
+          if ((msg as any).has_claude !== undefined) {
+            setHasClaude(!!(msg as any).has_claude)
+          }
           // Fetch catalog.
           window.api.sendToPython({ id: nextId(), type: 'catalog' })
           break
@@ -141,6 +171,10 @@ export default function App() {
 
         case 'model_changed':
           setStatus(prev => ({ ...prev, model: msg.model || prev.model }))
+          break
+
+        case 'provider_changed':
+          setStatus(prev => ({ ...prev, provider: msg.provider || prev.provider }))
           break
 
         case 'cleared':
@@ -283,6 +317,19 @@ export default function App() {
     window.api.sendToPython({ id: nextId(), type: 'do_update' })
   }, [])
 
+  const handleProviderSwitch = useCallback((provider: string) => {
+    window.api.sendToPython({ id: nextId(), type: 'switch_provider', provider })
+  }, [])
+
+  const handleFileSelect = useCallback((path: string) => {
+    setSelectedFile(path)
+  }, [])
+
+  const handleRootChange = useCallback((path: string) => {
+    setRootDir(path)
+    setSelectedFile(null)
+  }, [])
+
   const handleInput = useCallback(() => {
     const el = inputRef.current
     if (!el) return
@@ -313,7 +360,12 @@ export default function App() {
           </span>
         </div>
         <div className="status-item">
-          <span style={{ color: 'var(--text-muted)' }}>{status.provider}</span>
+          <ProviderSelector
+            currentProvider={status.provider}
+            hasClaude={hasClaude}
+            hasMessages={messages.length > 0}
+            onSwitch={handleProviderSwitch}
+          />
         </div>
         <div className="status-spacer" />
         {pulling && (
@@ -348,39 +400,62 @@ export default function App() {
         </div>
       )}
 
-      <div className="terminal" ref={terminalRef} onClick={handleTerminalClick}>
-        <div className="terminal-inner">
-          {messages.length === 0 ? (
-            <div className="welcome">
-              <Banner version="0.2.0" />
-              <div className="welcome-sub">
-                Local AI coding agent powered by Ollama.
-                Read, write, edit files. Run commands. Search code.
-              </div>
-              <div className="welcome-hint">
-                Type a message below to start. Shift+Enter for newline.
-              </div>
-            </div>
-          ) : (
-            messages.map(msg => <MessageBlock key={msg.id} message={msg} />)
-          )}
-        </div>
-      </div>
+      <div className="app-body">
+        {explorerOpen && (
+          <div className="explorer-pane">
+            <FileExplorer
+              rootDir={rootDir}
+              onFileSelect={handleFileSelect}
+              onRootChange={handleRootChange}
+            />
+          </div>
+        )}
 
-      <div className="input-area">
-        <div className="input-row">
-          <span className="input-marker">&gt;</span>
-          <textarea
-            ref={inputRef}
-            className="input-field"
-            value={inputText}
-            onChange={e => { setInputText(e.target.value); handleInput() }}
-            onKeyDown={handleKeyDown}
-            placeholder={!status.ready ? 'waiting for backend...' : 'ask anything...'}
-            disabled={!status.ready || streaming}
-            rows={1}
-          />
+        <div className="chat-pane">
+          <div className="terminal" ref={terminalRef} onClick={handleTerminalClick}>
+            <div className="terminal-inner">
+              {messages.length === 0 ? (
+                <div className="welcome">
+                  <Banner version="0.2.0" />
+                  <div className="welcome-sub">
+                    Local AI coding agent powered by Ollama.
+                    Read, write, edit files. Run commands. Search code.
+                  </div>
+                  <div className="welcome-hint">
+                    Type a message below to start. Shift+Enter for newline.
+                  </div>
+                </div>
+              ) : (
+                messages.map(msg => <MessageBlock key={msg.id} message={msg} />)
+              )}
+            </div>
+          </div>
+
+          <div className="input-area">
+            <div className="input-row">
+              <span className="input-marker">&gt;</span>
+              <textarea
+                ref={inputRef}
+                className="input-field"
+                value={inputText}
+                onChange={e => { setInputText(e.target.value); handleInput() }}
+                onKeyDown={handleKeyDown}
+                placeholder={!status.ready ? 'waiting for backend...' : 'ask anything...'}
+                disabled={!status.ready || streaming}
+                rows={1}
+              />
+            </div>
+          </div>
         </div>
+
+        {selectedFile && (
+          <div className="viewer-pane">
+            <FileViewer
+              filePath={selectedFile}
+              onClose={() => setSelectedFile(null)}
+            />
+          </div>
+        )}
       </div>
 
       {showPicker && (
