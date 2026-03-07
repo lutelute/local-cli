@@ -47,6 +47,16 @@ Download the latest release for your platform from **[GitHub Releases](https://g
 
 > **Note:** [Ollama](https://ollama.com) must be installed and running on your machine. The desktop app connects to Ollama locally.
 
+#### macOS: "App is damaged" or "unidentified developer" warning
+
+The app is not signed with an Apple Developer certificate. macOS Gatekeeper will block it on first launch. To allow it:
+
+```bash
+xattr -cr /Applications/Local\ CLI.app
+```
+
+Or: **System Settings > Privacy & Security > scroll down > click "Open Anyway"**.
+
 ### CLI (from source)
 
 ```bash
