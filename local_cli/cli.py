@@ -64,6 +64,13 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/models": "Open interactive model selector.",
     "/checkpoint": "Create a git checkpoint (tagged commit).",
     "/rollback [tag]": "Roll back to a checkpoint (latest if no tag given).",
+    "/install <model>": "Pull/install a model from Ollama registry.",
+    "/uninstall <model>": "Delete a model from Ollama.",
+    "/info <model>": "Show model details and capabilities.",
+    "/running": "List models currently loaded in VRAM.",
+    "/provider [name]": "Switch or show the active LLM provider.",
+    "/brain [model]": "Set or show the orchestrator brain model.",
+    "/registry": "Show current model-to-task routing registry.",
 }
 
 
@@ -80,6 +87,8 @@ class _ReplContext:
         rag_engine: Optional RAG engine for context augmentation.
         rag_topk: Number of RAG results per query.
         git_ops: GitOps instance for checkpoint/rollback commands.
+        orchestrator: Optional orchestrator for provider/brain management.
+        model_manager: Optional model manager for install/delete operations.
     """
 
     __slots__ = (
@@ -92,6 +101,8 @@ class _ReplContext:
         "rag_engine",
         "rag_topk",
         "git_ops",
+        "orchestrator",
+        "model_manager",
     )
 
     def __init__(
@@ -104,6 +115,8 @@ class _ReplContext:
         system_prompt: str,
         rag_engine: object | None = None,
         rag_topk: int = 5,
+        orchestrator: object | None = None,
+        model_manager: object | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -114,6 +127,8 @@ class _ReplContext:
         self.rag_engine = rag_engine
         self.rag_topk = rag_topk
         self.git_ops = GitOps()
+        self.orchestrator = orchestrator
+        self.model_manager = model_manager
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
@@ -263,6 +278,184 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print(f"Rollback failed: {exc}")
         return True
 
+    # -- /install <model> ---------------------------------------------------
+    if cmd == "/install":
+        if len(parts) < 2 or not parts[1].strip():
+            print("Usage: /install <model>")
+            return True
+
+        if ctx.model_manager is None:
+            print("Model management not available.")
+            return True
+
+        model_name = parts[1].strip()
+
+        def _print_progress(
+            status: str, completed: int | None, total: int | None
+        ) -> None:
+            if completed is not None and total is not None and total > 0:
+                pct = completed * 100 // total
+                print(f"\r  {status}: {pct}%", end="", flush=True)
+            else:
+                print(f"\r  {status}", end="", flush=True)
+
+        try:
+            print(f"Installing {model_name}...")
+            ctx.model_manager.install_model(
+                model_name, progress_callback=_print_progress
+            )
+            print(f"\nModel '{model_name}' installed successfully.")
+        except ValueError as exc:
+            print(f"Invalid model name: {exc}")
+        except Exception as exc:
+            print(f"\nInstallation failed: {exc}")
+        return True
+
+    # -- /uninstall <model> -------------------------------------------------
+    if cmd == "/uninstall":
+        if len(parts) < 2 or not parts[1].strip():
+            print("Usage: /uninstall <model>")
+            return True
+
+        if ctx.model_manager is None:
+            print("Model management not available.")
+            return True
+
+        model_name = parts[1].strip()
+        try:
+            ctx.model_manager.delete_model(model_name)
+            print(f"Model '{model_name}' deleted.")
+        except ValueError as exc:
+            print(f"Invalid model name: {exc}")
+        except Exception as exc:
+            print(f"Deletion failed: {exc}")
+        return True
+
+    # -- /info <model> ------------------------------------------------------
+    if cmd == "/info":
+        if len(parts) < 2 or not parts[1].strip():
+            print("Usage: /info <model>")
+            return True
+
+        if ctx.model_manager is None:
+            print("Model management not available.")
+            return True
+
+        model_name = parts[1].strip()
+        try:
+            info = ctx.model_manager.get_model_info(model_name)
+            print(f"\nModel: {model_name}")
+            details = info.get("details", {})
+            if isinstance(details, dict):
+                for key, value in details.items():
+                    print(f"  {key}: {value}")
+            capabilities = info.get("capabilities")
+            if capabilities:
+                print(f"  capabilities: {', '.join(capabilities)}")
+            license_text = info.get("license")
+            if license_text:
+                # Show only the first line of the license.
+                first_line = license_text.strip().split("\n")[0]
+                print(f"  license: {first_line}")
+            print()
+        except ValueError as exc:
+            print(f"Invalid model name: {exc}")
+        except Exception as exc:
+            print(f"Failed to get model info: {exc}")
+        return True
+
+    # -- /running -----------------------------------------------------------
+    if cmd == "/running":
+        if ctx.model_manager is None:
+            print("Model management not available.")
+            return True
+
+        try:
+            running = ctx.model_manager.list_running()
+            if not running:
+                print("No models currently loaded in VRAM.")
+            else:
+                print(f"\nModels loaded in VRAM ({len(running)}):")
+                for model_info in running:
+                    name = model_info.get("name", "unknown")
+                    size = model_info.get("size", 0)
+                    size_gb = size / (1024 ** 3) if size else 0
+                    print(f"  {name} ({size_gb:.1f} GB)")
+                print()
+        except Exception as exc:
+            print(f"Failed to list running models: {exc}")
+        return True
+
+    # -- /provider [name] ---------------------------------------------------
+    if cmd == "/provider":
+        if ctx.orchestrator is None:
+            print("Provider management not available.")
+            return True
+
+        if len(parts) < 2 or not parts[1].strip():
+            # Show current provider.
+            current = ctx.orchestrator.get_active_provider_name()
+            print(f"Active provider: {current}")
+            return True
+
+        new_provider = parts[1].strip().lower()
+        try:
+            ctx.orchestrator.switch_provider(new_provider)
+            print(f"Switched to provider: {new_provider}")
+        except ValueError as exc:
+            print(f"Failed to switch provider: {exc}")
+        return True
+
+    # -- /brain [model] -----------------------------------------------------
+    if cmd == "/brain":
+        if ctx.orchestrator is None:
+            print("Orchestrator not available.")
+            return True
+
+        if len(parts) < 2 or not parts[1].strip():
+            # Show current brain model.
+            brain = ctx.orchestrator.get_brain_model()
+            print(f"Brain model: {brain}")
+            return True
+
+        new_brain = parts[1].strip()
+        try:
+            ctx.orchestrator.set_brain_model(new_brain)
+            print(f"Brain model set to: {new_brain}")
+        except ValueError as exc:
+            print(f"Invalid brain model: {exc}")
+        return True
+
+    # -- /registry ----------------------------------------------------------
+    if cmd == "/registry":
+        if ctx.orchestrator is None:
+            print("Orchestrator not available.")
+            return True
+
+        registry = ctx.orchestrator.registry
+        if registry is None:
+            print("No model registry configured.")
+            return True
+
+        routes = registry.list_routes()
+        if not routes:
+            print("Model registry is empty (using defaults).")
+            default_provider, default_model = registry.get_default()
+            print(f"Default: {default_provider}/{default_model}")
+        else:
+            print(f"\nModel Registry:")
+            default_provider, default_model = registry.get_default()
+            print(f"  Default: {default_provider}/{default_model}")
+            for task_type, entries in routes.items():
+                print(f"  {task_type}:")
+                for entry in entries:
+                    provider = entry.get("provider", "?")
+                    model = entry.get("model", "?")
+                    priority = entry.get("priority", "?")
+                    print(f"    [{priority}] {provider}/{model}")
+            print()
+        return True
+
     # -- Unknown command ----------------------------------------------------
     print(f"Unknown command: {stripped}")
     print("Type /help for a list of commands.")
@@ -332,6 +525,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Interactively select a model from available Ollama models at startup.",
     )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        help="Set the LLM provider (ollama or claude).",
+    )
+    parser.add_argument(
+        "--brain-model",
+        type=str,
+        default=None,
+        help="Set the orchestrator brain model.",
+    )
+    parser.add_argument(
+        "--registry-file",
+        type=str,
+        default=None,
+        help="Path to model registry JSON file.",
+    )
     return parser
 
 
@@ -346,6 +557,8 @@ def run_repl(
     tools: list[Tool],
     rag_engine: object | None = None,
     rag_topk: int = 5,
+    orchestrator: object | None = None,
+    model_manager: object | None = None,
 ) -> None:
     """Run the interactive REPL loop.
 
@@ -361,6 +574,10 @@ def run_repl(
         tools: A list of :class:`Tool` instances available to the agent.
         rag_engine: Optional :class:`RAGEngine` for context augmentation.
         rag_topk: Number of RAG results per query.
+        orchestrator: Optional :class:`Orchestrator` for provider/brain
+            management and task routing.
+        model_manager: Optional :class:`ModelManager` for model
+            install/delete operations.
     """
     # Print welcome banner.
     tool_names = ", ".join(t.name for t in tools)
@@ -368,6 +585,8 @@ def run_repl(
     print(f"Tools: {tool_names}")
     if rag_engine is not None:
         print("RAG: enabled")
+    if orchestrator is not None:
+        print(f"Provider: {orchestrator.get_active_provider_name()}")
     print("Type /help for commands, /exit to quit.\n")
 
     # Build system prompt with tool descriptions.
@@ -391,6 +610,8 @@ def run_repl(
         system_prompt=system_prompt,
         rag_engine=rag_engine,
         rag_topk=rag_topk,
+        orchestrator=orchestrator,
+        model_manager=model_manager,
     )
 
     while True:

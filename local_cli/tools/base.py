@@ -2,8 +2,8 @@
 
 Every tool inherits from ``Tool`` and implements the four abstract members:
 ``name``, ``description``, ``parameters``, and ``execute``.  The concrete
-``to_ollama_tool()`` method converts the tool definition into the Ollama /
-OpenAI function-calling format consumed by ``/api/chat``.
+``to_ollama_tool()`` and ``to_claude_tool()`` methods convert the tool
+definition into provider-specific formats consumed by their respective APIs.
 """
 
 from abc import ABC, abstractmethod
@@ -83,4 +83,28 @@ class Tool(ABC):
                 "description": self.description,
                 "parameters": self.parameters,
             },
+        }
+
+    def to_claude_tool(self) -> dict:
+        """Convert to the Anthropic Claude Messages API tool format.
+
+        Returns:
+            A dictionary suitable for the ``tools`` field of a
+            ``/v1/messages`` request::
+
+                {
+                    "name": "...",
+                    "description": "...",
+                    "input_schema": { ... },
+                }
+
+        Note:
+            Claude uses ``input_schema`` where Ollama / OpenAI use
+            ``parameters``, and the Claude format is a flat dictionary
+            rather than being wrapped in ``{"type": "function", ...}``.
+        """
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.parameters,
         }

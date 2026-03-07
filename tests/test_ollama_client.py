@@ -15,6 +15,11 @@ from local_cli.ollama_client import (
     _DEFAULT_TIMEOUT,
     _STREAM_TIMEOUT,
 )
+from local_cli.providers.base import (
+    ProviderConnectionError,
+    ProviderRequestError,
+    ProviderStreamError,
+)
 
 
 class TestOllamaClientInit(unittest.TestCase):
@@ -779,6 +784,515 @@ class TestOllamaClientExceptionChaining(unittest.TestCase):
         with self.assertRaises(OllamaRequestError) as ctx:
             self.client.get_version()
         self.assertIsInstance(ctx.exception.__cause__, json.JSONDecodeError)
+
+
+class TestOllamaExceptionInheritance(unittest.TestCase):
+    """Tests that Ollama exceptions inherit from provider base exceptions."""
+
+    def test_connection_error_is_provider_connection_error(self) -> None:
+        """OllamaConnectionError is a subclass of ProviderConnectionError."""
+        self.assertTrue(issubclass(OllamaConnectionError, ProviderConnectionError))
+        exc = OllamaConnectionError("test")
+        self.assertIsInstance(exc, ProviderConnectionError)
+
+    def test_request_error_is_provider_request_error(self) -> None:
+        """OllamaRequestError is a subclass of ProviderRequestError."""
+        self.assertTrue(issubclass(OllamaRequestError, ProviderRequestError))
+        exc = OllamaRequestError("test")
+        self.assertIsInstance(exc, ProviderRequestError)
+
+    def test_stream_error_is_provider_stream_error(self) -> None:
+        """OllamaStreamError is a subclass of ProviderStreamError."""
+        self.assertTrue(issubclass(OllamaStreamError, ProviderStreamError))
+        exc = OllamaStreamError("test")
+        self.assertIsInstance(exc, ProviderStreamError)
+
+    def test_connection_error_still_catches_as_ollama_type(self) -> None:
+        """OllamaConnectionError is still caught by except OllamaConnectionError."""
+        with self.assertRaises(OllamaConnectionError):
+            raise OllamaConnectionError("test")
+
+    def test_stream_error_caught_by_provider_except(self) -> None:
+        """OllamaStreamError is caught by except ProviderStreamError."""
+        with self.assertRaises(ProviderStreamError):
+            raise OllamaStreamError("test")
+
+    def test_connection_error_caught_by_provider_except(self) -> None:
+        """OllamaConnectionError is caught by except ProviderConnectionError."""
+        with self.assertRaises(ProviderConnectionError):
+            raise OllamaConnectionError("test")
+
+
+class TestOllamaClientShowModel(unittest.TestCase):
+    """Tests for the show_model() method."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_show_model_returns_details(self, mock_urlopen: MagicMock) -> None:
+        """show_model returns model details dict."""
+        model_info = {
+            "modelfile": "FROM qwen3:8b\nSYSTEM You are helpful.",
+            "parameters": "temperature 0.7",
+            "template": "{{ .System }}\n{{ .Prompt }}",
+            "details": {
+                "family": "qwen3",
+                "parameter_size": "8B",
+                "quantization_level": "Q4_K_M",
+            },
+            "capabilities": ["completion", "tools"],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(model_info).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.show_model("qwen3:8b")
+
+        self.assertEqual(result["details"]["family"], "qwen3")
+        self.assertEqual(result["capabilities"], ["completion", "tools"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_show_model_request_format(self, mock_urlopen: MagicMock) -> None:
+        """show_model sends POST to /api/show with model in body."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"details": {}}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.show_model("qwen3:8b")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/show")
+        self.assertEqual(req.method, "POST")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "qwen3:8b")
+
+    def test_show_model_validates_model_name(self) -> None:
+        """show_model rejects invalid model names."""
+        with self.assertRaises(ValueError):
+            self.client.show_model("../../../etc/passwd")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_show_model_without_capabilities(self, mock_urlopen: MagicMock) -> None:
+        """show_model works even when capabilities is absent."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "details": {"family": "custom"},
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.show_model("custom-model")
+        self.assertNotIn("capabilities", result)
+        self.assertEqual(result["details"]["family"], "custom")
+
+
+class TestOllamaClientListRunningModels(unittest.TestCase):
+    """Tests for the list_running_models() method."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_list_running_models_returns_models(self, mock_urlopen: MagicMock) -> None:
+        """list_running_models returns list of running model dicts."""
+        running_data = {
+            "models": [
+                {
+                    "name": "qwen3:8b",
+                    "size": 5_200_000_000,
+                    "size_vram": 5_200_000_000,
+                },
+            ]
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(running_data).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.list_running_models()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "qwen3:8b")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_list_running_models_empty(self, mock_urlopen: MagicMock) -> None:
+        """list_running_models returns empty list when no models loaded."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"models": []}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.list_running_models()
+        self.assertEqual(result, [])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_list_running_models_missing_key(self, mock_urlopen: MagicMock) -> None:
+        """list_running_models returns empty list when 'models' key is absent."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.list_running_models()
+        self.assertEqual(result, [])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_list_running_models_request_format(self, mock_urlopen: MagicMock) -> None:
+        """list_running_models sends GET to /api/ps."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"models": []}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.list_running_models()
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/ps")
+        self.assertEqual(req.method, "GET")
+        self.assertIsNone(req.data)
+
+
+class TestOllamaClientDeleteModel(unittest.TestCase):
+    """Tests for the delete_model() method."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_delete_model_request_format(self, mock_urlopen: MagicMock) -> None:
+        """delete_model sends DELETE to /api/delete with model in JSON body."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.delete_model("phi4-mini")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/delete")
+        self.assertEqual(req.method, "DELETE")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "phi4-mini")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_delete_model_returns_none(self, mock_urlopen: MagicMock) -> None:
+        """delete_model returns None on success (no JSON body)."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.delete_model("phi4-mini")
+        self.assertIsNone(result)
+
+    def test_delete_model_validates_model_name(self) -> None:
+        """delete_model rejects invalid model names."""
+        with self.assertRaises(ValueError):
+            self.client.delete_model("../../../etc/passwd")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_delete_model_connection_error(self, mock_urlopen: MagicMock) -> None:
+        """delete_model raises OllamaConnectionError on connection failure."""
+        mock_urlopen.side_effect = urllib.error.URLError(
+            ConnectionRefusedError("Connection refused")
+        )
+
+        with self.assertRaises(OllamaConnectionError):
+            self.client.delete_model("phi4-mini")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_delete_model_timeout(self, mock_urlopen: MagicMock) -> None:
+        """delete_model raises OllamaConnectionError on timeout."""
+        mock_urlopen.side_effect = socket.timeout("timed out")
+
+        with self.assertRaises(OllamaConnectionError):
+            self.client.delete_model("phi4-mini")
+
+
+class TestOllamaClientCopyModel(unittest.TestCase):
+    """Tests for the copy_model() method."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_copy_model_request_format(self, mock_urlopen: MagicMock) -> None:
+        """copy_model sends POST to /api/copy with source and destination."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.copy_model("qwen3:8b", "my-qwen3:8b")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/copy")
+        self.assertEqual(req.method, "POST")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["source"], "qwen3:8b")
+        self.assertEqual(body["destination"], "my-qwen3:8b")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_copy_model_returns_none(self, mock_urlopen: MagicMock) -> None:
+        """copy_model returns None on success (no JSON body)."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.copy_model("qwen3:8b", "my-qwen3:8b")
+        self.assertIsNone(result)
+
+    def test_copy_model_validates_source_name(self) -> None:
+        """copy_model rejects invalid source model names."""
+        with self.assertRaises(ValueError):
+            self.client.copy_model("../../../etc/passwd", "valid-name")
+
+    def test_copy_model_validates_destination_name(self) -> None:
+        """copy_model rejects invalid destination model names."""
+        with self.assertRaises(ValueError):
+            self.client.copy_model("qwen3:8b", "../../../etc/passwd")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_copy_model_connection_error(self, mock_urlopen: MagicMock) -> None:
+        """copy_model raises OllamaConnectionError on connection failure."""
+        mock_urlopen.side_effect = urllib.error.URLError(
+            ConnectionRefusedError("Connection refused")
+        )
+
+        with self.assertRaises(OllamaConnectionError):
+            self.client.copy_model("qwen3:8b", "my-qwen3:8b")
+
+
+class TestOllamaClientCreateModel(unittest.TestCase):
+    """Tests for the create_model() streaming method."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    def _make_stream_response(self, lines: list[bytes]) -> MagicMock:
+        """Create a mock response that iterates over NDJSON lines."""
+        mock_resp = MagicMock()
+        mock_resp.__iter__ = MagicMock(return_value=iter(lines))
+        mock_resp.close = MagicMock()
+        return mock_resp
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_create_model_with_from_model(self, mock_urlopen: MagicMock) -> None:
+        """create_model with from_model sends 'from' key in payload."""
+        lines = [
+            json.dumps({"status": "using existing layer"}).encode() + b"\n",
+            json.dumps({"status": "success"}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        chunks = list(self.client.create_model("my-model", from_model="qwen3:8b"))
+
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[-1]["status"], "success")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/create")
+        self.assertEqual(req.method, "POST")
+
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "my-model")
+        self.assertEqual(body["from"], "qwen3:8b")
+        self.assertTrue(body["stream"])
+        self.assertNotIn("modelfile", body)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_create_model_with_modelfile(self, mock_urlopen: MagicMock) -> None:
+        """create_model with modelfile sends modelfile content in payload."""
+        lines = [
+            json.dumps({"status": "success"}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        modelfile_content = "FROM qwen3:8b\nSYSTEM You are a coding assistant."
+        chunks = list(self.client.create_model("my-coder", modelfile=modelfile_content))
+
+        self.assertEqual(len(chunks), 1)
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "my-coder")
+        self.assertEqual(body["modelfile"], modelfile_content)
+        self.assertNotIn("from", body)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_create_model_with_both_from_and_modelfile(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """create_model with both from_model and modelfile sends both."""
+        lines = [
+            json.dumps({"status": "success"}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.create_model(
+            "my-model",
+            from_model="qwen3:8b",
+            modelfile="SYSTEM You are helpful.",
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["from"], "qwen3:8b")
+        self.assertEqual(body["modelfile"], "SYSTEM You are helpful.")
+
+    def test_create_model_requires_from_or_modelfile(self) -> None:
+        """create_model raises ValueError when neither from_model nor modelfile given."""
+        with self.assertRaises(ValueError) as ctx:
+            list(self.client.create_model("my-model"))
+        self.assertIn("from_model", str(ctx.exception))
+        self.assertIn("modelfile", str(ctx.exception))
+
+    def test_create_model_validates_name(self) -> None:
+        """create_model rejects invalid model names."""
+        with self.assertRaises(ValueError):
+            list(self.client.create_model(
+                "../../../etc/passwd",
+                from_model="qwen3:8b",
+            ))
+
+    def test_create_model_validates_from_model(self) -> None:
+        """create_model rejects invalid from_model names."""
+        with self.assertRaises(ValueError):
+            list(self.client.create_model(
+                "my-model",
+                from_model="../../../etc/passwd",
+            ))
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_create_model_streams_progress(self, mock_urlopen: MagicMock) -> None:
+        """create_model yields progress update chunks."""
+        lines = [
+            json.dumps({"status": "reading model metadata"}).encode() + b"\n",
+            json.dumps({"status": "creating system layer"}).encode() + b"\n",
+            json.dumps({"status": "writing manifest"}).encode() + b"\n",
+            json.dumps({"status": "success"}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        chunks = list(self.client.create_model("my-model", from_model="qwen3:8b"))
+        self.assertEqual(len(chunks), 4)
+        self.assertEqual(chunks[0]["status"], "reading model metadata")
+        self.assertEqual(chunks[-1]["status"], "success")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_create_model_mid_stream_error(self, mock_urlopen: MagicMock) -> None:
+        """create_model raises OllamaStreamError on mid-stream error."""
+        lines = [
+            json.dumps({"status": "reading model metadata"}).encode() + b"\n",
+            json.dumps({"error": "model not found"}).encode() + b"\n",
+        ]
+        mock_resp = self._make_stream_response(lines)
+        mock_urlopen.return_value = mock_resp
+
+        with self.assertRaises(OllamaStreamError) as ctx:
+            list(self.client.create_model("my-model", from_model="qwen3:8b"))
+        self.assertIn("model not found", str(ctx.exception))
+        mock_resp.close.assert_called_once()
+
+
+class TestOllamaClientRequestNoContent(unittest.TestCase):
+    """Tests for the _request_no_content() helper."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_request_no_content_does_not_parse_json(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """_request_no_content consumes body without attempting JSON parse."""
+        mock_resp = MagicMock()
+        # Even though this is not valid JSON, it should not raise.
+        mock_resp.read.return_value = b"OK"
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        # Should not raise any exception.
+        self.client._request_no_content("POST", "/api/copy", data={"source": "a", "destination": "b"})
+        mock_resp.read.assert_called_once()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_request_no_content_empty_body(self, mock_urlopen: MagicMock) -> None:
+        """_request_no_content handles empty response body."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client._request_no_content("DELETE", "/api/delete", data={"model": "test"})
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_request_no_content_connection_error(self, mock_urlopen: MagicMock) -> None:
+        """_request_no_content raises OllamaConnectionError on connection failure."""
+        mock_urlopen.side_effect = urllib.error.URLError(
+            ConnectionRefusedError("Connection refused")
+        )
+
+        with self.assertRaises(OllamaConnectionError):
+            self.client._request_no_content("DELETE", "/api/delete", data={"model": "x"})
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_request_no_content_timeout(self, mock_urlopen: MagicMock) -> None:
+        """_request_no_content raises OllamaConnectionError on timeout."""
+        mock_urlopen.side_effect = socket.timeout("timed out")
+
+        with self.assertRaises(OllamaConnectionError):
+            self.client._request_no_content("DELETE", "/api/delete", data={"model": "x"})
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_request_no_content_sends_json_body(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """_request_no_content includes Content-Type and JSON body."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client._request_no_content(
+            "DELETE", "/api/delete", data={"model": "phi4-mini"}
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "phi4-mini")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_request_no_content_without_data(self, mock_urlopen: MagicMock) -> None:
+        """_request_no_content works without a JSON body."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client._request_no_content("DELETE", "/api/delete")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertIsNone(req.data)
 
 
 if __name__ == "__main__":

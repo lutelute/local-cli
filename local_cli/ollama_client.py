@@ -11,6 +11,11 @@ import urllib.error
 import urllib.request
 from typing import Any, Generator
 
+from local_cli.providers.base import (
+    ProviderConnectionError,
+    ProviderRequestError,
+    ProviderStreamError,
+)
 from local_cli.security import validate_model_name, validate_ollama_host
 
 # ---------------------------------------------------------------------------
@@ -29,16 +34,28 @@ _STREAM_TIMEOUT = 120
 # ---------------------------------------------------------------------------
 
 
-class OllamaConnectionError(Exception):
-    """Raised when the client cannot connect to Ollama."""
+class OllamaConnectionError(ProviderConnectionError):
+    """Raised when the client cannot connect to Ollama.
+
+    Inherits from :class:`~local_cli.providers.base.ProviderConnectionError`
+    so that ``except ProviderConnectionError`` catches this as well.
+    """
 
 
-class OllamaRequestError(Exception):
-    """Raised when the Ollama API returns an error response."""
+class OllamaRequestError(ProviderRequestError):
+    """Raised when the Ollama API returns an error response.
+
+    Inherits from :class:`~local_cli.providers.base.ProviderRequestError`
+    so that ``except ProviderRequestError`` catches this as well.
+    """
 
 
-class OllamaStreamError(Exception):
-    """Raised when an error is encountered mid-stream."""
+class OllamaStreamError(ProviderStreamError):
+    """Raised when an error is encountered mid-stream.
+
+    Inherits from :class:`~local_cli.providers.base.ProviderStreamError`
+    so that ``except ProviderStreamError`` catches this as well.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +200,50 @@ class OllamaClient:
                 yield chunk
         finally:
             resp.close()
+
+    def _request_no_content(
+        self,
+        method: str,
+        path: str,
+        data: dict[str, Any] | None = None,
+        timeout: int = _DEFAULT_TIMEOUT,
+    ) -> None:
+        """Send an HTTP request that returns no JSON body (HTTP 200 OK).
+
+        Used by endpoints like ``DELETE /api/delete`` and ``POST /api/copy``
+        that return an empty or status-only response.
+
+        Args:
+            method: HTTP method (``DELETE``, ``POST``, etc.).
+            path: API path (e.g. ``/api/delete``).
+            data: Optional JSON body for the request.
+            timeout: Socket timeout in seconds.
+
+        Raises:
+            OllamaConnectionError: On connection failure or timeout.
+            OllamaRequestError: On HTTP error responses.
+        """
+        url = f"{self.base_url}{path}"
+        body = json.dumps(data).encode("utf-8") if data else None
+        headers: dict[str, str] = {}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+
+        req = urllib.request.Request(
+            url, data=body, headers=headers, method=method,
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp.read()  # consume body without parsing
+        except urllib.error.URLError as exc:
+            raise OllamaConnectionError(
+                f"Failed to connect to Ollama at {url}: {exc}"
+            ) from exc
+        except socket.timeout as exc:
+            raise OllamaConnectionError(
+                f"Request to Ollama timed out ({timeout}s): {url}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Public API
@@ -356,4 +417,132 @@ class OllamaClient:
         # for ongoing progress.
         yield from self._stream_request(
             "/api/pull", payload, timeout=_STREAM_TIMEOUT
+        )
+
+    def show_model(self, model: str) -> dict[str, Any]:
+        """Show detailed information about a model.
+
+        Calls ``POST /api/show`` to retrieve model metadata including
+        template, parameters, license, and capabilities.
+
+        Args:
+            model: Model name to inspect (e.g. ``qwen3:8b``).
+
+        Returns:
+            A dict with model details.  Typically includes keys such as
+            ``modelfile``, ``parameters``, ``template``, ``details``,
+            and ``capabilities`` (if the model advertises them).
+
+        Raises:
+            OllamaConnectionError: On connection failure.
+            OllamaRequestError: On error response.
+            ValueError: If the model name is invalid.
+        """
+        self._validate_model(model)
+        payload: dict[str, Any] = {"model": model}
+        return self._request("POST", "/api/show", data=payload)
+
+    def list_running_models(self) -> list[dict[str, Any]]:
+        """List models currently loaded in VRAM.
+
+        Calls ``GET /api/ps`` to retrieve information about models that
+        are currently loaded and ready for inference.
+
+        Returns:
+            A list of running model info dicts from the ``models`` key.
+
+        Raises:
+            OllamaConnectionError: On connection failure.
+            OllamaRequestError: On error response.
+        """
+        result = self._request("GET", "/api/ps")
+        return result.get("models", [])
+
+    def delete_model(self, model: str) -> None:
+        """Delete a model from Ollama.
+
+        Calls ``DELETE /api/delete`` with a JSON body.  The API returns
+        HTTP 200 with no JSON body on success.
+
+        Args:
+            model: Model name to delete (e.g. ``phi4-mini``).
+
+        Raises:
+            OllamaConnectionError: On connection failure.
+            OllamaRequestError: On error response (e.g. model not found).
+            ValueError: If the model name is invalid.
+        """
+        self._validate_model(model)
+        payload: dict[str, Any] = {"model": model}
+        self._request_no_content("DELETE", "/api/delete", data=payload)
+
+    def copy_model(self, source: str, destination: str) -> None:
+        """Copy a model to a new name.
+
+        Calls ``POST /api/copy`` with source and destination names.
+        The API returns HTTP 200 with no JSON body on success.
+
+        Args:
+            source: Source model name.
+            destination: Destination model name.
+
+        Raises:
+            OllamaConnectionError: On connection failure.
+            OllamaRequestError: On error response (e.g. source not found).
+            ValueError: If either model name is invalid.
+        """
+        self._validate_model(source)
+        self._validate_model(destination)
+        payload: dict[str, Any] = {
+            "source": source,
+            "destination": destination,
+        }
+        self._request_no_content("POST", "/api/copy", data=payload)
+
+    def create_model(
+        self,
+        name: str,
+        from_model: str | None = None,
+        modelfile: str | None = None,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Create a new model or variant.
+
+        Calls ``POST /api/create`` with streaming progress updates.  At
+        least one of *from_model* or *modelfile* must be provided.
+
+        Args:
+            name: Name for the new model.
+            from_model: Base model to derive from (Ollama API ``from``
+                parameter).
+            modelfile: Full Modelfile content as a string.
+
+        Yields:
+            Progress update dicts from the streaming response.
+
+        Raises:
+            OllamaConnectionError: On connection failure.
+            OllamaStreamError: If an error is received mid-stream.
+            ValueError: If the model name is invalid, or if neither
+                *from_model* nor *modelfile* is provided.
+        """
+        self._validate_model(name)
+        if from_model is not None:
+            self._validate_model(from_model)
+
+        if from_model is None and modelfile is None:
+            raise ValueError(
+                "At least one of 'from_model' or 'modelfile' must be provided"
+            )
+
+        payload: dict[str, Any] = {
+            "model": name,
+            "stream": True,
+        }
+        if from_model is not None:
+            payload["from"] = from_model
+        if modelfile is not None:
+            payload["modelfile"] = modelfile
+
+        yield from self._stream_request(
+            "/api/create", payload, timeout=_STREAM_TIMEOUT
         )

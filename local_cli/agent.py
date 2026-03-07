@@ -10,6 +10,7 @@ import sys
 from typing import Any, Generator
 
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
+from local_cli.providers.base import ProviderStreamError
 from local_cli.tools.base import Tool
 
 # ---------------------------------------------------------------------------
@@ -75,9 +76,10 @@ def collect_streaming_response(
             }
 
     Raises:
-        OllamaStreamError: If the stream yields an error chunk (already
-            handled by :class:`OllamaClient`, but re-raised here for
-            clarity).
+        ProviderStreamError: If the stream yields an error chunk (already
+            handled by the provider, but re-raised here for clarity).
+            This catches provider-specific subclasses (e.g.
+            :class:`OllamaStreamError`) via inheritance.
         KeyboardInterrupt: If the user presses Ctrl+C during streaming.
             Partial content accumulated so far is returned.
     """
@@ -109,10 +111,11 @@ def collect_streaming_response(
         sys.stdout.write("\n")
         sys.stdout.flush()
 
-    except OllamaStreamError:
-        # Mid-stream error from Ollama.  Print a newline to cleanly
+    except ProviderStreamError:
+        # Mid-stream error from the provider.  Print a newline to cleanly
         # separate any partial output, then re-raise so the caller can
-        # decide how to handle it.
+        # decide how to handle it.  Catches both OllamaStreamError and
+        # other provider-specific stream errors via inheritance.
         sys.stdout.write("\n")
         sys.stdout.flush()
         raise
@@ -352,9 +355,15 @@ def agent_loop(
     tool result is appended so the caller retains the full conversation
     history.
 
+    Tool result messages include a ``tool_call_id`` field when the tool
+    call has an ``id`` (critical for providers like Claude that require
+    ``tool_use_id`` in subsequent tool result messages).
+
     Args:
-        client: An :class:`OllamaClient` instance.
-        model: The Ollama model name to use (e.g. ``"qwen3:8b"``).
+        client: An :class:`OllamaClient` or :class:`LLMProvider` instance.
+            Any object with a ``chat_stream(model, messages, tools=...)``
+            method is accepted.
+        model: The model name to use (e.g. ``"qwen3:8b"``).
         tools: A list of :class:`Tool` instances available for the LLM.
         messages: The conversation history (mutated in place).
         debug: If True, print extra diagnostic information to stderr.
@@ -384,11 +393,17 @@ def agent_loop(
         try:
             stream = client.chat_stream(model, messages, tools=tool_defs)
             full_response = collect_streaming_response(stream)
-        except OllamaStreamError as exc:
-            sys.stderr.write(f"Error from Ollama: {exc}\n")
+        except ProviderStreamError as exc:
+            # Use provider-specific prefix when possible for backward
+            # compatibility (existing tests assert "Error from Ollama").
+            if isinstance(exc, OllamaStreamError):
+                prefix = "Error from Ollama"
+            else:
+                prefix = "Error from provider"
+            sys.stderr.write(f"{prefix}: {exc}\n")
             messages.append({
                 "role": "assistant",
-                "content": f"[Error from Ollama: {exc}]",
+                "content": f"[{prefix}: {exc}]",
             })
             break
         except KeyboardInterrupt:
@@ -423,6 +438,7 @@ def agent_loop(
             func = tc.get("function", {})
             tool_name = func.get("name", "")
             arguments = func.get("arguments", {})
+            tool_call_id = tc.get("id")
 
             tool = tool_map.get(tool_name)
             if tool is None:
@@ -436,11 +452,14 @@ def agent_loop(
                 except KeyboardInterrupt:
                     result = "Error: tool execution interrupted by user."
                     sys.stderr.write(f"  Tool {tool_name} interrupted.\n")
-                    messages.append({
+                    tool_msg: dict[str, Any] = {
                         "role": "tool",
                         "tool_name": tool_name,
                         "content": result,
-                    })
+                    }
+                    if tool_call_id is not None:
+                        tool_msg["tool_call_id"] = tool_call_id
+                    messages.append(tool_msg)
                     raise
 
                 # Show a truncated preview of the result to the user.
@@ -450,11 +469,16 @@ def agent_loop(
                 sys.stderr.write(f"  Result: {preview}\n")
 
             # Append tool result as a 'tool' role message.
-            messages.append({
+            # Include tool_call_id when provided (critical for Claude
+            # provider which requires tool_use_id in tool results).
+            tool_msg = {
                 "role": "tool",
                 "tool_name": tool_name,
                 "content": result,
-            })
+            }
+            if tool_call_id is not None:
+                tool_msg["tool_call_id"] = tool_call_id
+            messages.append(tool_msg)
 
         # ---------------------------------------------------------------
         # 5. Loop back to send tool results to the LLM.

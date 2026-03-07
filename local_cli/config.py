@@ -18,6 +18,9 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "rag_path": ".",
     "rag_topk": 5,
     "rag_model": "all-minilm",
+    "provider": "ollama",
+    "model_registry_file": "",
+    "orchestrator_model": "",
 }
 
 # Mapping of environment variable names to config keys.
@@ -25,6 +28,7 @@ ENV_VAR_MAP: dict[str, str] = {
     "LOCAL_CLI_MODEL": "model",
     "LOCAL_CLI_SIDECAR_MODEL": "sidecar_model",
     "LOCAL_CLI_DEBUG": "debug",
+    "LOCAL_CLI_PROVIDER": "provider",
     "OLLAMA_HOST": "ollama_host",
 }
 
@@ -157,3 +161,6 @@ class Config:
         self.rag_path: str = str(merged["rag_path"])
         self.rag_topk: int = int(merged["rag_topk"])
         self.rag_model: str = str(merged["rag_model"])
+        self.provider: str = str(merged["provider"])
+        self.model_registry_file: str = str(merged["model_registry_file"])
+        self.orchestrator_model: str = str(merged["orchestrator_model"])
