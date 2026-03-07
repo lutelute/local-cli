@@ -127,6 +127,10 @@ class JsonLineServer:
                     self._handle_switch_model(req_id, req.get("model", ""))
                 elif req_type == "clear":
                     self._handle_clear(req_id)
+                elif req_type == "check_update":
+                    self._handle_check_update(req_id)
+                elif req_type == "do_update":
+                    self._handle_do_update(req_id)
                 else:
                     _send({"id": req_id, "type": "error", "message": f"Unknown type: {req_type}"})
             except Exception as exc:
@@ -428,6 +432,31 @@ class JsonLineServer:
             _send({"id": req_id, "type": "search_results", "data": results})
         except Exception as exc:
             _send({"id": req_id, "type": "error", "message": f"Search failed: {exc}"})
+
+    def _handle_check_update(self, req_id: int) -> None:
+        """Check if updates are available."""
+        from local_cli.updater import check_for_updates
+
+        has_updates, message = check_for_updates()
+        _send({
+            "id": req_id,
+            "type": "update_status",
+            "has_updates": has_updates,
+            "message": message,
+        })
+
+    def _handle_do_update(self, req_id: int) -> None:
+        """Perform the update (git pull)."""
+        from local_cli.updater import perform_update
+
+        _send({"id": req_id, "type": "updating"})
+        success, message = perform_update()
+        _send({
+            "id": req_id,
+            "type": "update_done",
+            "success": success,
+            "message": message,
+        })
 
     def _handle_clear(self, req_id: int) -> None:
         self._messages.clear()

@@ -35,6 +35,22 @@ def main() -> None:
     if registry_file_arg is not None:
         config.model_registry_file = registry_file_arg
 
+    # 2c. Handle --update flag.
+    if getattr(args, "update", False):
+        from local_cli.updater import check_for_updates, perform_update
+
+        print("Checking for updates...")
+        has_updates, check_msg = check_for_updates()
+        if not has_updates:
+            print(check_msg)
+            return
+
+        print(check_msg)
+        print("Updating...")
+        success, update_msg = perform_update()
+        print(update_msg)
+        return
+
     # 3. Validate model name.
     if not validate_model_name(config.model):
         sys.stderr.write(

@@ -71,6 +71,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/provider [name]": "Switch or show the active LLM provider.",
     "/brain [model]": "Set or show the orchestrator brain model.",
     "/registry": "Show current model-to-task routing registry.",
+    "/update": "Check for updates and pull the latest version.",
 }
 
 
@@ -456,6 +457,22 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print()
         return True
 
+    # -- /update ------------------------------------------------------------
+    if cmd == "/update":
+        from local_cli.updater import check_for_updates, perform_update
+
+        print("Checking for updates...")
+        has_updates, check_msg = check_for_updates()
+        if not has_updates:
+            print(check_msg)
+            return True
+
+        print(check_msg)
+        print("Updating...")
+        success, update_msg = perform_update()
+        print(update_msg)
+        return True
+
     # -- Unknown command ----------------------------------------------------
     print(f"Unknown command: {stripped}")
     print("Type /help for a list of commands.")
@@ -548,6 +565,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Run in JSON-line server mode (for desktop GUI).",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        default=False,
+        help="Check for updates and pull the latest version.",
     )
     return parser
 

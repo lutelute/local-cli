@@ -11,6 +11,8 @@
 
 Zero external dependencies. Runs entirely on your machine.
 
+[English](README.md) | [日本語](README.ja.md) | [やさしいにほんご](README.easy-ja.md)
+
 ---
 
 ## What is this?
@@ -92,6 +94,7 @@ local-cli/
 │   ├── git_ops.py           # Git checkpoint/rollback
 │   ├── session.py           # Session save/load
 │   ├── security.py          # Input validation
+│   ├── updater.py           # Self-update (git pull)
 │   ├── providers/           # LLM provider abstraction
 │   │   ├── base.py          # Abstract LLMProvider
 │   │   ├── ollama_provider.py
@@ -146,6 +149,7 @@ The agent has access to these tools:
 | `/checkpoint` | Create git checkpoint |
 | `/rollback [tag]` | Rollback to checkpoint |
 | `/save` | Save session |
+| `/update` | Check for updates and pull latest version |
 | `/clear` | Clear conversation |
 | `/exit` | Quit |
 
@@ -179,6 +183,7 @@ Configuration is resolved in order: CLI flags > environment variables > config f
 | `--rag-path` | — | `.` | Directory to index |
 | `--select-model` | — | `false` | Interactive model picker |
 | `--server` | — | `false` | JSON-line server mode |
+| `--update` | — | `false` | Check for and install updates |
 
 ## Recommended Models
 
