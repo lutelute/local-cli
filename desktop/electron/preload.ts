@@ -34,4 +34,9 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('python-exit', handler)
   },
   getPythonStatus: () => ipcRenderer.invoke('get-python-status'),
+  listDir: (dirPath: string) => ipcRenderer.invoke('list-directory', dirPath),
+  readFile: (filePath: string) => ipcRenderer.invoke('read-file', filePath),
+  openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
+  getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
+  hasClaudeAccess: () => ipcRenderer.invoke('has-claude-access'),
 })
