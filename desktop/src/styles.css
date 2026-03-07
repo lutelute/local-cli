@@ -797,3 +797,354 @@ body {
   flex: 1;
   min-width: 0;
 }
+
+/* ===== Three-pane layout ===== */
+.app-body {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.explorer-pane {
+  width: 250px;
+  min-width: 180px;
+  max-width: 400px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  transition: width 0.2s ease, opacity 0.2s ease;
+}
+
+.explorer-pane.collapsed {
+  width: 0;
+  min-width: 0;
+  opacity: 0;
+  border-right: none;
+  pointer-events: none;
+}
+
+.chat-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.viewer-pane {
+  width: 350px;
+  min-width: 200px;
+  max-width: 600px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* ===== File Explorer ===== */
+.explorer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-alt);
+}
+
+.explorer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.explorer-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.explorer-open-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 6px 16px;
+  cursor: pointer;
+}
+
+.explorer-open-btn:hover {
+  background: rgba(88, 166, 255, 0.1);
+  border-color: var(--accent);
+}
+
+.explorer-open-btn-small {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.explorer-open-btn-small:hover {
+  color: var(--text);
+}
+
+.explorer-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 1;
+  padding: 24px 16px;
+}
+
+.explorer-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.explorer-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.explorer-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.explorer-node:hover {
+  background: var(--bg-hover);
+}
+
+.explorer-node.dir {
+  color: var(--text);
+}
+
+.explorer-node.file {
+  color: var(--text-dim);
+}
+
+.explorer-node.symlink {
+  font-style: italic;
+}
+
+.explorer-arrow {
+  flex-shrink: 0;
+  width: 10px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.explorer-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.explorer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.explorer-symlink-badge {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.explorer-loading {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  animation: pulse 1s infinite;
+}
+
+.explorer-error {
+  font-size: 11px;
+  color: var(--red);
+  padding: 2px 8px;
+}
+
+.explorer-empty-dir {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  text-align: center;
+}
+
+.explorer-show-more {
+  font-size: 11px;
+  color: var(--accent);
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.explorer-show-more:hover {
+  text-decoration: underline;
+}
+
+/* ===== Provider Selector ===== */
+.provider-select-container {
+  position: relative;
+  display: inline-flex;
+  -webkit-app-region: no-drag;
+}
+
+.provider-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 200px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.provider-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.provider-option:hover {
+  background: var(--bg-hover);
+}
+
+.provider-option.active {
+  background: rgba(88, 166, 255, 0.05);
+}
+
+.provider-option.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.provider-option.disabled:hover {
+  background: transparent;
+}
+
+.provider-check {
+  width: 16px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.provider-option-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.provider-option-label {
+  color: var(--text);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.provider-option-desc {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.provider-confirm {
+  padding: 12px;
+}
+
+.provider-confirm-text {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.provider-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.provider-confirm-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.provider-confirm-btn.yes {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.provider-confirm-btn.yes:hover {
+  background: rgba(88, 166, 255, 0.1);
+}
+
+.provider-confirm-btn.no {
+  color: var(--text-muted);
+}
+
+.provider-confirm-btn.no:hover {
+  color: var(--text-dim);
+  border-color: var(--text-dim);
+}
+
+/* ===== Responsive: collapse explorer below 768px ===== */
+@media (max-width: 768px) {
+  .explorer-pane {
+    width: 0;
+    min-width: 0;
+    opacity: 0;
+    border-right: none;
+    pointer-events: none;
+  }
+
+  .viewer-pane {
+    width: 250px;
+    min-width: 150px;
+  }
+}
