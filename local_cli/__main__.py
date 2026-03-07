@@ -4,6 +4,7 @@ import sys
 
 from local_cli.cli import build_parser, run_repl
 from local_cli.config import Config
+from local_cli.model_selector import select_model_interactive
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.rag import RAGEngine
 from local_cli.security import validate_model_name
@@ -62,6 +63,17 @@ def main() -> None:
             "Warning: could not connect to Ollama. "
             "Make sure Ollama is running.\n"
         )
+
+    # 5b. Optionally run interactive model selector (--select-model).
+    if args.select_model:
+        selected = select_model_interactive(client, config.model)
+        if selected is not None:
+            if not validate_model_name(selected):
+                sys.stderr.write(
+                    f"Error: invalid model name: {selected!r}\n"
+                )
+                sys.exit(1)
+            config.model = selected
 
     # 6. Get default tools.
     tools = get_default_tools()

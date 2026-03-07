@@ -61,6 +61,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/model <name>": "Switch to a different model.",
     "/status": "Show current model, message count, connection status.",
     "/save": "Save the current session.",
+    "/models": "Open interactive model selector.",
     "/checkpoint": "Create a git checkpoint (tagged commit).",
     "/rollback [tag]": "Roll back to a checkpoint (latest if no tag given).",
 }
@@ -198,6 +199,19 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         print()
         return True
 
+    # -- /models ------------------------------------------------------------
+    if cmd == "/models":
+        try:
+            from local_cli.model_selector import select_model_interactive
+
+            result = select_model_interactive(ctx.client, ctx.config.model)
+            if result is not None:
+                ctx.config.model = result
+                print(f"Switched to model: {result}")
+        except Exception as exc:
+            print(f"Model selection failed: {exc}")
+        return True
+
     # -- /save --------------------------------------------------------------
     if cmd == "/save":
         try:
@@ -311,6 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Embedding model for RAG (default: all-minilm).",
+    )
+    parser.add_argument(
+        "--select-model",
+        action="store_true",
+        default=None,
+        help="Interactively select a model from available Ollama models at startup.",
     )
     return parser
 
