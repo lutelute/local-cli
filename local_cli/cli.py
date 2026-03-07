@@ -312,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Embedding model for RAG (default: all-minilm).",
     )
+    parser.add_argument(
+        "--select-model",
+        action="store_true",
+        default=None,
+        help="Interactively select a model from available Ollama models at startup.",
+    )
     return parser
 
 
