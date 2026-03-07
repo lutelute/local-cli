@@ -33,21 +33,30 @@ Think of it as a local, offline-capable alternative to cloud-based AI coding ass
 - **Desktop GUI** — Electron app with terminal-style UI
 - **Zero dependencies** — Python stdlib only (no pip install needed for the core)
 
-## Quick Start
+## Download
 
-### Requirements
+### Desktop App (pre-built)
 
-- Python 3.10+
-- [Ollama](https://ollama.com) running locally
+Download the latest release for your platform from **[GitHub Releases](https://github.com/lutelute/local-cli/releases)**:
 
-### Install & Run
+| Platform | File |
+|----------|------|
+| macOS | `Local-CLI-x.x.x-universal.dmg` |
+| Windows | `Local-CLI-Setup-x.x.x.exe` |
+| Linux | `Local-CLI-x.x.x.AppImage` or `.deb` |
+
+> **Note:** [Ollama](https://ollama.com) must be installed and running on your machine. The desktop app connects to Ollama locally.
+
+### CLI (from source)
 
 ```bash
-# Clone
+# Requirements: Python 3.10+, Ollama, Git
+
+# 1. Clone
 git clone https://github.com/lutelute/local-cli.git
 cd local-cli
 
-# Run directly
+# 2. Run directly
 python -m local_cli
 
 # Or install as a command
@@ -65,13 +74,21 @@ local-cli --select-model
 local-cli --model qwen3:8b
 ```
 
-### Desktop App (Electron)
+## Update
+
+Updates are checked automatically on startup. When an update is available, you'll see a notification.
 
 ```bash
-cd desktop
-npm install
-npm run dev
+# CLI: update from terminal
+local-cli --update
+
+# CLI: update from within the REPL
+/update
+
+# Desktop: click "Install update" in the notification bar
 ```
+
+Since `pip install -e .` links to the source directory, `git pull` is all that's needed. The `/update` command does this automatically.
 
 ## Architecture
 
@@ -160,15 +177,44 @@ The desktop app provides a terminal-style GUI with:
 - Streaming chat with tool call display
 - Model picker with **Catalog** (curated models by category) and **Discover** (live search from ollama.com)
 - Download, switch, and delete models
+- Auto-update notification bar
 - ASCII art welcome banner
 
 Communication between Electron and Python uses stdin/stdout JSON lines — no network server, no API dependencies.
 
+### Run from Source
+
 ```bash
 cd desktop
 npm install
-npx vite build && npx electron .
+npm run dev          # Development mode (hot reload)
+# or
+npx vite build && npx electron .   # Production preview
 ```
+
+### Build Installers
+
+```bash
+cd desktop
+npm run build        # Build for current platform
+npm run build:mac    # macOS → .dmg + .zip (universal)
+npm run build:win    # Windows → NSIS installer
+npm run build:linux  # Linux → AppImage + .deb
+```
+
+Output goes to `desktop/dist/`. The installer bundles the Python source and Electron runtime.
+
+### Release to GitHub
+
+```bash
+cd desktop
+
+# Build and publish to GitHub Releases (requires GH_TOKEN)
+export GH_TOKEN=your_github_token
+npx electron-builder --publish always
+```
+
+This uploads the installer to a draft release on GitHub. Edit and publish the release from the GitHub UI.
 
 ## Configuration
 

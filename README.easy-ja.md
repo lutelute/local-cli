@@ -20,25 +20,32 @@
 Local CLI は、あなたの パソコンで うごく AI です。
 にほんごで おねがい すると、ファイルを よんだり、かいたり、プログラムを うごかしたり できます。
 
-## つかうのに ひつような もの
+## ダウンロード
 
-- **Python 3.10** いじょう
-- **[Ollama](https://ollama.com)** — AI を うごかす アプリ（むりょう）
+### パソコン アプリ（かんたん）
 
-## はじめかた
+**[GitHub Releases](https://github.com/lutelute/local-cli/releases)** から ダウンロード できます。
 
-### 1. Ollama を いれる
+| パソコン | ファイル |
+|----------|---------|
+| Mac | `Local-CLI-x.x.x-universal.dmg` |
+| Windows | `Local-CLI-Setup-x.x.x.exe` |
+| Linux | `Local-CLI-x.x.x.AppImage` |
 
-[ollama.com](https://ollama.com) から ダウンロード して、きどう します。
+ダウンロード した ファイルを ひらいて、インストール します。
 
-### 2. Local CLI を いれる
+> **だいじ:** [Ollama](https://ollama.com) も いれて ください。AI を うごかすのに ひつよう です。
+
+### コマンドライン（くわしい ひと むけ）
 
 ```bash
-# ダウンロード
+# ひつような もの: Python 3.10 いじょう, Ollama, Git
+
+# 1. ダウンロード
 git clone https://github.com/lutelute/local-cli.git
 cd local-cli
 
-# うごかす
+# 2. うごかす
 python -m local_cli
 ```
 
@@ -96,24 +103,30 @@ local-cli --model qwen3:8b
 
 ## こうしん（アップデート）
 
-さいしんばんに する ほうほう：
+きどう した とき、あたらしい バージョンが あると おしらせ が でます。
+
+**パソコン アプリ:** がめんの うえに あおい バーが でたら「Install update」を おして ください。
+
+**コマンドライン:**
 
 ```bash
 # コマンドで こうしん
 local-cli --update
 
-# または REPL の なかで
+# または つかっている ときに
 /update
 ```
 
-## デスクトップ アプリ
+## デスクトップ アプリを じぶんで ビルド
 
-パソコン アプリ としても つかえます：
+くわしい ひと むけ。ふつうは GitHub Releases から ダウンロード で じゅうぶん です。
 
 ```bash
 cd desktop
 npm install
-npm run dev
+npm run build:mac    # Mac よう
+npm run build:win    # Windows よう
+npm run build:linux  # Linux よう
 ```
 
 ## ライセンス
