@@ -2,7 +2,7 @@
 
 import curses
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from local_cli.cli import _SLASH_COMMANDS, _ReplContext, _handle_slash_command, build_parser
 from local_cli.config import Config
