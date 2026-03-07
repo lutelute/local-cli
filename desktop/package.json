@@ -2,10 +2,20 @@
   "name": "local-cli-desktop",
   "version": "0.2.0",
   "description": "Desktop GUI for local-cli AI coding agent",
+  "author": "lutelute",
+  "license": "MIT",
+  "homepage": "https://github.com/lutelute/local-cli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lutelute/local-cli.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build && electron-builder",
+    "build:mac": "tsc && vite build && electron-builder --mac",
+    "build:win": "tsc && vite build && electron-builder --win",
+    "build:linux": "tsc && vite build && electron-builder --linux",
     "preview": "vite preview",
     "electron:dev": "vite build && electron ."
   },
@@ -27,18 +37,53 @@
   "build": {
     "appId": "com.local-cli.desktop",
     "productName": "Local CLI",
+    "copyright": "Copyright (c) 2025 lutelute",
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "../local_cli",
+        "to": "local_cli",
+        "filter": ["**/*.py"]
+      },
+      {
+        "from": "../pyproject.toml",
+        "to": "pyproject.toml"
+      }
+    ],
     "icon": "build/icon.png",
     "mac": {
-      "target": "dmg",
-      "icon": "build/icon.icns"
+      "target": [
+        { "target": "dmg", "arch": ["universal"] },
+        { "target": "zip", "arch": ["universal"] }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     },
     "linux": {
-      "target": "AppImage",
-      "icon": "build/icon.png"
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.png",
+      "category": "Development"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "lutelute",
+      "repo": "local-cli"
     }
   }
 }

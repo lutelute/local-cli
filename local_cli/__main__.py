@@ -35,7 +35,7 @@ def main() -> None:
     if registry_file_arg is not None:
         config.model_registry_file = registry_file_arg
 
-    # 2c. Handle --update flag.
+    # 2c. Handle --update flag (explicit update).
     if getattr(args, "update", False):
         from local_cli.updater import check_for_updates, perform_update
 
@@ -50,6 +50,23 @@ def main() -> None:
         success, update_msg = perform_update()
         print(update_msg)
         return
+
+    # 2d. Background auto-update check on startup.
+    _auto_update_check_result: dict | None = None
+
+    def _bg_update_check() -> None:
+        nonlocal _auto_update_check_result
+        try:
+            from local_cli.updater import check_for_updates
+            has_updates, message = check_for_updates()
+            if has_updates:
+                _auto_update_check_result = {"message": message}
+        except Exception:
+            pass
+
+    import threading
+    _update_thread = threading.Thread(target=_bg_update_check, daemon=True)
+    _update_thread.start()
 
     # 3. Validate model name.
     if not validate_model_name(config.model):
@@ -194,7 +211,14 @@ def main() -> None:
         run_server()
         return
 
-    # 13. Start the interactive REPL.
+    # 13. Show update notice if available (non-blocking check finished).
+    _update_thread.join(timeout=0.5)  # Wait briefly for result.
+    if _auto_update_check_result is not None:
+        sys.stderr.write(
+            f"\n  Update available! Run /update or local-cli --update to update.\n\n"
+        )
+
+    # 14. Start the interactive REPL.
     run_repl(
         config,
         client,

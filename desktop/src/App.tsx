@@ -23,6 +23,10 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [updating, setUpdating] = useState(false)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [updateMessage, setUpdateMessage] = useState('')
+  const [appUpdating, setAppUpdating] = useState(false)
+  const [appUpdateResult, setAppUpdateResult] = useState('')
   const terminalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const activeMessageId = useRef('')
@@ -186,6 +190,27 @@ export default function App() {
             }))
           }
           break
+
+        case 'update_available':
+          setUpdateAvailable(true)
+          setUpdateMessage(msg.message || 'Update available')
+          break
+
+        case 'updating':
+          setAppUpdating(true)
+          break
+
+        case 'update_done': {
+          setAppUpdating(false)
+          const d = msg as any
+          if (d.success) {
+            setUpdateAvailable(false)
+            setAppUpdateResult(d.message || 'Updated successfully. Restart to apply.')
+          } else {
+            setAppUpdateResult(d.message || 'Update failed.')
+          }
+          break
+        }
       }
     })
 
@@ -236,6 +261,12 @@ export default function App() {
     window.api.sendToPython({ id: nextId(), type: 'clear' })
   }, [])
 
+  const handleAppUpdate = useCallback(() => {
+    setAppUpdating(true)
+    setAppUpdateResult('')
+    window.api.sendToPython({ id: nextId(), type: 'do_update' })
+  }, [])
+
   const handleInput = useCallback(() => {
     const el = inputRef.current
     if (!el) return
@@ -281,6 +312,25 @@ export default function App() {
           <button className="status-btn" onClick={handleClear}>clear</button>
         )}
       </div>
+
+      {(updateAvailable || appUpdateResult) && (
+        <div className="update-bar">
+          {appUpdating ? (
+            <span className="update-bar-text">Updating...</span>
+          ) : appUpdateResult ? (
+            <>
+              <span className="update-bar-text">{appUpdateResult}</span>
+              <button className="update-bar-dismiss" onClick={() => setAppUpdateResult('')}>dismiss</button>
+            </>
+          ) : (
+            <>
+              <span className="update-bar-text">{updateMessage}</span>
+              <button className="update-bar-btn" onClick={handleAppUpdate}>Install update</button>
+              <button className="update-bar-dismiss" onClick={() => setUpdateAvailable(false)}>later</button>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="terminal" ref={terminalRef} onClick={handleTerminalClick}>
         <div className="terminal-inner">

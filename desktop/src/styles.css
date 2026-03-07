@@ -123,6 +123,55 @@ body {
   color: var(--text);
 }
 
+/* Update bar */
+.update-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  background: rgba(88, 166, 255, 0.08);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.update-bar-text {
+  color: var(--accent);
+  flex: 1;
+}
+
+.update-bar-btn {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: var(--bg);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.update-bar-btn:hover {
+  opacity: 0.85;
+}
+
+.update-bar-dismiss {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.update-bar-dismiss:hover {
+  color: var(--text-dim);
+  border-color: var(--text-dim);
+}
+
 /* Terminal output */
 .terminal {
   flex: 1;

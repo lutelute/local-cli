@@ -85,6 +85,19 @@ class JsonLineServer:
             "provider": getattr(self._config, "provider", "ollama"),
         })
 
+        # Background auto-update check.
+        def _bg_update_check() -> None:
+            try:
+                from local_cli.updater import check_for_updates
+                has_updates, message = check_for_updates()
+                if has_updates:
+                    _send({"type": "update_available", "message": message})
+            except Exception:
+                pass
+
+        update_thread = threading.Thread(target=_bg_update_check, daemon=True)
+        update_thread.start()
+
         for line in sys.stdin:
             line = line.strip()
             if not line:
