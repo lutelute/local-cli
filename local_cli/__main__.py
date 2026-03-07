@@ -35,7 +35,13 @@ def main() -> None:
     if registry_file_arg is not None:
         config.model_registry_file = registry_file_arg
 
-    # 2c. Handle --update flag (explicit update).
+    # 2c. Server mode — skip all heavy initialization, go straight to server.
+    if getattr(args, "server", False):
+        from local_cli.server import run_server
+        run_server()
+        return
+
+    # 2d. Handle --update flag (explicit update).
     if getattr(args, "update", False):
         from local_cli.updater import check_for_updates, perform_update
 
@@ -205,13 +211,7 @@ def main() -> None:
     else:
         rag_topk = 5
 
-    # 12. Server mode (for desktop GUI).
-    if getattr(args, "server", False):
-        from local_cli.server import run_server
-        run_server()
-        return
-
-    # 13. Show update notice if available (non-blocking check finished).
+    # 12. Show update notice if available (non-blocking check finished).
     _update_thread.join(timeout=0.5)  # Wait briefly for result.
     if _auto_update_check_result is not None:
         sys.stderr.write(

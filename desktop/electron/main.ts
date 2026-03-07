@@ -11,9 +11,22 @@ function findPython(): string {
   return process.platform === 'win32' ? 'python' : 'python3'
 }
 
+function findProjectRoot(): string {
+  // In dev mode: __dirname is desktop/dist-electron, so ../../ is project root.
+  // In packaged app: try extraResources path first, fall back to dev path.
+  const devRoot = path.resolve(__dirname, '..', '..')
+  const resourcesRoot = process.resourcesPath
+    ? path.resolve(process.resourcesPath)
+    : devRoot
+  return devRoot
+}
+
 function startPythonServer() {
   const pythonCmd = findPython()
-  const projectRoot = path.resolve(__dirname, '..', '..')
+  const projectRoot = findProjectRoot()
+
+  console.log(`Starting Python server: ${pythonCmd} -m local_cli --server`)
+  console.log(`Working directory: ${projectRoot}`)
 
   pythonProcess = spawn(pythonCmd, ['-m', 'local_cli', '--server'], {
     cwd: projectRoot,
