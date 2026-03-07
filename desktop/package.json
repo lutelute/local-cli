@@ -56,8 +56,8 @@
     "icon": "build/icon.png",
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["universal"] },
-        { "target": "zip", "arch": ["universal"] }
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
       ],
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools"
