@@ -25,6 +25,7 @@ Response (newline-delimited JSON on stdout)::
 """
 
 import json
+import os
 import sys
 import threading
 from typing import Any
@@ -34,6 +35,7 @@ from local_cli.model_catalog import get_merged_catalog, update_catalog
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderStreamError
+from local_cli.providers.claude_provider import ClaudeProvider
 from local_cli.providers.ollama_provider import OllamaProvider
 from local_cli.security import validate_model_name
 from local_cli.tools import get_default_tools
@@ -84,11 +86,13 @@ class JsonLineServer:
         """Main loop: read stdin lines, dispatch, write responses."""
         # Send ready signal.
         tool_names = [t.name for t in self._tools]
+        has_claude = bool(os.environ.get("ANTHROPIC_API_KEY"))
         _send({
             "type": "ready",
             "model": self._config.model,
             "tools": tool_names,
             "provider": getattr(self._config, "provider", "ollama"),
+            "has_claude": has_claude,
         })
 
         # Background auto-update check.
@@ -146,6 +150,8 @@ class JsonLineServer:
                     self._handle_switch_model(req_id, req.get("model", ""))
                 elif req_type == "clear":
                     self._handle_clear(req_id)
+                elif req_type == "switch_provider":
+                    self._handle_switch_provider(req_id, req.get("provider", ""))
                 elif req_type == "check_update":
                     self._handle_check_update(req_id)
                 elif req_type == "do_update":
@@ -315,6 +321,35 @@ class JsonLineServer:
 
         self._config.model = model
         _send({"id": req_id, "type": "model_changed", "model": model})
+
+    def _handle_switch_provider(self, req_id: int, provider: str) -> None:
+        """Switch the active LLM provider (ollama or claude)."""
+        if provider not in ("ollama", "claude"):
+            _send({
+                "id": req_id,
+                "type": "error",
+                "message": f"Unknown provider: {provider}. Must be 'ollama' or 'claude'.",
+            })
+            return
+
+        if provider == "claude":
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                _send({
+                    "id": req_id,
+                    "type": "error",
+                    "message": "ANTHROPIC_API_KEY environment variable is not set.",
+                })
+                return
+            self._provider = ClaudeProvider(api_key=api_key)
+        else:
+            self._provider = OllamaProvider(client=self._client)
+
+        self._tool_defs = self._provider.format_tools(self._tools)
+        self._messages.clear()
+        self._messages.append({"role": "system", "content": self._system_prompt})
+
+        _send({"id": req_id, "type": "provider_changed", "provider": provider})
 
     def _handle_catalog(self, req_id: int) -> None:
         """Return merged model catalog (built-in + cache) + installed status."""
