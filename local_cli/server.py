@@ -33,6 +33,8 @@ from local_cli.config import Config
 from local_cli.model_catalog import get_merged_catalog, update_catalog
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
+from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderStreamError
+from local_cli.providers.ollama_provider import OllamaProvider
 from local_cli.security import validate_model_name
 from local_cli.tools import get_default_tools
 from local_cli.tools.base import Tool
@@ -66,12 +68,16 @@ class JsonLineServer:
         except ValueError:
             self._client = OllamaClient()
 
+        # Wrap the client in a provider for normalized chat operations.
+        # Keep self._client for Ollama-specific ops (pull, delete, catalog, search).
+        self._provider: LLMProvider = OllamaProvider(client=self._client)
+
         self._tools = get_default_tools()
         self._system_prompt = _build_system_prompt(self._tools)
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
         ]
-        self._tool_defs = [t.to_ollama_tool() for t in self._tools]
+        self._tool_defs = self._provider.format_tools(self._tools)
         self._tool_map = {t.name: t for t in self._tools}
 
     def run(self) -> None:
@@ -163,7 +169,7 @@ class JsonLineServer:
             tool_calls = []
 
             try:
-                for chunk in self._client.chat_stream(
+                for chunk in self._provider.chat_stream(
                     model=self._config.model,
                     messages=self._messages,
                     tools=self._tool_defs,
@@ -180,8 +186,11 @@ class JsonLineServer:
                     if chunk.get("done"):
                         break
 
-            except OllamaConnectionError as exc:
-                _send({"id": req_id, "type": "error", "message": f"Ollama connection error: {exc}"})
+            except ProviderConnectionError as exc:
+                _send({"id": req_id, "type": "error", "message": f"Connection error: {exc}"})
+                return
+            except ProviderStreamError as exc:
+                _send({"id": req_id, "type": "error", "message": f"Stream error: {exc}"})
                 return
             except Exception as exc:
                 _send({"id": req_id, "type": "error", "message": str(exc)})
@@ -203,6 +212,7 @@ class JsonLineServer:
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
                 tool_args = func.get("arguments", {})
+                tool_call_id = tc.get("id")
 
                 _send({
                     "id": req_id,
@@ -227,10 +237,15 @@ class JsonLineServer:
                     "output": result if len(result) <= 10000 else result[:10000] + "\n...(truncated)",
                 })
 
-                self._messages.append({
+                # Include tool_call_id in the tool result message
+                # (critical for Claude compatibility).
+                tool_msg: dict[str, Any] = {
                     "role": "tool",
                     "content": result,
-                })
+                }
+                if tool_call_id:
+                    tool_msg["tool_call_id"] = tool_call_id
+                self._messages.append(tool_msg)
 
             # Loop back to let LLM process tool results.
 
@@ -282,7 +297,7 @@ class JsonLineServer:
             "type": "status",
             "data": {
                 "model": self._config.model,
-                "provider": getattr(self._config, "provider", "ollama"),
+                "provider": self._provider.name,
                 "messages": user_msgs,
                 "connected": connected,
                 "ollama_version": version,
