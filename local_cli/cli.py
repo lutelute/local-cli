@@ -9,11 +9,20 @@ import readline  # noqa: F401 — imported for side-effect (line editing/history
 import sys
 
 from local_cli import __version__
-from local_cli.agent import agent_loop
+from local_cli.agent import (
+    _is_complex_request,
+    agent_loop,
+    build_plan_context,
+    ideation_loop,
+)
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
+from local_cli.ideation import IdeationEngine
+from local_cli.knowledge import KnowledgeError, KnowledgeNotFoundError, KnowledgeStore
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
+from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.session import SessionManager
+from local_cli.skills import SkillsLoader
 from local_cli.tools.base import Tool
 
 # ---------------------------------------------------------------------------
@@ -91,6 +100,10 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/brain [model]": "Set or show the orchestrator brain model.",
     "/registry": "Show current model-to-task routing registry.",
     "/update": "Check for updates and pull the latest version.",
+    "/plan": "Show, create, or update plans.",
+    "/ideate": "Enter ideation (brainstorming) mode.",
+    "/knowledge": "Save, load, or list knowledge items.",
+    "/skills": "List or show discovered skills.",
 }
 
 
@@ -109,6 +122,13 @@ class _ReplContext:
         git_ops: GitOps instance for checkpoint/rollback commands.
         orchestrator: Optional orchestrator for provider/brain management.
         model_manager: Optional model manager for install/delete operations.
+        plan_manager: Optional plan manager for plan CRUD operations.
+        knowledge_store: Optional knowledge store for persistent knowledge.
+        skills_loader: Optional skills loader for auto-discovered skills.
+        ideation_engine: Optional ideation engine for brainstorming mode.
+        active_plan_id: ID of the currently active plan (or None).
+        current_mode: Current REPL mode ('agent' or 'ideate').
+        ideation_messages: Separate message history for ideation mode.
     """
 
     __slots__ = (
@@ -123,6 +143,13 @@ class _ReplContext:
         "git_ops",
         "orchestrator",
         "model_manager",
+        "plan_manager",
+        "knowledge_store",
+        "skills_loader",
+        "ideation_engine",
+        "active_plan_id",
+        "current_mode",
+        "ideation_messages",
     )
 
     def __init__(
@@ -137,6 +164,10 @@ class _ReplContext:
         rag_topk: int = 5,
         orchestrator: object | None = None,
         model_manager: object | None = None,
+        plan_manager: PlanManager | None = None,
+        knowledge_store: KnowledgeStore | None = None,
+        skills_loader: SkillsLoader | None = None,
+        ideation_engine: IdeationEngine | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -149,6 +180,13 @@ class _ReplContext:
         self.git_ops = GitOps()
         self.orchestrator = orchestrator
         self.model_manager = model_manager
+        self.plan_manager = plan_manager
+        self.knowledge_store = knowledge_store
+        self.skills_loader = skills_loader
+        self.ideation_engine = ideation_engine
+        self.active_plan_id: str | None = None
+        self.current_mode: str = "agent"
+        self.ideation_messages: list[dict] = []
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
@@ -222,6 +260,11 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         )
         print(f"\nModel: {ctx.config.model}")
         print(f"Messages: {user_msg_count}")
+        print(f"Mode: {ctx.current_mode}")
+
+        # Show active plan if any.
+        if ctx.active_plan_id is not None:
+            print(f"Active plan: {ctx.active_plan_id}")
 
         # Check Ollama connection status.
         try:
@@ -492,9 +535,519 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         print(update_msg)
         return True
 
+    # -- /plan [subcommand] -------------------------------------------------
+    if cmd == "/plan":
+        return _handle_plan_command(parts, ctx)
+
+    # -- /ideate [subcommand] -----------------------------------------------
+    if cmd == "/ideate":
+        return _handle_ideate_command(parts, ctx)
+
+    # -- /knowledge [subcommand] --------------------------------------------
+    if cmd == "/knowledge":
+        return _handle_knowledge_command(parts, ctx)
+
+    # -- /skills [subcommand] -----------------------------------------------
+    if cmd == "/skills":
+        return _handle_skills_command(parts, ctx)
+
     # -- Unknown command ----------------------------------------------------
     print(f"Unknown command: {stripped}")
     print("Type /help for a list of commands.")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Plan command handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_plan_command(parts: list[str], ctx: _ReplContext) -> bool:
+    """Handle /plan slash command and its subcommands.
+
+    Subcommands:
+        - ``/plan`` or ``/plan list`` — list all plans.
+        - ``/plan create <title>`` — create a new plan.
+        - ``/plan show <id>`` — show a plan's details.
+        - ``/plan activate <id>`` — set a plan as the active plan.
+        - ``/plan update <id> <step> done|undone`` — mark a step.
+        - ``/plan review <id>`` — request an LLM review of a plan.
+        - ``/plan abandon <id>`` — abandon a plan.
+
+    Args:
+        parts: The split command parts (``["/plan", ...]``).
+        ctx: The REPL context containing shared state.
+
+    Returns:
+        True to continue the REPL.
+    """
+    if ctx.plan_manager is None:
+        print("Plan management not available.")
+        return True
+
+    # No subcommand or "list" → list plans.
+    if len(parts) < 2 or not parts[1].strip():
+        return _plan_list(ctx)
+
+    sub_parts = parts[1].strip().split(maxsplit=1)
+    subcmd = sub_parts[0].lower()
+    sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+    if subcmd == "list":
+        return _plan_list(ctx)
+
+    if subcmd == "create":
+        if not sub_arg:
+            print("Usage: /plan create <title>")
+            return True
+        try:
+            plan = ctx.plan_manager.create_plan(
+                title=sub_arg,
+                model=ctx.config.model,
+            )
+            print(f"Plan {plan.plan_id} created: {plan.title}")
+        except PlanError as exc:
+            print(f"Failed to create plan: {exc}")
+        return True
+
+    if subcmd == "show":
+        if not sub_arg:
+            print("Usage: /plan show <id>")
+            return True
+        try:
+            plan = ctx.plan_manager.show_plan(sub_arg)
+            _print_plan(plan)
+        except PlanNotFoundError:
+            print(f"Plan '{sub_arg}' not found.")
+        except PlanError as exc:
+            print(f"Failed to show plan: {exc}")
+        return True
+
+    if subcmd == "activate":
+        if not sub_arg:
+            print("Usage: /plan activate <id>")
+            return True
+        try:
+            plan = ctx.plan_manager.activate_plan(sub_arg)
+            ctx.active_plan_id = plan.plan_id
+            print(f"Plan {plan.plan_id} activated: {plan.title}")
+        except PlanNotFoundError:
+            print(f"Plan '{sub_arg}' not found.")
+        except PlanError as exc:
+            print(f"Failed to activate plan: {exc}")
+        return True
+
+    if subcmd == "update":
+        # Expected format: /plan update <id> <step> done|undone
+        update_parts = sub_arg.split(maxsplit=2)
+        if len(update_parts) < 3:
+            print("Usage: /plan update <id> <step> done|undone")
+            return True
+        plan_id = update_parts[0]
+        try:
+            step_num = int(update_parts[1])
+        except ValueError:
+            print("Step number must be an integer.")
+            return True
+        done_str = update_parts[2].lower()
+        if done_str not in ("done", "undone"):
+            print("Status must be 'done' or 'undone'.")
+            return True
+        done = done_str == "done"
+        try:
+            plan = ctx.plan_manager.update_step(plan_id, step_num, done)
+            mark = "done" if done else "undone"
+            print(f"Step {step_num} marked as {mark}.")
+            if plan.status == "complete":
+                print(f"Plan {plan.plan_id} is now complete!")
+        except PlanNotFoundError:
+            print(f"Plan '{plan_id}' not found.")
+        except PlanError as exc:
+            print(f"Failed to update step: {exc}")
+        return True
+
+    if subcmd == "review":
+        if not sub_arg:
+            print("Usage: /plan review <id>")
+            return True
+        try:
+            content = ctx.plan_manager.get_plan_content(sub_arg)
+        except PlanNotFoundError:
+            print(f"Plan '{sub_arg}' not found.")
+            return True
+        except PlanError as exc:
+            print(f"Failed to read plan: {exc}")
+            return True
+
+        # Send plan content to LLM for review via ideation-style loop.
+        review_prompt = (
+            "Please review and critique the following plan. "
+            "Identify risks, suggest improvements, and assess feasibility.\n\n"
+            f"{content}"
+        )
+        review_messages: list[dict] = [
+            {"role": "system", "content": ctx.system_prompt},
+            {"role": "user", "content": review_prompt},
+        ]
+        try:
+            ideation_loop(
+                client=ctx.client,
+                model=ctx.config.model,
+                messages=review_messages,
+                think=True,
+            )
+        except KeyboardInterrupt:
+            print("\nReview interrupted.")
+        return True
+
+    if subcmd == "abandon":
+        if not sub_arg:
+            print("Usage: /plan abandon <id>")
+            return True
+        try:
+            plan = ctx.plan_manager.abandon_plan(sub_arg)
+            print(f"Plan {plan.plan_id} abandoned.")
+            if ctx.active_plan_id == plan.plan_id:
+                ctx.active_plan_id = None
+        except PlanNotFoundError:
+            print(f"Plan '{sub_arg}' not found.")
+        except PlanError as exc:
+            print(f"Failed to abandon plan: {exc}")
+        return True
+
+    print(f"Unknown plan subcommand: {subcmd}")
+    print("Usage: /plan [list|create|show|activate|update|review|abandon]")
+    return True
+
+
+def _plan_list(ctx: _ReplContext) -> bool:
+    """List all plans with their status.
+
+    Args:
+        ctx: The REPL context.
+
+    Returns:
+        True to continue the REPL.
+    """
+    try:
+        plans = ctx.plan_manager.list_plans()
+    except PlanError as exc:
+        print(f"Failed to list plans: {exc}")
+        return True
+
+    if not plans:
+        print("No plans found.")
+        return True
+
+    print("\nPlans:")
+    for plan in plans:
+        active_marker = " *" if plan.plan_id == ctx.active_plan_id else ""
+        done_count = sum(1 for done, _ in plan.steps if done)
+        total = len(plan.steps)
+        progress = f"[{done_count}/{total}]" if total > 0 else ""
+        print(
+            f"  {plan.plan_id}  {plan.status:<10}  "
+            f"{plan.title}  {progress}{active_marker}"
+        )
+    print()
+    return True
+
+
+def _print_plan(plan: "object") -> None:
+    """Pretty-print a plan to stdout.
+
+    Args:
+        plan: A :class:`Plan` instance.
+    """
+    print(f"\n# Plan {plan.plan_id}: {plan.title}")
+    print(f"  Status:  {plan.status}")
+    print(f"  Created: {plan.created}")
+    if plan.model:
+        print(f"  Model:   {plan.model}")
+    if plan.description:
+        print(f"\n  {plan.description}")
+    if plan.steps:
+        print("\n  Steps:")
+        for i, (done, text) in enumerate(plan.steps, 1):
+            checkbox = "[x]" if done else "[ ]"
+            print(f"    {i}. {checkbox} {text}")
+    if plan.notes:
+        print(f"\n  Notes: {plan.notes}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Ideate command handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_ideate_command(parts: list[str], ctx: _ReplContext) -> bool:
+    """Handle /ideate slash command and its subcommands.
+
+    Subcommands:
+        - ``/ideate`` — enter ideation (brainstorming) mode.
+        - ``/ideate exit`` — return to normal agent mode.
+        - ``/ideate clear`` — clear ideation history.
+        - ``/ideate once <prompt>`` — single-shot ideation via /api/generate.
+
+    Args:
+        parts: The split command parts (``["/ideate", ...]``).
+        ctx: The REPL context containing shared state.
+
+    Returns:
+        True to continue the REPL.
+    """
+    if ctx.ideation_engine is None:
+        print("Ideation engine not available.")
+        return True
+
+    # No subcommand → enter ideation mode.
+    if len(parts) < 2 or not parts[1].strip():
+        ctx.current_mode = "ideate"
+        if not ctx.ideation_engine.has_session:
+            ctx.ideation_engine.start_session()
+        print("Entered ideation mode. Type /ideate exit to return.")
+        return True
+
+    sub_parts = parts[1].strip().split(maxsplit=1)
+    subcmd = sub_parts[0].lower()
+    sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+    if subcmd == "exit":
+        ctx.current_mode = "agent"
+        print("Returned to agent mode.")
+        return True
+
+    if subcmd == "clear":
+        ctx.ideation_engine.clear_history()
+        print("Ideation history cleared.")
+        return True
+
+    if subcmd == "once":
+        if not sub_arg:
+            print("Usage: /ideate once <prompt>")
+            return True
+        try:
+            ctx.ideation_engine.single_shot(
+                prompt=sub_arg,
+                model=ctx.config.model,
+            )
+        except Exception as exc:
+            print(f"Ideation failed: {exc}")
+        return True
+
+    print(f"Unknown ideate subcommand: {subcmd}")
+    print("Usage: /ideate [exit|clear|once <prompt>]")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Knowledge command handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_knowledge_command(parts: list[str], ctx: _ReplContext) -> bool:
+    """Handle /knowledge slash command and its subcommands.
+
+    Subcommands:
+        - ``/knowledge`` or ``/knowledge list`` — list all knowledge items.
+        - ``/knowledge save <name>`` — save a knowledge item.
+        - ``/knowledge load <name>`` — load a knowledge item into context.
+        - ``/knowledge delete <name>`` — delete a knowledge item.
+
+    Args:
+        parts: The split command parts (``["/knowledge", ...]``).
+        ctx: The REPL context containing shared state.
+
+    Returns:
+        True to continue the REPL.
+    """
+    if ctx.knowledge_store is None:
+        print("Knowledge store not available.")
+        return True
+
+    # No subcommand or "list" → list items.
+    if len(parts) < 2 or not parts[1].strip():
+        return _knowledge_list(ctx)
+
+    sub_parts = parts[1].strip().split(maxsplit=1)
+    subcmd = sub_parts[0].lower()
+    sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+    if subcmd == "list":
+        return _knowledge_list(ctx)
+
+    if subcmd == "save":
+        if not sub_arg:
+            print("Usage: /knowledge save <name>")
+            return True
+        # Save with description from last assistant message if available.
+        description = ""
+        content = ""
+        for msg in reversed(ctx.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                description = content[:100] if content else ""
+                break
+        try:
+            ctx.knowledge_store.save_item(
+                name=sub_arg,
+                description=description,
+                content=content,
+            )
+            print(f"Knowledge item '{sub_arg}' saved.")
+        except KnowledgeError as exc:
+            print(f"Failed to save knowledge: {exc}")
+        return True
+
+    if subcmd == "load":
+        if not sub_arg:
+            print("Usage: /knowledge load <name>")
+            return True
+        try:
+            item = ctx.knowledge_store.load_item(sub_arg)
+            # Inject knowledge content into the conversation as a system message.
+            artifacts = item.get("artifacts_content", {})
+            content_parts = []
+            for artifact_name, artifact_content in artifacts.items():
+                content_parts.append(
+                    f"--- {artifact_name} ---\n{artifact_content}"
+                )
+            if content_parts:
+                knowledge_content = "\n\n".join(content_parts)
+                ctx.messages.append({
+                    "role": "system",
+                    "content": (
+                        f"Knowledge item '{sub_arg}' loaded:\n\n"
+                        f"{knowledge_content}"
+                    ),
+                })
+            print(f"Knowledge item '{sub_arg}' loaded into context.")
+        except KnowledgeNotFoundError:
+            print(f"Knowledge item '{sub_arg}' not found.")
+        except KnowledgeError as exc:
+            print(f"Failed to load knowledge: {exc}")
+        return True
+
+    if subcmd == "delete":
+        if not sub_arg:
+            print("Usage: /knowledge delete <name>")
+            return True
+        try:
+            ctx.knowledge_store.delete_item(sub_arg)
+            print(f"Knowledge item '{sub_arg}' deleted.")
+        except KnowledgeNotFoundError:
+            print(f"Knowledge item '{sub_arg}' not found.")
+        except KnowledgeError as exc:
+            print(f"Failed to delete knowledge: {exc}")
+        return True
+
+    print(f"Unknown knowledge subcommand: {subcmd}")
+    print("Usage: /knowledge [list|save|load|delete] <name>")
+    return True
+
+
+def _knowledge_list(ctx: _ReplContext) -> bool:
+    """List all knowledge items.
+
+    Args:
+        ctx: The REPL context.
+
+    Returns:
+        True to continue the REPL.
+    """
+    try:
+        items = ctx.knowledge_store.list_items()
+    except KnowledgeError as exc:
+        print(f"Failed to list knowledge: {exc}")
+        return True
+
+    if not items:
+        print("No knowledge items found.")
+        return True
+
+    print("\nKnowledge items:")
+    for item in items:
+        name = item.get("name", "?")
+        desc = item.get("description", "")
+        tags = item.get("tags", [])
+        tag_str = f"  [{', '.join(tags)}]" if tags else ""
+        print(f"  {name}: {desc[:60]}{tag_str}")
+    print()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Skills command handler
+# ---------------------------------------------------------------------------
+
+
+def _handle_skills_command(parts: list[str], ctx: _ReplContext) -> bool:
+    """Handle /skills slash command and its subcommands.
+
+    Subcommands:
+        - ``/skills`` or ``/skills list`` — list all discovered skills.
+        - ``/skills show <name>`` — show a skill's content.
+
+    Args:
+        parts: The split command parts (``["/skills", ...]``).
+        ctx: The REPL context containing shared state.
+
+    Returns:
+        True to continue the REPL.
+    """
+    if ctx.skills_loader is None:
+        print("Skills system not available.")
+        return True
+
+    # No subcommand or "list" → list skills.
+    if len(parts) < 2 or not parts[1].strip():
+        return _skills_list(ctx)
+
+    sub_parts = parts[1].strip().split(maxsplit=1)
+    subcmd = sub_parts[0].lower()
+    sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+    if subcmd == "list":
+        return _skills_list(ctx)
+
+    if subcmd == "show":
+        if not sub_arg:
+            print("Usage: /skills show <name>")
+            return True
+        try:
+            content = ctx.skills_loader.get_skill_content(sub_arg)
+            print(f"\n{content}\n")
+        except Exception:
+            print(f"Skill '{sub_arg}' not found.")
+        return True
+
+    print(f"Unknown skills subcommand: {subcmd}")
+    print("Usage: /skills [list|show <name>]")
+    return True
+
+
+def _skills_list(ctx: _ReplContext) -> bool:
+    """List all discovered skills.
+
+    Args:
+        ctx: The REPL context.
+
+    Returns:
+        True to continue the REPL.
+    """
+    skills = ctx.skills_loader.list_skills()
+    if not skills:
+        print("No skills discovered.")
+        return True
+
+    print("\nSkills:")
+    for skill in skills:
+        triggers = ", ".join(skill.triggers) if skill.triggers else ""
+        print(f"  {skill.name}: {skill.description}")
+        if triggers:
+            print(f"    triggers: {triggers}")
+    print()
     return True
 
 
@@ -591,6 +1144,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Check for updates and pull the latest version.",
     )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        default=False,
+        help="Start in plan mode with plan commands available.",
+    )
+    parser.add_argument(
+        "--ideate",
+        action="store_true",
+        default=False,
+        help="Start directly in ideation (brainstorming) mode.",
+    )
     return parser
 
 
@@ -607,11 +1172,18 @@ def run_repl(
     rag_topk: int = 5,
     orchestrator: object | None = None,
     model_manager: object | None = None,
+    plan_manager: PlanManager | None = None,
+    knowledge_store: KnowledgeStore | None = None,
+    skills_loader: SkillsLoader | None = None,
+    ideation_engine: IdeationEngine | None = None,
+    initial_mode: str = "agent",
 ) -> None:
     """Run the interactive REPL loop.
 
     Reads user input line-by-line, detects slash commands, and forwards
     natural-language prompts to :func:`agent_loop` for LLM processing.
+    Supports multiple modes: ``agent`` (default tool-using mode) and
+    ``ideate`` (tool-free brainstorming mode).
 
     Uses ``readline`` for line editing and input history (automatically
     available via the import at module level).
@@ -626,6 +1198,14 @@ def run_repl(
             management and task routing.
         model_manager: Optional :class:`ModelManager` for model
             install/delete operations.
+        plan_manager: Optional :class:`PlanManager` for plan CRUD.
+        knowledge_store: Optional :class:`KnowledgeStore` for persistent
+            knowledge items.
+        skills_loader: Optional :class:`SkillsLoader` for skill
+            auto-discovery and contextual injection.
+        ideation_engine: Optional :class:`IdeationEngine` for tool-free
+            brainstorming mode.
+        initial_mode: Starting REPL mode (``"agent"`` or ``"ideate"``).
     """
     # Print welcome banner.
     tool_names = ", ".join(t.name for t in tools)
@@ -660,12 +1240,24 @@ def run_repl(
         rag_topk=rag_topk,
         orchestrator=orchestrator,
         model_manager=model_manager,
+        plan_manager=plan_manager,
+        knowledge_store=knowledge_store,
+        skills_loader=skills_loader,
+        ideation_engine=ideation_engine,
     )
 
+    # Set initial mode.
+    ctx.current_mode = initial_mode
+    if initial_mode == "ideate" and ideation_engine is not None:
+        if not ideation_engine.has_session:
+            ideation_engine.start_session()
+        print("Starting in ideation mode. Type /ideate exit to return.\n")
+
     while True:
-        # Read user input.
+        # Read user input with mode-aware prompt.
+        prompt_label = "Ideate> " if ctx.current_mode == "ideate" else "You> "
         try:
-            user_input = input("You> ")
+            user_input = input(prompt_label)
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
             break
@@ -675,12 +1267,54 @@ def run_repl(
         if not stripped:
             continue
 
-        # Handle slash commands.
+        # Handle slash commands (available in all modes).
         if stripped.startswith("/"):
             should_continue = _handle_slash_command(stripped, ctx)
             if not should_continue:
                 break
             continue
+
+        # -- Ideation mode --------------------------------------------------
+        if ctx.current_mode == "ideate":
+            if ctx.ideation_engine is not None:
+                try:
+                    ctx.ideation_engine.chat_turn(
+                        user_input=stripped,
+                        model=ctx.config.model,
+                    )
+                except KeyboardInterrupt:
+                    print("\nInterrupted.")
+                except Exception as exc:
+                    sys.stderr.write(f"Ideation error: {exc}\n")
+            else:
+                print("Ideation engine not available. Use /ideate exit.")
+            continue
+
+        # -- Agent mode -----------------------------------------------------
+
+        # Inject skills context if skills match the user input.
+        if ctx.skills_loader is not None:
+            matching_skills = ctx.skills_loader.get_matching_skills(stripped)
+            for skill in matching_skills:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"--- SKILL: {skill.name} ---\n"
+                        f"{skill.content}\n"
+                        f"--- END SKILL ---"
+                    ),
+                })
+
+        # Fast-mode heuristic: suggest plan for complex requests.
+        if (
+            ctx.plan_manager is not None
+            and ctx.active_plan_id is None
+            and _is_complex_request(stripped)
+        ):
+            print(
+                "This looks complex. Consider creating a plan first "
+                "with /plan create <title>."
+            )
 
         # Augment prompt with RAG context if available.
         prompt_content = stripped
@@ -691,6 +1325,18 @@ def run_repl(
                 )
             except Exception:
                 # RAG failure is non-fatal; fall back to the raw prompt.
+                pass
+
+        # Inject active plan context if a plan is active.
+        if ctx.active_plan_id is not None and ctx.plan_manager is not None:
+            try:
+                plan_content = ctx.plan_manager.get_plan_content(
+                    ctx.active_plan_id,
+                )
+                plan_msg = build_plan_context(plan_content)
+                messages.append(plan_msg)
+            except PlanError:
+                # Plan read failure is non-fatal; skip injection.
                 pass
 
         # Build user message and add to history.
