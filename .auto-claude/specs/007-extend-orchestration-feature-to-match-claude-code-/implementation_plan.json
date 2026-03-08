@@ -121,8 +121,9 @@
             "command": "python -m pytest tests/test_sub_agent.py -v --tb=short -q",
             "expected": "All tests pass"
           },
-          "status": "pending",
-          "notes": "Use mock SubAgents with predictable run() results and controlled delays (time.sleep in mock). Test concurrent execution by measuring wall-clock time. Use unittest.mock.patch.dict(os.environ, {'OLLAMA_NUM_PARALLEL': '2'}) for env var testing."
+          "status": "completed",
+          "notes": "Added 38 unit tests for SubAgentRunner in tests/test_sub_agent.py (103 total). Test classes: TestSubAgentRunnerSubmit (5 tests), TestSubAgentRunnerSubmitBackground (4 tests), TestSubAgentRunnerGetBackgroundResult (4 tests), TestSubAgentRunnerListBackground (6 tests), TestSubAgentRunnerParallel (3 tests), TestSubAgentRunnerMaxWorkers (8 tests), TestSubAgentRunnerShutdown (4 tests), TestSubAgentRunnerErrorHandling (4 tests). Covers: submit blocks and returns, submit_background returns agent_id immediately, get_background_result polling, list_background_agents status tracking, parallel execution timing, OLLAMA_NUM_PARALLEL env var capping, shutdown cleanup, error propagation and isolation.",
+          "updated_at": "2026-03-09T00:00:00.000000+00:00"
         }
       ]
     },
@@ -486,7 +487,7 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-08T16:45:46.959Z",
+  "updated_at": "2026-03-08T16:49:00.442Z",
   "lastEvent": {
     "eventId": "2e59f469-7508-496e-8e84-d9593fc51983",
     "sequence": 0,

@@ -1,5 +1,6 @@
 """Tests for local_cli.sub_agent module."""
 
+import os
 import sys
 import time
 import unittest
@@ -14,6 +15,7 @@ from local_cli.providers.base import (
 from local_cli.sub_agent import (
     SubAgent,
     SubAgentResult,
+    SubAgentRunner,
     _DEFAULT_TIMEOUT,
     _SUB_AGENT_SYSTEM_PROMPT,
     _SubAgentTimeout,
@@ -1326,6 +1328,597 @@ class TestSubAgentTimeoutException(unittest.TestCase):
         """Error message is preserved."""
         exc = _SubAgentTimeout("timed out after 300s")
         self.assertEqual(str(exc), "timed out after 300s")
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — helper
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_sub_agent(
+    agent_id: str = "mock-agent-001",
+    description: str = "mock task",
+    content: str = "mock result",
+    status: str = "success",
+    *,
+    delay: float = 0.0,
+    side_effect: Exception | None = None,
+) -> MagicMock:
+    """Create a mock SubAgent with a predictable run() result.
+
+    Args:
+        agent_id: The agent ID to assign.
+        description: The description for the result.
+        content: The content for the result.
+        status: The status for the result.
+        delay: Optional sleep delay before returning (simulates work).
+        side_effect: Optional exception to raise from run().
+
+    Returns:
+        A MagicMock configured as a SubAgent with a controlled run().
+    """
+    mock = MagicMock(spec=SubAgent)
+    mock.agent_id = agent_id
+
+    def _run() -> SubAgentResult:
+        if delay > 0:
+            time.sleep(delay)
+        if side_effect is not None:
+            raise side_effect
+        return SubAgentResult(
+            agent_id=agent_id,
+            description=description,
+            content=content,
+            status=status,
+            duration_seconds=delay or 0.01,
+            messages_count=3,
+            tool_calls_count=0,
+        )
+
+    mock.run.side_effect = _run
+    return mock
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — submit()
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerSubmit(unittest.TestCase):
+    """Tests for SubAgentRunner.submit()."""
+
+    def setUp(self) -> None:
+        self.runner = SubAgentRunner(max_workers=2)
+
+    def tearDown(self) -> None:
+        self.runner.shutdown()
+
+    def test_submit_returns_sub_agent_result(self) -> None:
+        """submit() returns a SubAgentResult instance."""
+        agent = _make_mock_sub_agent()
+        result = self.runner.submit(agent)
+
+        self.assertIsInstance(result, SubAgentResult)
+
+    def test_submit_blocks_and_returns_result(self) -> None:
+        """submit() blocks until the sub-agent completes and returns result."""
+        agent = _make_mock_sub_agent(
+            agent_id="blocking-001",
+            content="completed work",
+            delay=0.05,
+        )
+        result = self.runner.submit(agent)
+
+        self.assertEqual(result.agent_id, "blocking-001")
+        self.assertEqual(result.content, "completed work")
+        self.assertEqual(result.status, "success")
+
+    def test_submit_calls_run(self) -> None:
+        """submit() calls the sub-agent's run() method."""
+        agent = _make_mock_sub_agent()
+        self.runner.submit(agent)
+
+        agent.run.assert_called_once()
+
+    def test_submit_preserves_result_fields(self) -> None:
+        """submit() preserves all fields from the SubAgentResult."""
+        agent = _make_mock_sub_agent(
+            agent_id="field-test",
+            description="field check",
+            content="field content",
+        )
+        result = self.runner.submit(agent)
+
+        self.assertEqual(result.agent_id, "field-test")
+        self.assertEqual(result.description, "field check")
+        self.assertEqual(result.content, "field content")
+        self.assertEqual(result.messages_count, 3)
+        self.assertEqual(result.tool_calls_count, 0)
+
+    def test_submit_creates_executor_lazily(self) -> None:
+        """Executor is not created until first submit()."""
+        runner = SubAgentRunner(max_workers=2)
+        self.assertIsNone(runner._executor)
+
+        agent = _make_mock_sub_agent()
+        runner.submit(agent)
+        self.assertIsNotNone(runner._executor)
+        runner.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — submit_background()
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerSubmitBackground(unittest.TestCase):
+    """Tests for SubAgentRunner.submit_background()."""
+
+    def setUp(self) -> None:
+        self.runner = SubAgentRunner(max_workers=2)
+
+    def tearDown(self) -> None:
+        self.runner.shutdown()
+
+    def test_submit_background_returns_agent_id(self) -> None:
+        """submit_background() returns the agent ID as a string."""
+        agent = _make_mock_sub_agent(agent_id="bg-001")
+        agent_id = self.runner.submit_background(agent)
+
+        self.assertEqual(agent_id, "bg-001")
+        self.assertIsInstance(agent_id, str)
+
+    def test_submit_background_returns_immediately(self) -> None:
+        """submit_background() does not block for completion."""
+        agent = _make_mock_sub_agent(agent_id="bg-fast", delay=0.5)
+
+        start = time.monotonic()
+        self.runner.submit_background(agent)
+        elapsed = time.monotonic() - start
+
+        # Should return well before the 0.5s delay.
+        self.assertLess(elapsed, 0.3)
+
+    def test_submit_background_tracks_agent(self) -> None:
+        """submit_background() stores the agent in _background dict."""
+        agent = _make_mock_sub_agent(agent_id="bg-tracked")
+        self.runner.submit_background(agent)
+
+        self.assertIn("bg-tracked", self.runner._background)
+
+    def test_submit_multiple_background_agents(self) -> None:
+        """Multiple background agents can be submitted concurrently."""
+        agents = [
+            _make_mock_sub_agent(agent_id=f"bg-multi-{i}", delay=0.05)
+            for i in range(3)
+        ]
+        ids = [self.runner.submit_background(a) for a in agents]
+
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len(set(ids)), 3)  # All unique.
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — get_background_result()
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerGetBackgroundResult(unittest.TestCase):
+    """Tests for SubAgentRunner.get_background_result()."""
+
+    def setUp(self) -> None:
+        self.runner = SubAgentRunner(max_workers=2)
+
+    def tearDown(self) -> None:
+        self.runner.shutdown()
+
+    def test_returns_none_while_running(self) -> None:
+        """get_background_result() returns None for a still-running agent."""
+        agent = _make_mock_sub_agent(agent_id="bg-slow", delay=1.0)
+        self.runner.submit_background(agent)
+
+        # Check immediately — agent should still be running.
+        result = self.runner.get_background_result("bg-slow")
+        self.assertIsNone(result)
+
+    def test_returns_result_when_done(self) -> None:
+        """get_background_result() returns result after agent completes."""
+        agent = _make_mock_sub_agent(
+            agent_id="bg-done",
+            content="background work complete",
+            delay=0.05,
+        )
+        self.runner.submit_background(agent)
+
+        # Wait for completion.
+        time.sleep(0.2)
+        result = self.runner.get_background_result("bg-done")
+
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, SubAgentResult)
+        self.assertEqual(result.content, "background work complete")
+        self.assertEqual(result.status, "success")
+
+    def test_returns_none_for_unknown_id(self) -> None:
+        """get_background_result() returns None for unrecognized agent ID."""
+        result = self.runner.get_background_result("nonexistent-id")
+        self.assertIsNone(result)
+
+    def test_result_available_after_poll(self) -> None:
+        """Polling eventually returns a result for a completed agent."""
+        agent = _make_mock_sub_agent(agent_id="bg-poll", delay=0.05)
+        self.runner.submit_background(agent)
+
+        # Poll until done or timeout.
+        result = None
+        for _ in range(20):
+            result = self.runner.get_background_result("bg-poll")
+            if result is not None:
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.agent_id, "bg-poll")
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — list_background_agents()
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerListBackground(unittest.TestCase):
+    """Tests for SubAgentRunner.list_background_agents()."""
+
+    def setUp(self) -> None:
+        self.runner = SubAgentRunner(max_workers=4)
+
+    def tearDown(self) -> None:
+        self.runner.shutdown()
+
+    def test_empty_initially(self) -> None:
+        """list_background_agents() returns empty list when none submitted."""
+        agents = self.runner.list_background_agents()
+        self.assertEqual(agents, [])
+
+    def test_shows_running_status(self) -> None:
+        """list_background_agents() shows 'running' for active agents."""
+        agent = _make_mock_sub_agent(agent_id="bg-running", delay=1.0)
+        self.runner.submit_background(agent)
+
+        agents = self.runner.list_background_agents()
+
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["agent_id"], "bg-running")
+        self.assertEqual(agents[0]["status"], "running")
+
+    def test_shows_completed_status(self) -> None:
+        """list_background_agents() shows 'completed' after agent finishes."""
+        agent = _make_mock_sub_agent(agent_id="bg-complete", delay=0.05)
+        self.runner.submit_background(agent)
+        time.sleep(0.2)
+
+        agents = self.runner.list_background_agents()
+
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["agent_id"], "bg-complete")
+        self.assertEqual(agents[0]["status"], "completed")
+
+    def test_shows_error_status(self) -> None:
+        """list_background_agents() shows 'error' for failed agents."""
+        agent = _make_mock_sub_agent(
+            agent_id="bg-error",
+            side_effect=RuntimeError("boom"),
+        )
+        self.runner.submit_background(agent)
+        time.sleep(0.2)
+
+        agents = self.runner.list_background_agents()
+
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["agent_id"], "bg-error")
+        self.assertEqual(agents[0]["status"], "error")
+
+    def test_shows_multiple_agents_mixed_status(self) -> None:
+        """list_background_agents() shows correct status for multiple agents."""
+        fast = _make_mock_sub_agent(agent_id="bg-fast", delay=0.01)
+        slow = _make_mock_sub_agent(agent_id="bg-slow", delay=2.0)
+
+        self.runner.submit_background(fast)
+        self.runner.submit_background(slow)
+        time.sleep(0.2)
+
+        agents = self.runner.list_background_agents()
+        status_map = {a["agent_id"]: a["status"] for a in agents}
+
+        self.assertEqual(len(agents), 2)
+        self.assertEqual(status_map["bg-fast"], "completed")
+        self.assertEqual(status_map["bg-slow"], "running")
+
+    def test_list_contains_agent_id_and_status_keys(self) -> None:
+        """Each dict in the list contains 'agent_id' and 'status' keys."""
+        agent = _make_mock_sub_agent(agent_id="bg-keys")
+        self.runner.submit_background(agent)
+        time.sleep(0.1)
+
+        agents = self.runner.list_background_agents()
+        self.assertIn("agent_id", agents[0])
+        self.assertIn("status", agents[0])
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — parallel execution
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerParallel(unittest.TestCase):
+    """Tests for concurrent sub-agent execution."""
+
+    def test_two_agents_run_concurrently(self) -> None:
+        """Two agents with 0.2s delay each complete in < 0.35s (not 0.4s)."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            agent1 = _make_mock_sub_agent(agent_id="par-1", delay=0.2)
+            agent2 = _make_mock_sub_agent(agent_id="par-2", delay=0.2)
+
+            runner.submit_background(agent1)
+            runner.submit_background(agent2)
+
+            start = time.monotonic()
+            # Wait for both to complete.
+            results = {}
+            for _ in range(40):
+                for aid in ("par-1", "par-2"):
+                    if aid not in results:
+                        r = runner.get_background_result(aid)
+                        if r is not None:
+                            results[aid] = r
+                if len(results) == 2:
+                    break
+                time.sleep(0.02)
+            elapsed = time.monotonic() - start
+
+            self.assertEqual(len(results), 2)
+            # If sequential, total would be >= 0.4s. Parallel should be < 0.35s.
+            self.assertLess(elapsed, 0.35)
+        finally:
+            runner.shutdown()
+
+    def test_parallel_results_independent(self) -> None:
+        """Each parallel agent returns its own independent result."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            agent1 = _make_mock_sub_agent(
+                agent_id="ind-1", content="result-A", delay=0.05,
+            )
+            agent2 = _make_mock_sub_agent(
+                agent_id="ind-2", content="result-B", delay=0.05,
+            )
+
+            runner.submit_background(agent1)
+            runner.submit_background(agent2)
+            time.sleep(0.3)
+
+            r1 = runner.get_background_result("ind-1")
+            r2 = runner.get_background_result("ind-2")
+
+            self.assertIsNotNone(r1)
+            self.assertIsNotNone(r2)
+            self.assertEqual(r1.content, "result-A")
+            self.assertEqual(r2.content, "result-B")
+        finally:
+            runner.shutdown()
+
+    def test_submit_foreground_concurrent_with_background(self) -> None:
+        """Foreground submit() works while background agents are running."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            bg_agent = _make_mock_sub_agent(agent_id="bg-mix", delay=0.3)
+            fg_agent = _make_mock_sub_agent(
+                agent_id="fg-mix", content="foreground done",
+            )
+
+            runner.submit_background(bg_agent)
+            # Foreground submit should still work.
+            fg_result = runner.submit(fg_agent)
+
+            self.assertEqual(fg_result.content, "foreground done")
+        finally:
+            runner.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — max_workers cap
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerMaxWorkers(unittest.TestCase):
+    """Tests for max_workers capping and OLLAMA_NUM_PARALLEL."""
+
+    def test_default_max_workers(self) -> None:
+        """Default max_workers is 3 (when OLLAMA_NUM_PARALLEL >= 3)."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "8"}):
+            runner = SubAgentRunner()
+            self.assertEqual(runner._max_workers, 3)
+            runner.shutdown()
+
+    def test_max_workers_capped_by_ollama_num_parallel(self) -> None:
+        """max_workers is capped to OLLAMA_NUM_PARALLEL when lower."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "2"}):
+            runner = SubAgentRunner(max_workers=5)
+            self.assertEqual(runner._max_workers, 2)
+            runner.shutdown()
+
+    def test_max_workers_uses_requested_when_lower(self) -> None:
+        """max_workers uses the requested value when lower than env var."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "8"}):
+            runner = SubAgentRunner(max_workers=2)
+            self.assertEqual(runner._max_workers, 2)
+            runner.shutdown()
+
+    def test_get_ollama_num_parallel_default(self) -> None:
+        """Default OLLAMA_NUM_PARALLEL is 4 when env var is unset."""
+        with patch.dict(os.environ, {}, clear=True):
+            # Remove OLLAMA_NUM_PARALLEL if present.
+            os.environ.pop("OLLAMA_NUM_PARALLEL", None)
+            value = SubAgentRunner._get_ollama_num_parallel()
+            self.assertEqual(value, 4)
+
+    def test_get_ollama_num_parallel_from_env(self) -> None:
+        """OLLAMA_NUM_PARALLEL is read from environment."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "6"}):
+            value = SubAgentRunner._get_ollama_num_parallel()
+            self.assertEqual(value, 6)
+
+    def test_get_ollama_num_parallel_invalid(self) -> None:
+        """Invalid OLLAMA_NUM_PARALLEL defaults to 4."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "not_a_number"}):
+            value = SubAgentRunner._get_ollama_num_parallel()
+            self.assertEqual(value, 4)
+
+    def test_get_ollama_num_parallel_minimum_one(self) -> None:
+        """OLLAMA_NUM_PARALLEL enforces minimum of 1."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "0"}):
+            value = SubAgentRunner._get_ollama_num_parallel()
+            self.assertEqual(value, 1)
+
+    def test_get_ollama_num_parallel_negative(self) -> None:
+        """Negative OLLAMA_NUM_PARALLEL is clamped to 1."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "-5"}):
+            value = SubAgentRunner._get_ollama_num_parallel()
+            self.assertEqual(value, 1)
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — shutdown()
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerShutdown(unittest.TestCase):
+    """Tests for SubAgentRunner.shutdown()."""
+
+    def test_shutdown_sets_executor_to_none(self) -> None:
+        """shutdown() sets _executor to None."""
+        runner = SubAgentRunner(max_workers=2)
+        agent = _make_mock_sub_agent()
+        runner.submit(agent)  # Force executor creation.
+        self.assertIsNotNone(runner._executor)
+
+        runner.shutdown()
+        self.assertIsNone(runner._executor)
+
+    def test_shutdown_safe_to_call_multiple_times(self) -> None:
+        """shutdown() can be called multiple times without error."""
+        runner = SubAgentRunner(max_workers=2)
+        agent = _make_mock_sub_agent()
+        runner.submit(agent)
+
+        runner.shutdown()
+        runner.shutdown()  # Second call should not raise.
+        runner.shutdown()  # Third call should not raise.
+
+    def test_shutdown_without_use(self) -> None:
+        """shutdown() can be called on a runner that was never used."""
+        runner = SubAgentRunner(max_workers=2)
+        # Never submitted anything — executor is None.
+        runner.shutdown()  # Should not raise.
+
+    def test_shutdown_waits_for_running_agents(self) -> None:
+        """shutdown() waits for running agents to complete."""
+        runner = SubAgentRunner(max_workers=2)
+        agent = _make_mock_sub_agent(agent_id="bg-wait", delay=0.1)
+        runner.submit_background(agent)
+
+        # Shutdown should wait for the agent to complete.
+        runner.shutdown()
+
+        # After shutdown, the agent's run should have been called.
+        agent.run.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# SubAgentRunner — error handling
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunnerErrorHandling(unittest.TestCase):
+    """Tests for SubAgentRunner error handling."""
+
+    def test_submit_propagates_exception(self) -> None:
+        """submit() propagates exceptions from sub-agent run()."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = _make_mock_sub_agent(
+                side_effect=RuntimeError("agent crash"),
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                runner.submit(agent)
+            self.assertIn("agent crash", str(ctx.exception))
+        finally:
+            runner.shutdown()
+
+    def test_background_error_reflected_in_list(self) -> None:
+        """Background agent error shows 'error' status in list."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = _make_mock_sub_agent(
+                agent_id="bg-crash",
+                side_effect=ValueError("bad input"),
+            )
+            runner.submit_background(agent)
+            time.sleep(0.2)
+
+            agents = runner.list_background_agents()
+            self.assertEqual(agents[0]["status"], "error")
+        finally:
+            runner.shutdown()
+
+    def test_background_error_result_raises_on_get(self) -> None:
+        """get_background_result() raises the exception for failed agent."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = _make_mock_sub_agent(
+                agent_id="bg-raise",
+                side_effect=RuntimeError("failed"),
+            )
+            runner.submit_background(agent)
+            time.sleep(0.2)
+
+            # future.result() will re-raise the exception.
+            with self.assertRaises(RuntimeError):
+                runner.get_background_result("bg-raise")
+        finally:
+            runner.shutdown()
+
+    def test_one_error_does_not_affect_others(self) -> None:
+        """One failing background agent does not affect other agents."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            good_agent = _make_mock_sub_agent(
+                agent_id="bg-good",
+                content="all good",
+                delay=0.05,
+            )
+            bad_agent = _make_mock_sub_agent(
+                agent_id="bg-bad",
+                side_effect=RuntimeError("boom"),
+            )
+
+            runner.submit_background(good_agent)
+            runner.submit_background(bad_agent)
+            time.sleep(0.3)
+
+            # Good agent should succeed.
+            result = runner.get_background_result("bg-good")
+            self.assertIsNotNone(result)
+            self.assertEqual(result.content, "all good")
+
+            # Bad agent should be in error state.
+            agents = runner.list_background_agents()
+            status_map = {a["agent_id"]: a["status"] for a in agents}
+            self.assertEqual(status_map["bg-good"], "completed")
+            self.assertEqual(status_map["bg-bad"], "error")
+        finally:
+            runner.shutdown()
 
 
 if __name__ == "__main__":
