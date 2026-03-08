@@ -11,7 +11,7 @@ from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.orchestrator import Orchestrator
 from local_cli.rag import RAGEngine
 from local_cli.security import validate_model_name
-from local_cli.tools import get_default_tools
+from local_cli.tools import get_default_tools, get_sub_agent_tools
 
 
 def main() -> None:
@@ -184,6 +184,29 @@ def main() -> None:
             sys.stderr.write(f"Error: Failed to initialize provider: {exc}\n")
             sys.exit(1)
 
+    # 10b. Create SubAgentRunner and AgentTool, append to tools list.
+    sub_agent_runner = None
+    try:
+        from local_cli.sub_agent import SubAgentRunner
+        from local_cli.tools.agent_tool import AgentTool
+
+        sub_agent_runner = SubAgentRunner()
+        provider = orchestrator.get_active_provider()
+        agent_tool = AgentTool(
+            runner=sub_agent_runner,
+            provider=provider,
+            model=config.model,
+            sub_agent_tools=get_sub_agent_tools(),
+        )
+        tools.append(agent_tool)
+        if config.debug:
+            sys.stderr.write("[debug] AgentTool enabled (sub-agent support)\n")
+    except Exception as exc:
+        if config.debug:
+            sys.stderr.write(
+                f"[debug] AgentTool not available: {exc}\n"
+            )
+
     # 11. Optionally initialize RAG engine.
     rag_engine: RAGEngine | None = None
     rag_enabled = getattr(args, "rag", False) or False
@@ -227,6 +250,7 @@ def main() -> None:
         rag_topk=rag_topk,
         orchestrator=orchestrator,
         model_manager=model_manager,
+        sub_agent_runner=sub_agent_runner,
     )
 
 

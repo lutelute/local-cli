@@ -228,7 +228,7 @@
           },
           "status": "completed",
           "notes": "Added sub-agent support to Orchestrator: _sub_agent_runner attribute (lazily created), create_fresh_provider() for uncached provider instances (thread safety), spawn_agent() convenience method using active provider/model/sub-agent tools, get_background_result() delegation, shutdown_agents() cleanup. Uses from __future__ import annotations + TYPE_CHECKING for forward references to SubAgentRunner/SubAgentResult. All lazy imports in methods to avoid circular dependencies. All 192 tests pass (55 orchestrator + 103 sub_agent + 34 agent_tool).",
-          "updated_at": "2026-03-09T00:00:00.000000+00:00"
+          "updated_at": "2026-03-08T17:08:11.174810+00:00"
         },
         {
           "id": "subtask-4-2",
@@ -248,8 +248,9 @@
             "command": "python -c \"from local_cli.cli import _SLASH_COMMANDS; print('OK')\"",
             "expected": "OK"
           },
-          "status": "pending",
-          "notes": "AgentTool is created in __main__.py (not in tools/__init__.py) because it requires runtime dependencies. The tool is appended to the tools list after get_default_tools(). The /agents command shows background agent status from SubAgentRunner.list_background_agents(). Keep __main__.py changes minimal — create runner/tool, append to list."
+          "status": "completed",
+          "notes": "Wired SubAgentRunner and AgentTool creation in __main__.py (step 10b): creates SubAgentRunner, gets active provider from orchestrator, creates AgentTool with constructor injection, appends to tools list. Added get_sub_agent_tools import. Added /agents slash command to _SLASH_COMMANDS in cli.py. Added sub_agent_runner attribute to _ReplContext (__slots__, __init__, docstring). Added /agents handler in _handle_slash_command that lists background agent status via runner.list_background_agents(). Updated run_repl() signature to accept sub_agent_runner param and pass to _ReplContext. All 192 tests pass (103 sub_agent + 34 agent_tool + 55 orchestrator). Verification: import check passes.",
+          "updated_at": "2026-03-09T00:00:00.000000+00:00"
         },
         {
           "id": "subtask-4-3",
@@ -490,12 +491,12 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-08T17:05:17.965Z",
+  "updated_at": "2026-03-08T17:08:42.124Z",
   "lastEvent": {
     "eventId": "2e59f469-7508-496e-8e84-d9593fc51983",
     "sequence": 0,
     "type": "PLANNING_COMPLETE",
     "timestamp": "2026-03-08T16:31:23.314833+00:00"
   },
-  "last_updated": "2026-03-08T17:04:47.219215+00:00"
+  "last_updated": "2026-03-08T17:08:11.174815+00:00"
 }

@@ -91,6 +91,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/brain [model]": "Set or show the orchestrator brain model.",
     "/registry": "Show current model-to-task routing registry.",
     "/update": "Check for updates and pull the latest version.",
+    "/agents": "List background sub-agent status.",
 }
 
 
@@ -109,6 +110,8 @@ class _ReplContext:
         git_ops: GitOps instance for checkpoint/rollback commands.
         orchestrator: Optional orchestrator for provider/brain management.
         model_manager: Optional model manager for install/delete operations.
+        sub_agent_runner: Optional SubAgentRunner for background agent
+            status queries.
     """
 
     __slots__ = (
@@ -123,6 +126,7 @@ class _ReplContext:
         "git_ops",
         "orchestrator",
         "model_manager",
+        "sub_agent_runner",
     )
 
     def __init__(
@@ -137,6 +141,7 @@ class _ReplContext:
         rag_topk: int = 5,
         orchestrator: object | None = None,
         model_manager: object | None = None,
+        sub_agent_runner: object | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -149,6 +154,7 @@ class _ReplContext:
         self.git_ops = GitOps()
         self.orchestrator = orchestrator
         self.model_manager = model_manager
+        self.sub_agent_runner = sub_agent_runner
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
@@ -492,6 +498,24 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         print(update_msg)
         return True
 
+    # -- /agents ------------------------------------------------------------
+    if cmd == "/agents":
+        if ctx.sub_agent_runner is None:
+            print("Sub-agent support not available.")
+            return True
+
+        agents = ctx.sub_agent_runner.list_background_agents()
+        if not agents:
+            print("No background agents.")
+        else:
+            print(f"\nBackground agents ({len(agents)}):")
+            for info in agents:
+                agent_id = info.get("agent_id", "?")
+                status = info.get("status", "?")
+                print(f"  {agent_id}  {status}")
+            print()
+        return True
+
     # -- Unknown command ----------------------------------------------------
     print(f"Unknown command: {stripped}")
     print("Type /help for a list of commands.")
@@ -607,6 +631,7 @@ def run_repl(
     rag_topk: int = 5,
     orchestrator: object | None = None,
     model_manager: object | None = None,
+    sub_agent_runner: object | None = None,
 ) -> None:
     """Run the interactive REPL loop.
 
@@ -626,6 +651,8 @@ def run_repl(
             management and task routing.
         model_manager: Optional :class:`ModelManager` for model
             install/delete operations.
+        sub_agent_runner: Optional :class:`SubAgentRunner` for background
+            agent status queries via the ``/agents`` command.
     """
     # Print welcome banner.
     tool_names = ", ".join(t.name for t in tools)
@@ -660,6 +687,7 @@ def run_repl(
         rag_topk=rag_topk,
         orchestrator=orchestrator,
         model_manager=model_manager,
+        sub_agent_runner=sub_agent_runner,
     )
 
     while True:
