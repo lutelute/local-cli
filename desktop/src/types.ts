@@ -69,6 +69,16 @@ declare global {
       openDirectoryDialog: () => Promise<Electron.OpenDialogReturnValue>
       getHomeDir: () => Promise<string>
       hasClaudeAccess: () => Promise<boolean>
+      getAppVersion: () => Promise<string>
+      checkAppUpdate: () => Promise<{
+        available: boolean
+        version: string
+        notes?: string
+        downloadUrl?: string
+        releaseUrl?: string
+        error?: string
+      }>
+      openExternalUrl: (url: string) => Promise<void>
     }
   }
 }

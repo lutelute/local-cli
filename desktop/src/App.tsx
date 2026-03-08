@@ -6,6 +6,7 @@ import { ModelPicker, CatalogModel, SearchResult } from './components/ModelPicke
 import { FileExplorer } from './components/FileExplorer'
 import { ProviderSelector } from './components/ProviderSelector'
 import { FileViewer } from './components/FileViewer'
+import { SettingsPanel } from './components/SettingsPanel'
 
 let reqIdCounter = 0
 function nextId() { return ++reqIdCounter }
@@ -31,6 +32,7 @@ export default function App() {
   const [appUpdating, setAppUpdating] = useState(false)
   const [appUpdateResult, setAppUpdateResult] = useState('')
   const [explorerOpen, setExplorerOpen] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [hasClaude, setHasClaude] = useState(false)
   const [rootDir, setRootDir] = useState<string | null>(null)
@@ -54,21 +56,17 @@ export default function App() {
     window.api.getHomeDir().then(setRootDir)
   }, [])
 
-  // Ctrl+, keyboard shortcut for app update.
+  // Cmd/Ctrl+, keyboard shortcut for settings.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === ',') {
         e.preventDefault()
-        if (!appUpdating) {
-          window.api.sendToPython({ id: nextId(), type: 'do_update' })
-          setAppUpdating(true)
-          setAppUpdateResult('')
-        }
+        setShowSettings(prev => !prev)
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [appUpdating])
+  }, [])
 
   // Cmd/Ctrl+B keyboard shortcut to toggle file explorer.
   useEffect(() => {
@@ -515,6 +513,10 @@ export default function App() {
           searching={searching}
           updating={updating}
         />
+      )}
+
+      {showSettings && (
+        <SettingsPanel onClose={() => setShowSettings(false)} />
       )}
     </div>
   )

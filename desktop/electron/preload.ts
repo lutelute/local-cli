@@ -42,4 +42,7 @@ contextBridge.exposeInMainWorld('api', {
   openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
   getHomeDir: () => ipcRenderer.invoke('get-home-dir'),
   hasClaudeAccess: () => ipcRenderer.invoke('has-claude-access'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  checkAppUpdate: () => ipcRenderer.invoke('check-app-update'),
+  openExternalUrl: (url: string) => ipcRenderer.invoke('open-external-url', url),
 })

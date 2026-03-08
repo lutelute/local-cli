@@ -1,8 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
+import https from 'node:https'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'path'
+
+const APP_VERSION = '0.4.0'
+const GITHUB_REPO = 'lutelute/local-cli'
 
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
@@ -177,6 +181,52 @@ ipcMain.handle('get-home-dir', () => {
 ipcMain.handle('has-claude-access', () => {
   return !!process.env.ANTHROPIC_API_KEY
 })
+
+ipcMain.handle('get-app-version', () => APP_VERSION)
+
+ipcMain.handle('check-app-update', async () => {
+  try {
+    const data = await fetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
+    const latest = (data.tag_name || '').replace(/^v/, '')
+    if (latest && latest !== APP_VERSION) {
+      const dmg = data.assets?.find((a: any) => a.name.endsWith('.dmg'))
+      return {
+        available: true,
+        version: latest,
+        notes: data.body || '',
+        downloadUrl: dmg?.browser_download_url || data.html_url,
+        releaseUrl: data.html_url,
+      }
+    }
+    return { available: false, version: APP_VERSION }
+  } catch {
+    return { available: false, version: APP_VERSION, error: 'Failed to check for updates' }
+  }
+})
+
+ipcMain.handle('open-external-url', (_event, url: string) => {
+  shell.openExternal(url)
+})
+
+function fetchJson(url: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': `local-cli/${APP_VERSION}` } }, (res) => {
+      // Follow redirects.
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        const loc = res.headers.location
+        if (loc) return fetchJson(loc).then(resolve, reject)
+      }
+      let body = ''
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)) }
+        catch { reject(new Error('Invalid JSON')) }
+      })
+    })
+    req.on('error', reject)
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Timeout')) })
+  })
+}
 
 app.whenReady().then(() => {
   startPythonServer()
