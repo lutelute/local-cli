@@ -4,6 +4,11 @@ import sys
 
 from local_cli.cli import build_parser, run_repl
 from local_cli.config import Config
+from local_cli.health_check import (
+    STATUS_OK,
+    format_health_check,
+    run_health_check,
+)
 from local_cli.model_manager import ModelManager
 from local_cli.model_registry import ModelRegistry
 from local_cli.model_selector import select_model_interactive
@@ -88,39 +93,13 @@ def main() -> None:
         sys.stderr.write(f"Error: {exc}\n")
         sys.exit(1)
 
-    # 5. Optionally check Ollama connectivity and model availability.
-    ollama_available = True
-    try:
-        version_info = client.get_version()
-        if config.debug:
-            sys.stderr.write(
-                f"[debug] Ollama version: {version_info.get('version', 'unknown')}\n"
-            )
+    # 5. Run startup health check (non-blocking).
+    health_results = run_health_check(client, config.model)
+    sys.stderr.write(format_health_check(health_results) + "\n")
 
-        # Check if the requested model is available on Ollama.
-        # Only relevant when using the Ollama provider.
-        if config.provider == "ollama":
-            models = client.list_models()
-            model_names = [m.get("name", "") for m in models]
-            # Ollama model names may include a tag suffix (e.g. ":latest").
-            # Match if the configured model equals the full name or the
-            # base name without tag.
-            model_found = any(
-                config.model == name or config.model == name.split(":")[0]
-                for name in model_names
-            )
-            if not model_found and model_names:
-                sys.stderr.write(
-                    f"Warning: model '{config.model}' not found on Ollama server.\n"
-                    f"Available models: {', '.join(model_names)}\n"
-                )
-
-    except OllamaConnectionError:
-        ollama_available = False
-        sys.stderr.write(
-            "Warning: could not connect to Ollama. "
-            "Make sure Ollama is running.\n"
-        )
+    # Derive ollama_available from health check results.
+    ollama_result = health_results[0] if health_results else None
+    ollama_available = ollama_result is not None and ollama_result.status == STATUS_OK
 
     # 5b. Optionally run interactive model selector (--select-model).
     if args.select_model:
