@@ -245,12 +245,19 @@ export default function App() {
           break
         }
 
-        case 'pull_done':
+        case 'pull_done': {
+          const pulledModel = (msg as any).model || pulling
           setPulling(null)
           setPullProgress('')
+          // Auto-switch to the newly downloaded model and close picker.
+          if (pulledModel) {
+            window.api.sendToPython({ id: nextId(), type: 'switch_model', model: pulledModel })
+            setShowPicker(false)
+          }
           // Refresh catalog to update installed status.
           window.api.sendToPython({ id: nextId(), type: 'catalog' })
           break
+        }
 
         case 'delete_done':
           // Refresh catalog.
@@ -501,7 +508,7 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.5.5" />
+                  <Banner version="0.5.6" />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.
