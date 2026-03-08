@@ -145,6 +145,7 @@ class TestOllamaProviderChat(unittest.TestCase):
 
         self.mock_client.chat.assert_called_once_with(
             model="qwen3:8b", messages=messages, tools=None,
+            options=None, think=None, format=None, keep_alive=None,
         )
         self.assertEqual(result["message"]["content"], "hello")
 
@@ -245,6 +246,7 @@ class TestOllamaProviderChatStream(unittest.TestCase):
 
         self.mock_client.chat_stream.assert_called_once_with(
             model="qwen3:8b", messages=messages, tools=None,
+            options=None, think=None, format=None, keep_alive=None,
         )
         self.assertEqual(len(result), 3)
 
