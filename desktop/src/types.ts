@@ -79,6 +79,21 @@ declare global {
         error?: string
       }>
       openExternalUrl: (url: string) => Promise<void>
+      getClaudeAuth: () => Promise<{
+        method: string | null
+        keyHint: string | null
+        authenticated: boolean
+      }>
+      saveClaudeKey: (key: string) => Promise<{
+        success: boolean
+        error?: string
+        keyHint?: string
+      }>
+      deleteClaudeAuth: () => Promise<{ success: boolean }>
+      startClaudeOAuth: () => Promise<{
+        success: boolean
+        error?: string
+      }>
     }
   }
 }

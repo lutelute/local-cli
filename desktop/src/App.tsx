@@ -7,6 +7,7 @@ import { FileExplorer } from './components/FileExplorer'
 import { ProviderSelector } from './components/ProviderSelector'
 import { FileViewer } from './components/FileViewer'
 import { SettingsPanel } from './components/SettingsPanel'
+import { ClaudeLogin } from './components/ClaudeLogin'
 
 let reqIdCounter = 0
 function nextId() { return ++reqIdCounter }
@@ -33,6 +34,8 @@ export default function App() {
   const [appUpdateResult, setAppUpdateResult] = useState('')
   const [explorerOpen, setExplorerOpen] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
+  const [showClaudeLogin, setShowClaudeLogin] = useState(false)
+  const [claudeAuthMethod, setClaudeAuthMethod] = useState<string | null>(null)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [hasClaude, setHasClaude] = useState(false)
   const [rootDir, setRootDir] = useState<string | null>(null)
@@ -49,11 +52,17 @@ export default function App() {
 
   useEffect(() => { scrollToBottom() }, [messages, scrollToBottom])
 
-  // Initialize hasClaude and rootDir on mount.
+  // Initialize hasClaude, auth status, and rootDir on mount.
   useEffect(() => {
     if (!window.api) return
     window.api.hasClaudeAccess().then(setHasClaude)
     window.api.getHomeDir().then(setRootDir)
+    window.api.getClaudeAuth().then(auth => {
+      if (auth.authenticated) {
+        setHasClaude(true)
+        setClaudeAuthMethod(auth.method)
+      }
+    })
   }, [])
 
   // Cmd/Ctrl+, keyboard shortcut for settings.
@@ -256,6 +265,10 @@ export default function App() {
           setAppUpdating(true)
           break
 
+        case 'api_key_set':
+          setHasClaude(!!(msg as any).has_claude)
+          break
+
         case 'update_done': {
           setAppUpdating(false)
           const d = msg as any
@@ -395,6 +408,7 @@ export default function App() {
             hasClaude={hasClaude}
             hasMessages={messages.length > 0}
             onSwitch={handleProviderSwitch}
+            onLoginRequest={() => setShowClaudeLogin(true)}
           />
         </div>
         <div className="status-spacer" />
@@ -517,6 +531,19 @@ export default function App() {
 
       {showSettings && (
         <SettingsPanel onClose={() => setShowSettings(false)} />
+      )}
+
+      {showClaudeLogin && (
+        <ClaudeLogin
+          onClose={() => setShowClaudeLogin(false)}
+          onAuthenticated={(method) => {
+            setHasClaude(true)
+            setClaudeAuthMethod(method)
+            setShowClaudeLogin(false)
+          }}
+          isAuthenticated={hasClaude}
+          authMethod={claudeAuthMethod}
+        />
       )}
     </div>
   )

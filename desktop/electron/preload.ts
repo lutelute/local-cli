@@ -45,4 +45,8 @@ contextBridge.exposeInMainWorld('api', {
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   checkAppUpdate: () => ipcRenderer.invoke('check-app-update'),
   openExternalUrl: (url: string) => ipcRenderer.invoke('open-external-url', url),
+  getClaudeAuth: () => ipcRenderer.invoke('get-claude-auth'),
+  saveClaudeKey: (key: string) => ipcRenderer.invoke('save-claude-key', key),
+  deleteClaudeAuth: () => ipcRenderer.invoke('delete-claude-auth'),
+  startClaudeOAuth: () => ipcRenderer.invoke('start-claude-oauth'),
 })
