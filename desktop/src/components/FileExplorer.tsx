@@ -138,12 +138,15 @@ export function FileExplorer({ rootDir, onFileSelect, onRootChange }: Props) {
       <div className="explorer">
         <div className="explorer-header">
           <span className="explorer-title">Explorer</span>
+          <button className="explorer-open-btn-small" onClick={handleOpenFolder} title="Open folder">
+            +
+          </button>
         </div>
         <div className="explorer-empty">
           <button className="explorer-open-btn" onClick={handleOpenFolder}>
             Open Folder
           </button>
-          <span className="explorer-hint">Select a project folder to browse</span>
+          <span className="explorer-hint">Select a working directory</span>
         </div>
       </div>
     )
@@ -155,9 +158,12 @@ export function FileExplorer({ rootDir, onFileSelect, onRootChange }: Props) {
     <div className="explorer">
       <div className="explorer-header">
         <span className="explorer-title" title={rootDir}>{rootName}</span>
-        <button className="explorer-open-btn-small" onClick={handleOpenFolder} title="Open folder">
-          ...
+        <button className="explorer-open-btn-small" onClick={handleOpenFolder} title="Change working directory">
+          +
         </button>
+      </div>
+      <div className="explorer-path-bar" title={rootDir} onClick={handleOpenFolder}>
+        {rootDir}
       </div>
       <div className="explorer-tree">
         {loading && <div className="explorer-loading">Loading...</div>}

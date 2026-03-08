@@ -81,6 +81,7 @@ class JsonLineServer:
         ]
         self._tool_defs = self._provider.format_tools(self._tools)
         self._tool_map = {t.name: t for t in self._tools}
+        self._stop_flag = threading.Event()
 
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
@@ -108,6 +109,8 @@ class JsonLineServer:
         update_thread = threading.Thread(target=_bg_update_check, daemon=True)
         update_thread.start()
 
+        self._chat_thread: threading.Thread | None = None
+
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -122,9 +125,26 @@ class JsonLineServer:
             req_id = req.get("id", 0)
             req_type = req.get("type", "")
 
+            # Stop can arrive while chat is running in a thread.
+            if req_type == "stop":
+                self._handle_stop(req_id)
+                continue
+
+            # Wait for any running chat to finish before processing
+            # non-stop requests (except stop which is handled above).
+            if self._chat_thread and self._chat_thread.is_alive():
+                self._chat_thread.join()
+
             try:
                 if req_type == "chat":
-                    self._handle_chat(req_id, req.get("content", ""))
+                    # Run chat in a thread so stdin can still read stop.
+                    self._stop_flag.clear()
+                    self._chat_thread = threading.Thread(
+                        target=self._handle_chat,
+                        args=(req_id, req.get("content", "")),
+                        daemon=True,
+                    )
+                    self._chat_thread.start()
                 elif req_type == "command":
                     self._handle_command(req_id, req.get("command", ""))
                 elif req_type == "models":
@@ -161,15 +181,25 @@ class JsonLineServer:
             except Exception as exc:
                 _send({"id": req_id, "type": "error", "message": str(exc)})
 
+    def _handle_stop(self, req_id: int) -> None:
+        """Signal the current chat to stop."""
+        self._stop_flag.set()
+        _send({"id": req_id, "type": "stopped"})
+
     def _handle_chat(self, req_id: int, content: str) -> None:
         if not content.strip():
             _send({"id": req_id, "type": "error", "message": "Empty message"})
             return
 
+        self._stop_flag.clear()
         self._messages.append({"role": "user", "content": content})
 
         max_iterations = 15
         for _ in range(max_iterations):
+            if self._stop_flag.is_set():
+                _send({"id": req_id, "type": "done"})
+                return
+
             # Stream response from LLM.
             full_content = ""
             tool_calls = []
@@ -180,6 +210,9 @@ class JsonLineServer:
                     messages=self._messages,
                     tools=self._tool_defs,
                 ):
+                    if self._stop_flag.is_set():
+                        break
+
                     msg = chunk.get("message", {})
                     delta = msg.get("content", "")
                     if delta:
@@ -202,6 +235,13 @@ class JsonLineServer:
                 _send({"id": req_id, "type": "error", "message": str(exc)})
                 return
 
+            if self._stop_flag.is_set():
+                # Save whatever was generated so far.
+                if full_content:
+                    self._messages.append({"role": "assistant", "content": full_content})
+                _send({"id": req_id, "type": "done"})
+                return
+
             # Append assistant message to history.
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": full_content}
             if tool_calls:
@@ -215,6 +255,10 @@ class JsonLineServer:
 
             # Execute tool calls.
             for tc in tool_calls:
+                if self._stop_flag.is_set():
+                    _send({"id": req_id, "type": "done"})
+                    return
+
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
                 tool_args = func.get("arguments", {})

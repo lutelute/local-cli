@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import type { Message } from '../types'
 
 type Props = { message: Message }
 
 export function MessageBlock({ message }: Props) {
-  const { role, content, toolCalls, toolResults, streaming } = message
+  const { role, content, toolCalls, toolResults, streaming, thinking } = message
 
   if (role === 'system') {
     return (
@@ -28,16 +28,41 @@ export function MessageBlock({ message }: Props) {
     )
   }
 
-  // Assistant
+  // Assistant — thinking state.
+  if (thinking && !content && !toolCalls?.length) {
+    return (
+      <div className="msg">
+        <div className="msg-prompt">
+          <span className="msg-marker agent">$</span>
+          <span className="msg-body agent">
+            <span className="thinking-indicator">
+              <span className="thinking-dot" />
+              <span className="thinking-dot" />
+              <span className="thinking-dot" />
+              <span className="thinking-label">thinking</span>
+            </span>
+          </span>
+        </div>
+      </div>
+    )
+  }
+
+  // Determine if any tool is currently executing (has call but no result yet).
+  const pendingToolIndex = toolCalls
+    ? toolCalls.findIndex((_, i) => !toolResults?.[i])
+    : -1
+
   return (
     <div className="msg">
-      <div className="msg-prompt">
-        <span className="msg-marker agent">$</span>
-        <span className="msg-body agent">
-          {content}
-          {streaming && <span className="cursor" />}
-        </span>
-      </div>
+      {content && (
+        <div className="msg-prompt">
+          <span className="msg-marker agent">$</span>
+          <span className="msg-body agent">
+            {content}
+            {streaming && !toolCalls?.length && <span className="cursor" />}
+          </span>
+        </div>
+      )}
 
       {toolCalls?.map((tc, i) => (
         <ToolBlock
@@ -45,48 +70,76 @@ export function MessageBlock({ message }: Props) {
           name={tc.name}
           args={tc.args}
           output={toolResults?.[i]?.output}
+          running={i === pendingToolIndex}
         />
       ))}
+
+      {/* Waiting for next LLM response after tools executed */}
+      {toolCalls && toolCalls.length > 0 && toolResults && toolResults.length >= toolCalls.length && streaming && (
+        <div className="thinking-after-tool">
+          <span className="thinking-dot" />
+          <span className="thinking-dot" />
+          <span className="thinking-dot" />
+          <span className="thinking-label">processing results</span>
+        </div>
+      )}
     </div>
   )
 }
 
-function ToolBlock({ name, args, output }: {
+function ToolBlock({ name, args, output, running }: {
   name: string
   args: Record<string, unknown>
   output?: string
+  running?: boolean
 }) {
   const [collapsed, setCollapsed] = useState(true)
 
   const argStr = formatToolArgs(name, args)
 
+  const handleCopy = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (output) {
+      navigator.clipboard.writeText(output)
+    }
+  }, [output])
+
   return (
     <div className="tool">
-      <div className="tool-cmd">
-        <span className="tool-name">{name}</span>
-        {argStr && <span className="tool-arg"> {argStr}</span>}
+      <div className="tool-header">
+        <div className="tool-cmd">
+          {running && <span className="tool-spinner" />}
+          {!running && output && <span className="tool-check">&#10003;</span>}
+          <span className="tool-name">{name}</span>
+          {argStr && <span className="tool-arg"> {argStr}</span>}
+        </div>
+        {running && <span className="tool-status">running</span>}
       </div>
       {output && (
-        <>
+        <div className="tool-output-wrap">
           <div
             className={`tool-output ${collapsed ? 'collapsed' : ''}`}
             onClick={() => setCollapsed(!collapsed)}
           >
-            {output}
+            <pre className="tool-output-pre">{output}</pre>
           </div>
-          {output.length > 100 && (
-            <span className="tool-toggle" onClick={() => setCollapsed(!collapsed)}>
-              {collapsed ? '... show more' : '^ collapse'}
+          <div className="tool-output-actions">
+            {output.length > 100 && (
+              <span className="tool-toggle" onClick={() => setCollapsed(!collapsed)}>
+                {collapsed ? 'show more' : 'collapse'}
+              </span>
+            )}
+            <span className="tool-copy" onClick={handleCopy} title="Copy output">
+              copy
             </span>
-          )}
-        </>
+          </div>
+        </div>
       )}
     </div>
   )
 }
 
 function formatToolArgs(name: string, args: Record<string, unknown>): string {
-  // Show args in a terminal-friendly way.
   switch (name) {
     case 'read':
     case 'write':
@@ -97,8 +150,7 @@ function formatToolArgs(name: string, args: Record<string, unknown>): string {
     case 'grep':
       return `"${args.pattern || ''}" ${args.path || ''}`
     case 'edit': {
-      const fp = String(args.file_path || '')
-      return fp
+      return String(args.file_path || '')
     }
     default: {
       const entries = Object.entries(args)

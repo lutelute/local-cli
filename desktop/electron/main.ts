@@ -9,6 +9,7 @@ let pythonProcess: ChildProcess | null = null
 let lineBuffer = ''
 let pendingMessages: object[] = []
 let rendererReady = false
+let lastReadyMessage: object | null = null
 
 function findPython(): string {
   // Try python3 first, then python.
@@ -48,6 +49,10 @@ function startPythonServer() {
       if (!line.trim()) continue
       try {
         const msg = JSON.parse(line)
+        // Remember the ready message so we can re-send it on HMR re-mounts.
+        if (msg.type === 'ready') {
+          lastReadyMessage = msg
+        }
         if (rendererReady && mainWindow) {
           mainWindow.webContents.send('python-message', msg)
         } else {
@@ -117,11 +122,18 @@ ipcMain.handle('get-python-status', () => {
 
 ipcMain.on('renderer-ready', () => {
   rendererReady = true
+  const hadPending = pendingMessages.length > 0
   // Flush any messages that arrived before the renderer was ready.
   for (const msg of pendingMessages) {
     mainWindow?.webContents.send('python-message', msg)
   }
   pendingMessages = []
+
+  // On HMR re-mounts (and React StrictMode double-mounts) the buffer is
+  // empty but the renderer needs the ready message again.
+  if (!hadPending && lastReadyMessage) {
+    mainWindow?.webContents.send('python-message', lastReadyMessage)
+  }
 })
 
 ipcMain.handle('open-directory-dialog', async () => {

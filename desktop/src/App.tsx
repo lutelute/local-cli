@@ -83,6 +83,9 @@ export default function App() {
   }, [])
 
   const handleTerminalClick = useCallback(() => {
+    // Don't steal focus if the user is selecting text for copy.
+    const sel = window.getSelection()
+    if (sel && sel.toString().length > 0) return
     inputRef.current?.focus()
   }, [])
 
@@ -117,7 +120,7 @@ export default function App() {
           setMessages(prev => {
             const last = prev[prev.length - 1]
             if (last?.id === activeMessageId.current && last.role === 'assistant') {
-              return [...prev.slice(0, -1), { ...last, content: last.content + content, streaming: true }]
+              return [...prev.slice(0, -1), { ...last, content: last.content + content, thinking: false, streaming: true }]
             }
             const newId = uid()
             activeMessageId.current = newId
@@ -131,7 +134,7 @@ export default function App() {
           setMessages(prev => {
             const last = prev[prev.length - 1]
             if (last?.id === activeMessageId.current) {
-              return [...prev.slice(0, -1), { ...last, toolCalls: [...(last.toolCalls || []), tc] }]
+              return [...prev.slice(0, -1), { ...last, thinking: false, toolCalls: [...(last.toolCalls || []), tc] }]
             }
             return prev
           })
@@ -151,10 +154,15 @@ export default function App() {
         }
 
         case 'done':
+        case 'stopped':
           setMessages(prev => {
             const last = prev[prev.length - 1]
             if (last?.id === activeMessageId.current) {
-              return [...prev.slice(0, -1), { ...last, streaming: false }]
+              // Remove empty thinking placeholders on stop.
+              if (!last.content && !last.toolCalls?.length) {
+                return prev.slice(0, -1)
+              }
+              return [...prev.slice(0, -1), { ...last, streaming: false, thinking: false }]
             }
             return prev
           })
@@ -273,19 +281,39 @@ export default function App() {
 
   const sendMessage = useCallback((text: string) => {
     if (!text.trim() || streaming) return
+    const thinkId = uid()
     activeMessageId.current = ''
-    setMessages(prev => [...prev, { id: uid(), role: 'user', content: text }])
+    setMessages(prev => [
+      ...prev,
+      { id: uid(), role: 'user', content: text },
+      { id: thinkId, role: 'assistant', content: '', thinking: true, streaming: true },
+    ])
+    activeMessageId.current = thinkId
     setStreaming(true)
     window.api.sendToPython({ id: nextId(), type: 'chat', content: text })
   }, [streaming])
 
+  const handleStop = useCallback(() => {
+    window.api.sendToPython({ id: nextId(), type: 'stop' })
+  }, [])
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Escape' && streaming) {
+      e.preventDefault()
+      handleStop()
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      if (streaming) {
+        // Stop current stream first; user can then send their message.
+        handleStop()
+        return
+      }
       sendMessage(inputText)
       setInputText('')
     }
-  }, [inputText, sendMessage])
+  }, [inputText, sendMessage, streaming, handleStop])
 
   const handleModelSelect = useCallback((model: string) => {
     setShowPicker(false)
@@ -420,7 +448,7 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.3.0" />
+                  <Banner version="0.4.0" />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.
@@ -444,10 +472,19 @@ export default function App() {
                 value={inputText}
                 onChange={e => { setInputText(e.target.value); handleInput() }}
                 onKeyDown={handleKeyDown}
-                placeholder={!status.ready ? 'waiting for backend...' : 'ask anything...'}
-                disabled={!status.ready || streaming}
+                placeholder={
+                  !status.ready ? 'waiting for backend...'
+                  : streaming ? 'Enter to stop, Esc to cancel...'
+                  : 'ask anything...'
+                }
+                disabled={!status.ready}
                 rows={1}
               />
+              {streaming && (
+                <button className="stop-btn" onClick={handleStop} title="Stop generation (Esc)">
+                  stop
+                </button>
+              )}
             </div>
           </div>
         </div>

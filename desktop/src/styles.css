@@ -177,6 +177,9 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 16px;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 .terminal-inner {
@@ -210,6 +213,12 @@ body {
   word-break: break-word;
   flex: 1;
   min-width: 0;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+::selection {
+  background: rgba(88, 166, 255, 0.25);
 }
 
 .msg-body.user { color: var(--text); }
@@ -233,6 +242,44 @@ body {
   50% { opacity: 0; }
 }
 
+/* Thinking indicator */
+.thinking-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.thinking-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--purple);
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.3s; }
+
+.thinking-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+.thinking-after-tool {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 2px 24px;
+  padding-left: 10px;
+}
+
+@keyframes thinking-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
+}
+
 /* Tool blocks */
 .tool {
   margin: 4px 0 4px 24px;
@@ -240,9 +287,19 @@ body {
   padding-left: 10px;
 }
 
+.tool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .tool-cmd {
   color: var(--green);
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .tool-cmd .tool-name {
@@ -253,20 +310,68 @@ body {
   color: var(--text-dim);
 }
 
+.tool-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--yellow);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.tool-check {
+  color: var(--green);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.tool-status {
+  color: var(--yellow);
+  font-size: 11px;
+  animation: pulse 1s infinite;
+}
+
+.tool-output-wrap {
+  margin-top: 2px;
+}
+
 .tool-output {
   color: var(--text-muted);
   font-size: 12px;
-  max-height: 150px;
+  max-height: 200px;
   overflow-y: auto;
+  margin-top: 2px;
+  background: rgba(13, 17, 23, 0.5);
+  border-radius: 3px;
+  padding: 4px 6px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.tool-output-pre {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-  margin-top: 2px;
 }
 
 .tool-output.collapsed {
   max-height: 40px;
   overflow: hidden;
   cursor: pointer;
+}
+
+.tool-output-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
 }
 
 .tool-toggle {
@@ -277,6 +382,20 @@ body {
 }
 
 .tool-toggle:hover { color: var(--text-dim); }
+
+.tool-copy {
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
+.tool-copy:hover {
+  opacity: 1;
+  color: var(--accent);
+}
 
 /* Input */
 .input-area {
@@ -317,6 +436,23 @@ body {
 .input-field::placeholder { color: var(--text-muted); }
 
 .input-field:disabled { opacity: 0.5; }
+
+.stop-btn {
+  background: none;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  color: var(--red);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.stop-btn:hover {
+  background: rgba(248, 81, 73, 0.1);
+}
 
 /* Welcome */
 .welcome {
@@ -919,6 +1055,24 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   text-align: center;
+}
+
+.explorer-path-bar {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  direction: rtl;
+  text-align: left;
+}
+
+.explorer-path-bar:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .explorer-tree {

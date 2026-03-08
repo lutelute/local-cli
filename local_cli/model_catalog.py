@@ -44,7 +44,7 @@ CATALOG: list[CatalogEntry] = [
 
     # --- General / Chat ---
     CatalogEntry("qwen3:8b", "Qwen 3 8B", "General", "8B", 5.2,
-                 "Latest Qwen. Strong reasoning with tool calling.", ["general", "tools", "reasoning"]),
+                 "Latest Qwen. Strong reasoning with tool calling. Japanese OK.", ["general", "tools", "reasoning", "japanese"]),
     CatalogEntry("qwen3:4b", "Qwen 3 4B", "General", "4B", 2.6,
                  "Compact Qwen 3 for lighter hardware.", ["general", "tools"]),
     CatalogEntry("qwen3:14b", "Qwen 3 14B", "General", "14B", 9.0,
@@ -60,9 +60,9 @@ CATALOG: list[CatalogEntry] = [
     CatalogEntry("gemma3:4b", "Gemma 3 4B", "General", "4B", 3.3,
                  "Google's compact model. Good for simple tasks.", ["general"]),
     CatalogEntry("gemma3:12b", "Gemma 3 12B", "General", "12B", 8.1,
-                 "Larger Gemma with better accuracy.", ["general", "tools"]),
+                 "Larger Gemma with better accuracy. Japanese OK.", ["general", "tools", "japanese"]),
     CatalogEntry("gemma3:27b", "Gemma 3 27B", "General", "27B", 17.0,
-                 "Google's largest open model.", ["general", "tools", "reasoning"]),
+                 "Google's largest open model. Japanese OK.", ["general", "tools", "reasoning", "japanese"]),
     CatalogEntry("mistral:7b", "Mistral 7B", "General", "7B", 4.1,
                  "Efficient European model with sliding window attention.", ["general"]),
     CatalogEntry("phi4:14b", "Phi-4 14B", "General", "14B", 9.1,
@@ -90,14 +90,28 @@ CATALOG: list[CatalogEntry] = [
     CatalogEntry("qwq:32b", "QwQ 32B", "Reasoning", "32B", 20.0,
                  "Qwen's dedicated reasoning model.", ["reasoning"]),
 
-    # --- Multilingual / Japanese ---
+    # --- Multilingual ---
     CatalogEntry("aya-expanse:8b", "Aya Expanse 8B", "Multilingual", "8B", 4.8,
                  "Cohere's multilingual model. 23 languages.", ["multilingual"]),
     CatalogEntry("aya-expanse:32b", "Aya Expanse 32B", "Multilingual", "32B", 19.0,
                  "Larger multilingual model with better quality.", ["multilingual"]),
+
+    # --- Japanese ---
+    CatalogEntry("llm-jp:13b", "LLM-jp 13B", "Japanese", "13B", 7.4,
+                 "National Institute of Informatics (NII). Japanese-focused LLM.", ["japanese"]),
+    CatalogEntry("hf.co/elyza/Llama-3-ELYZA-JP-8B-GGUF", "ELYZA JP 8B", "Japanese", "8B", 4.7,
+                 "ELYZA's Japanese Llama 3. Strong at Japanese NLP tasks.", ["japanese"]),
+    CatalogEntry("hf.co/LiquidAI/LFM2.5-1.2B-JP-GGUF", "LFM 2.5 1.2B JP", "Japanese", "1.2B", 0.8,
+                 "Liquid AI's Japanese-specialized compact model.", ["japanese"]),
+    CatalogEntry("hf.co/mmnga/cyberagent-DeepSeek-R1-Distill-Qwen-14B-Japanese-gguf", "CyberAgent DeepSeek R1 14B JP", "Japanese", "14B", 9.0,
+                 "CyberAgent's Japanese DeepSeek R1 distillation. Reasoning in Japanese.", ["japanese", "reasoning"]),
+    CatalogEntry("hf.co/mmnga/Fugaku-LLM-13B-instruct-gguf", "Fugaku LLM 13B", "Japanese", "13B", 7.4,
+                 "Fugaku supercomputer project. Japanese instruction-tuned.", ["japanese"]),
+    CatalogEntry("hf.co/dahara1/gemma-2-2b-jpn-it-gguf", "Gemma 2 2B JPN IT", "Japanese", "2B", 1.6,
+                 "Google Gemma 2 Japanese instruction-tuned. Compact.", ["japanese"]),
 ]
 
-CATEGORIES = ["Code", "General", "Small", "Reasoning", "Multilingual"]
+CATEGORIES = ["Code", "General", "Small", "Reasoning", "Japanese", "Multilingual"]
 
 
 def get_catalog() -> list[dict]:
@@ -145,6 +159,11 @@ def _classify_model(name: str, tags: list[str], desc: str) -> str:
 
     if any(k in lower_name for k in ("embed", "minilm", "bge")):
         return "Embedding"
+
+    if any(k in lower_name for k in ("elyza", "llm-jp", "japanese", "-jp-", "-jp:")):
+        return "Japanese"
+    if "japanese" in tags:
+        return "Japanese"
 
     if any(k in lower_name for k in ("aya", "translate")):
         return "Multilingual"

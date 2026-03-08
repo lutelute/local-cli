@@ -17,6 +17,7 @@ export type Message = {
   toolCalls?: ToolCall[]
   toolResults?: ToolResult[]
   streaming?: boolean
+  thinking?: boolean
 }
 
 export type AppStatus = {
