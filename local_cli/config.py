@@ -21,6 +21,10 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "provider": "ollama",
     "model_registry_file": "",
     "orchestrator_model": "",
+    "plan_dir": ".agents/plans",
+    "knowledge_dir": ".agents/knowledge",
+    "skills_dir": ".agents/skills",
+    "default_mode": "agent",
 }
 
 # Mapping of environment variable names to config keys.
@@ -164,6 +168,10 @@ class Config:
         self.provider: str = str(merged["provider"])
         self.model_registry_file: str = str(merged["model_registry_file"])
         self.orchestrator_model: str = str(merged["orchestrator_model"])
+        self.plan_dir: str = str(merged["plan_dir"])
+        self.knowledge_dir: str = str(merged["knowledge_dir"])
+        self.skills_dir: str = str(merged["skills_dir"])
+        self.default_mode: str = str(merged["default_mode"])
 
     @property
     def has_claude_access(self) -> bool:
