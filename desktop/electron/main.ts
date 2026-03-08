@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'path'
 
-const APP_VERSION = '0.4.0'
+const APP_VERSION = '0.5.0'
 const GITHUB_REPO = 'lutelute/local-cli'
 
 // Claude auth credential storage path.
