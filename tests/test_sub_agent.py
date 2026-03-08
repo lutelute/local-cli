@@ -3,11 +3,14 @@
 import os
 import sys
 import time
+import types
 import unittest
 from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from local_cli.config import Config
+from local_cli.orchestrator import Orchestrator
 from local_cli.providers.base import (
     LLMProvider,
     ProviderStreamError,
@@ -1919,6 +1922,816 @@ class TestSubAgentRunnerErrorHandling(unittest.TestCase):
             self.assertEqual(status_map["bg-bad"], "error")
         finally:
             runner.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Integration test helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_config(**overrides: object) -> Config:
+    """Create a Config with defaults suitable for integration testing.
+
+    Uses a non-existent config file to avoid loading any real
+    configuration from the filesystem.
+    """
+    namespace = types.SimpleNamespace(
+        model=overrides.get("model", "qwen3:8b"),
+        provider=overrides.get("provider", "ollama"),
+        orchestrator_model=overrides.get("orchestrator_model", ""),
+        ollama_host=overrides.get("ollama_host", "http://localhost:11434"),
+    )
+    return Config(cli_args=namespace, config_file="/dev/null")
+
+
+# ---------------------------------------------------------------------------
+# Integration: Orchestrator.create_fresh_provider()
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorCreateFreshProvider(unittest.TestCase):
+    """Integration tests for Orchestrator.create_fresh_provider()."""
+
+    def test_returns_new_instance_each_time(self) -> None:
+        """create_fresh_provider() returns a distinct instance on each call."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            # Return a new MagicMock each time (factory-like).
+            mock_get.side_effect = lambda *a, **kw: MagicMock(spec=LLMProvider)
+
+            p1 = orch.create_fresh_provider()
+            p2 = orch.create_fresh_provider()
+            p3 = orch.create_fresh_provider()
+
+        self.assertIsNot(p1, p2)
+        self.assertIsNot(p2, p3)
+        self.assertIsNot(p1, p3)
+        # Factory called three times.
+        self.assertEqual(mock_get.call_count, 3)
+
+    def test_not_cached(self) -> None:
+        """create_fresh_provider() does NOT cache the instance."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.side_effect = lambda *a, **kw: MagicMock(spec=LLMProvider)
+
+            fresh = orch.create_fresh_provider()
+
+        # The fresh instance is NOT in the provider cache.
+        self.assertNotIn(fresh, orch._providers.values())
+
+    def test_uses_active_provider_name(self) -> None:
+        """create_fresh_provider(None) uses the active provider name."""
+        config = _make_config(provider="ollama")
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.return_value = MagicMock(spec=LLMProvider)
+            orch.create_fresh_provider()
+
+        mock_get.assert_called_once_with(
+            "ollama", base_url="http://localhost:11434"
+        )
+
+    def test_explicit_provider_name(self) -> None:
+        """create_fresh_provider('claude') creates a Claude provider."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.return_value = MagicMock(spec=LLMProvider)
+            orch.create_fresh_provider("claude")
+
+        mock_get.assert_called_once_with("claude")
+
+    def test_unknown_provider_raises(self) -> None:
+        """create_fresh_provider() raises ValueError for unknown provider."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with self.assertRaises(ValueError) as ctx:
+            orch.create_fresh_provider("openai")
+        self.assertIn("Unknown provider", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Integration: Orchestrator.spawn_agent()
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorSpawnAgent(unittest.TestCase):
+    """Integration tests for Orchestrator.spawn_agent() end-to-end."""
+
+    def test_spawn_agent_returns_sub_agent_result(self) -> None:
+        """spawn_agent() creates a sub-agent and returns a SubAgentResult."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Agent output")
+            mock_get.return_value = mock_prov
+
+            result = orch.spawn_agent(
+                prompt="Summarize this file",
+                description="summarize file",
+            )
+
+        self.assertIsInstance(result, SubAgentResult)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.content, "Agent output")
+        self.assertEqual(result.description, "summarize file")
+
+        # Clean up.
+        orch.shutdown_agents()
+
+    def test_spawn_agent_uses_fresh_provider(self) -> None:
+        """spawn_agent() creates a fresh provider (not the cached one)."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        call_count = 0
+
+        def counting_factory(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            prov = _make_mock_provider()
+            _setup_provider_simple_response(prov, f"Response {call_count}")
+            return prov
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.side_effect = counting_factory
+            result = orch.spawn_agent(prompt="task", description="test")
+
+        # At least one call for the fresh provider.
+        self.assertGreaterEqual(call_count, 1)
+        self.assertEqual(result.status, "success")
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_uses_config_model(self) -> None:
+        """spawn_agent() uses the config model by default."""
+        config = _make_config(model="qwen3:8b")
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            orch.spawn_agent(prompt="task", description="test")
+
+        # The provider's chat_stream was called with the config model.
+        call_args = mock_prov.chat_stream.call_args
+        model_arg = call_args[0][0]
+        self.assertEqual(model_arg, "qwen3:8b")
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_custom_model(self) -> None:
+        """spawn_agent() accepts a custom model name."""
+        config = _make_config(model="qwen3:8b")
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            orch.spawn_agent(
+                prompt="task",
+                description="test",
+                model="gemma3:4b",
+            )
+
+        call_args = mock_prov.chat_stream.call_args
+        model_arg = call_args[0][0]
+        self.assertEqual(model_arg, "gemma3:4b")
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_empty_prompt_raises(self) -> None:
+        """spawn_agent() raises ValueError for empty prompt."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with self.assertRaises(ValueError) as ctx:
+            orch.spawn_agent(prompt="", description="test")
+        self.assertIn("empty", str(ctx.exception).lower())
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_background_returns_agent_id(self) -> None:
+        """spawn_agent(run_in_background=True) returns agent ID string."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            # Use a slow response so we can verify background mode.
+            def slow_stream(*args: Any, **kwargs: Any):
+                time.sleep(0.3)
+                return iter(_make_chunks(["Background done"]))
+
+            mock_prov.chat_stream.side_effect = slow_stream
+            mock_get.return_value = mock_prov
+
+            result = orch.spawn_agent(
+                prompt="background task",
+                description="bg test",
+                run_in_background=True,
+            )
+
+        # Background mode returns agent_id string, not SubAgentResult.
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.startswith("agent-"))
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_background_result_retrievable(self) -> None:
+        """Background agent result is retrievable via get_background_result."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "bg result")
+            mock_get.return_value = mock_prov
+
+            agent_id = orch.spawn_agent(
+                prompt="background task",
+                description="bg poll",
+                run_in_background=True,
+            )
+
+            # Poll until done.
+            result = None
+            for _ in range(20):
+                result = orch.get_background_result(agent_id)
+                if result is not None:
+                    break
+                time.sleep(0.05)
+
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, SubAgentResult)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.content, "bg result")
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_default_description(self) -> None:
+        """spawn_agent() uses 'sub-agent task' if description is empty."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            result = orch.spawn_agent(prompt="do something")
+
+        self.assertEqual(result.description, "sub-agent task")
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_creates_runner_lazily(self) -> None:
+        """spawn_agent() creates the SubAgentRunner lazily."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        # Runner not created yet.
+        self.assertIsNone(orch._sub_agent_runner)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            orch.spawn_agent(prompt="trigger lazy creation")
+
+        # Runner now exists.
+        self.assertIsNotNone(orch._sub_agent_runner)
+
+        orch.shutdown_agents()
+
+    def test_spawn_agent_with_tool_calls(self) -> None:
+        """spawn_agent() supports sub-agents that use tools."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_tool_then_response(
+                mock_prov,
+                tool_name="bash",
+                tool_args={"command": "ls"},
+                final_content="File listing complete",
+            )
+            mock_get.return_value = mock_prov
+
+            result = orch.spawn_agent(
+                prompt="List files in the current directory",
+                description="list files",
+            )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.content, "File listing complete")
+        self.assertGreaterEqual(result.tool_calls_count, 1)
+
+        orch.shutdown_agents()
+
+
+# ---------------------------------------------------------------------------
+# Integration: Orchestrator.get_background_result() edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorGetBackgroundResult(unittest.TestCase):
+    """Integration tests for Orchestrator.get_background_result()."""
+
+    def test_returns_none_before_runner_created(self) -> None:
+        """Returns None when no runner has been created yet."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        result = orch.get_background_result("nonexistent")
+        self.assertIsNone(result)
+
+    def test_returns_none_for_unknown_id(self) -> None:
+        """Returns None for an unknown agent ID (after runner exists)."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            # Create runner by spawning an agent.
+            orch.spawn_agent(prompt="init", description="init")
+
+        # Now query an unknown ID.
+        result = orch.get_background_result("nonexistent-id")
+        self.assertIsNone(result)
+
+        orch.shutdown_agents()
+
+
+# ---------------------------------------------------------------------------
+# Integration: Orchestrator.shutdown_agents()
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorShutdownAgents(unittest.TestCase):
+    """Integration tests for Orchestrator.shutdown_agents()."""
+
+    def test_shutdown_without_runner(self) -> None:
+        """shutdown_agents() is safe when no runner was created."""
+        config = _make_config()
+        orch = Orchestrator(config)
+        orch.shutdown_agents()  # Should not raise.
+
+    def test_shutdown_clears_runner(self) -> None:
+        """shutdown_agents() sets _sub_agent_runner to None."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            orch.spawn_agent(prompt="init", description="init")
+
+        self.assertIsNotNone(orch._sub_agent_runner)
+        orch.shutdown_agents()
+        self.assertIsNone(orch._sub_agent_runner)
+
+    def test_shutdown_idempotent(self) -> None:
+        """shutdown_agents() can be called multiple times safely."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_prov = _make_mock_provider()
+            _setup_provider_simple_response(mock_prov, "Done")
+            mock_get.return_value = mock_prov
+
+            orch.spawn_agent(prompt="init", description="init")
+
+        orch.shutdown_agents()
+        orch.shutdown_agents()
+        orch.shutdown_agents()  # Should not raise.
+
+
+# ---------------------------------------------------------------------------
+# Integration: Multiple parallel agents via Orchestrator
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorParallelAgents(unittest.TestCase):
+    """Integration tests for parallel sub-agent execution via Orchestrator."""
+
+    def test_three_agents_run_concurrently(self) -> None:
+        """3 agents with 0.1s delay each complete in < 0.25s total."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        call_counter = 0
+
+        def delayed_provider(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal call_counter
+            call_counter += 1
+            prov = _make_mock_provider()
+
+            def delayed_stream(*a: Any, **kw: Any):
+                time.sleep(0.1)
+                return iter(_make_chunks([f"Result {call_counter}"]))
+
+            prov.chat_stream.side_effect = delayed_stream
+            return prov
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.side_effect = delayed_provider
+
+            # Spawn 3 background agents.
+            agent_ids = []
+            for i in range(3):
+                aid = orch.spawn_agent(
+                    prompt=f"Task {i}",
+                    description=f"task-{i}",
+                    run_in_background=True,
+                )
+                agent_ids.append(aid)
+
+            self.assertEqual(len(agent_ids), 3)
+
+            # Wait for all to complete.
+            start = time.monotonic()
+            results: dict[str, SubAgentResult] = {}
+            for _ in range(40):
+                for aid in agent_ids:
+                    if aid not in results:
+                        r = orch.get_background_result(aid)
+                        if r is not None:
+                            results[aid] = r
+                if len(results) == 3:
+                    break
+                time.sleep(0.02)
+            elapsed = time.monotonic() - start
+
+        # All 3 completed.
+        self.assertEqual(len(results), 3)
+        for r in results.values():
+            self.assertEqual(r.status, "success")
+
+        # If sequential, would be >= 0.3s. Parallel should be < 0.25s.
+        self.assertLess(elapsed, 0.25)
+
+        orch.shutdown_agents()
+
+    def test_all_results_collected(self) -> None:
+        """All parallel agents produce independent results."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        agent_num = 0
+
+        def numbered_provider(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal agent_num
+            agent_num += 1
+            prov = _make_mock_provider()
+            content = f"Output-{agent_num}"
+            _setup_provider_simple_response(prov, content)
+            return prov
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.side_effect = numbered_provider
+
+            # Spawn 3 foreground agents sequentially (each blocking).
+            results = []
+            for i in range(3):
+                result = orch.spawn_agent(
+                    prompt=f"Task {i}",
+                    description=f"task-{i}",
+                )
+                results.append(result)
+
+        self.assertEqual(len(results), 3)
+        # Each result is a distinct SubAgentResult.
+        for r in results:
+            self.assertIsInstance(r, SubAgentResult)
+            self.assertEqual(r.status, "success")
+
+        # All contents are unique (from different providers).
+        contents = {r.content for r in results}
+        self.assertEqual(len(contents), 3)
+
+        orch.shutdown_agents()
+
+    def test_mixed_success_and_error(self) -> None:
+        """Mix of successful and erroring agents returns correct results."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        call_idx = 0
+
+        def alternating_provider(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal call_idx
+            call_idx += 1
+            prov = _make_mock_provider()
+            if call_idx == 2:
+                # Second agent's provider will error.
+                prov.chat_stream.side_effect = RuntimeError("provider error")
+            else:
+                _setup_provider_simple_response(prov, f"OK-{call_idx}")
+            return prov
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            mock_get.side_effect = alternating_provider
+
+            results = []
+            for i in range(3):
+                result = orch.spawn_agent(
+                    prompt=f"Task {i}",
+                    description=f"task-{i}",
+                )
+                results.append(result)
+
+        # All returned SubAgentResult (no exceptions bubbled up).
+        for r in results:
+            self.assertIsInstance(r, SubAgentResult)
+
+        statuses = [r.status for r in results]
+        self.assertIn("success", statuses)
+        self.assertIn("error", statuses)
+        # Exactly one error (the second agent).
+        self.assertEqual(statuses.count("error"), 1)
+
+        orch.shutdown_agents()
+
+
+# ---------------------------------------------------------------------------
+# Integration: agent_loop with AgentTool
+# ---------------------------------------------------------------------------
+
+
+class TestAgentLoopWithAgentTool(unittest.TestCase):
+    """Integration tests: main agent_loop calls AgentTool, sub-agent runs."""
+
+    def test_agent_tool_invoked_and_result_flows_back(self) -> None:
+        """LLM calls 'agent' tool → sub-agent executes → result in messages."""
+        from local_cli.agent import agent_loop
+        from local_cli.tools.agent_tool import AgentTool
+
+        # --- Set up the main agent's provider (mock LLM). ---
+        main_provider = _make_mock_provider("main-ollama")
+
+        # First call: LLM requests the 'agent' tool.
+        agent_tool_call = [
+            {
+                "function": {
+                    "name": "agent",
+                    "arguments": {
+                        "description": "count files",
+                        "prompt": "Count the Python files.",
+                    },
+                },
+            }
+        ]
+        first_response_chunks = _make_chunks(
+            ["I will delegate this task."],
+            tool_calls=agent_tool_call,
+        )
+
+        # Second call: LLM sees the tool result, responds with final answer.
+        final_chunks = _make_chunks(
+            ["The sub-agent found the answer."],
+        )
+
+        main_provider.chat_stream.side_effect = [
+            iter(first_response_chunks),
+            iter(final_chunks),
+        ]
+
+        # --- Set up the sub-agent's provider. ---
+        sub_provider = _make_mock_provider("sub-ollama")
+        _setup_provider_simple_response(sub_provider, "Found 42 Python files.")
+
+        # --- Create the AgentTool with a real SubAgentRunner. ---
+        runner = SubAgentRunner(max_workers=2)
+        dummy_tool = _DummyTool(name="bash", result="file1.py\nfile2.py")
+        agent_tool = AgentTool(
+            runner=runner,
+            provider=sub_provider,
+            model="qwen3:8b",
+            sub_agent_tools=[dummy_tool],
+        )
+
+        # Patch _create_fresh_provider to return our mock sub-provider.
+        with patch.object(agent_tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = sub_provider
+
+            # --- Run the main agent loop. ---
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Count all Python files."},
+            ]
+
+            # Suppress stdout from main agent loop.
+            orig_stdout = sys.stdout
+            try:
+                sys.stdout = StringIO()
+                agent_loop(
+                    client=main_provider,
+                    model="qwen3:8b",
+                    tools=[agent_tool],
+                    messages=messages,
+                )
+            finally:
+                sys.stdout = orig_stdout
+
+        # --- Verify the flow. ---
+        # The messages list should contain the tool result.
+        tool_result_msgs = [
+            m for m in messages if m.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_result_msgs), 1)
+
+        # The tool result content should contain the sub-agent's output.
+        tool_result_content = tool_result_msgs[0]["content"]
+        self.assertIn("Found 42 Python files", tool_result_content)
+        self.assertIn("success", tool_result_content)
+
+        # The final assistant message should be the last in messages.
+        last_msg = messages[-1]
+        self.assertEqual(last_msg["role"], "assistant")
+        self.assertIn("sub-agent found the answer", last_msg["content"])
+
+        runner.shutdown()
+
+    def test_agent_tool_background_in_agent_loop(self) -> None:
+        """LLM calls 'agent' tool with run_in_background=True."""
+        from local_cli.agent import agent_loop
+        from local_cli.tools.agent_tool import AgentTool
+
+        main_provider = _make_mock_provider("main")
+
+        # LLM requests the agent tool in background mode.
+        agent_tool_call = [
+            {
+                "function": {
+                    "name": "agent",
+                    "arguments": {
+                        "description": "bg search",
+                        "prompt": "Search files in background.",
+                        "run_in_background": True,
+                    },
+                },
+            }
+        ]
+        first_chunks = _make_chunks(
+            ["Starting background task."],
+            tool_calls=agent_tool_call,
+        )
+        final_chunks = _make_chunks(
+            ["Background task started."],
+        )
+        main_provider.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(final_chunks),
+        ]
+
+        sub_provider = _make_mock_provider("sub")
+
+        def slow_stream(*a: Any, **kw: Any):
+            time.sleep(0.1)
+            return iter(_make_chunks(["bg result"]))
+
+        sub_provider.chat_stream.side_effect = slow_stream
+
+        runner = SubAgentRunner(max_workers=2)
+        agent_tool = AgentTool(
+            runner=runner,
+            provider=sub_provider,
+            model="qwen3:8b",
+            sub_agent_tools=[],
+        )
+
+        with patch.object(agent_tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = sub_provider
+
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Start background search."},
+            ]
+
+            orig_stdout = sys.stdout
+            try:
+                sys.stdout = StringIO()
+                agent_loop(
+                    client=main_provider,
+                    model="qwen3:8b",
+                    tools=[agent_tool],
+                    messages=messages,
+                )
+            finally:
+                sys.stdout = orig_stdout
+
+        # The tool result should contain the background agent ID.
+        tool_result_msgs = [
+            m for m in messages if m.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_result_msgs), 1)
+        tool_content = tool_result_msgs[0]["content"]
+        self.assertIn("background", tool_content)
+        self.assertIn("agent-", tool_content)
+
+        runner.shutdown()
+
+    def test_sub_agent_tool_calls_within_agent_loop(self) -> None:
+        """Sub-agent spawned via AgentTool can use its own tools."""
+        from local_cli.agent import agent_loop
+        from local_cli.tools.agent_tool import AgentTool
+
+        main_provider = _make_mock_provider("main")
+
+        # Main LLM calls the agent tool.
+        agent_tool_call = [
+            {
+                "function": {
+                    "name": "agent",
+                    "arguments": {
+                        "description": "use tools",
+                        "prompt": "Use the dummy tool and report.",
+                    },
+                },
+            }
+        ]
+        first_chunks = _make_chunks(["Delegating."], tool_calls=agent_tool_call)
+        final_chunks = _make_chunks(["Got the result from sub-agent."])
+        main_provider.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(final_chunks),
+        ]
+
+        # Sub-agent provider: first calls a tool, then responds.
+        sub_provider = _make_mock_provider("sub")
+        _setup_provider_tool_then_response(
+            sub_provider,
+            tool_name="dummy",
+            tool_args={"arg": "test"},
+            final_content="Tool executed successfully with result: ok",
+        )
+
+        runner = SubAgentRunner(max_workers=2)
+        dummy_tool = _DummyTool(name="dummy", result="ok")
+        agent_tool = AgentTool(
+            runner=runner,
+            provider=sub_provider,
+            model="qwen3:8b",
+            sub_agent_tools=[dummy_tool],
+        )
+
+        with patch.object(agent_tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = sub_provider
+
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": "You are an assistant."},
+                {"role": "user", "content": "Use tools via sub-agent."},
+            ]
+
+            orig_stdout = sys.stdout
+            try:
+                sys.stdout = StringIO()
+                agent_loop(
+                    client=main_provider,
+                    model="qwen3:8b",
+                    tools=[agent_tool],
+                    messages=messages,
+                )
+            finally:
+                sys.stdout = orig_stdout
+
+        # The tool result from main agent should contain the sub-agent's
+        # final output (which includes tool results).
+        tool_result_msgs = [
+            m for m in messages if m.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_result_msgs), 1)
+        tool_content = tool_result_msgs[0]["content"]
+        self.assertIn("Tool executed successfully", tool_content)
+        self.assertIn("success", tool_content)
+
+        # Sub-agent should have made tool calls.
+        self.assertIn("Tool calls: 1", tool_content)
+
+        runner.shutdown()
 
 
 if __name__ == "__main__":
