@@ -16,6 +16,11 @@ from local_cli.agent import (
     _needs_compaction,
     agent_loop,
 )
+from local_cli.clipboard import (
+    ClipboardError,
+    ClipboardUnavailableError,
+    copy_to_clipboard,
+)
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
@@ -100,6 +105,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/undo": "Undo the most recent file modifications (git checkout).",
     "/diff": "Show uncommitted changes in the working tree.",
     "/context": "Show context window usage (messages, tokens, compaction).",
+    "/copy": "Copy last assistant response to clipboard.",
 }
 
 
@@ -549,6 +555,30 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             f"Est. tokens: ~{est_tokens} / {token_limit} | "
             f"Compaction: {compaction_status}"
         )
+        return True
+
+    # -- /copy --------------------------------------------------------------
+    if cmd == "/copy":
+        # Find the last assistant message in the conversation history.
+        last_assistant = None
+        for msg in reversed(ctx.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if content:
+                    last_assistant = content
+                    break
+
+        if last_assistant is None:
+            print("Nothing to copy.")
+            return True
+
+        try:
+            copy_to_clipboard(last_assistant)
+            print("Copied to clipboard.")
+        except ClipboardUnavailableError:
+            print("Clipboard not available.")
+        except ClipboardError as exc:
+            print(f"Copy failed: {exc}")
         return True
 
     # -- Unknown command ----------------------------------------------------
