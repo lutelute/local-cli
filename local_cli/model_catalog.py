@@ -43,8 +43,14 @@ CATALOG: list[CatalogEntry] = [
                  "BigCode open-source code model.", ["code"]),
 
     # --- General / Chat ---
+    CatalogEntry("qwen3.5:4b", "Qwen 3.5 4B", "General", "4B", 2.6,
+                 "Latest Qwen 3.5. Vision + thinking + tools. Very capable for its size.", ["general", "tools", "reasoning", "vision"]),
+    CatalogEntry("qwen3.5:9b", "Qwen 3.5 9B", "General", "9B", 5.5,
+                 "Qwen 3.5 mid-size. Strong reasoning with vision.", ["general", "tools", "reasoning", "vision"]),
+    CatalogEntry("qwen3.5:27b", "Qwen 3.5 27B", "General", "27B", 17.0,
+                 "Qwen 3.5 large. Near frontier-level quality.", ["general", "tools", "reasoning", "vision"]),
     CatalogEntry("qwen3:8b", "Qwen 3 8B", "General", "8B", 5.2,
-                 "Latest Qwen. Strong reasoning with tool calling. Japanese OK.", ["general", "tools", "reasoning", "japanese"]),
+                 "Qwen 3. Strong reasoning with tool calling. Japanese OK.", ["general", "tools", "reasoning", "japanese"]),
     CatalogEntry("qwen3:4b", "Qwen 3 4B", "General", "4B", 2.6,
                  "Compact Qwen 3 for lighter hardware.", ["general", "tools"]),
     CatalogEntry("qwen3:14b", "Qwen 3 14B", "General", "14B", 9.0,
@@ -69,6 +75,10 @@ CATALOG: list[CatalogEntry] = [
                  "Microsoft's reasoning-focused model.", ["general", "reasoning"]),
 
     # --- Small / Edge ---
+    CatalogEntry("qwen3.5:0.8b", "Qwen 3.5 0.8B", "Small", "0.8B", 0.5,
+                 "Latest tiny Qwen 3.5. Good for testing.", ["general", "tools"]),
+    CatalogEntry("qwen3.5:2b", "Qwen 3.5 2B", "Small", "2B", 1.3,
+                 "Qwen 3.5 compact. Surprisingly capable.", ["general", "tools", "vision"]),
     CatalogEntry("qwen3:0.6b", "Qwen 3 0.6B", "Small", "0.6B", 0.5,
                  "Ultra-compact. Good for testing and drafts.", ["general"]),
     CatalogEntry("qwen3:1.7b", "Qwen 3 1.7B", "Small", "1.7B", 1.1,

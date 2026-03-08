@@ -604,17 +604,35 @@ body {
 
 /* Pull progress bar */
 .pull-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
   padding: 6px 16px;
   background: rgba(210, 153, 34, 0.1);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
 }
 
+.pull-bar-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
 .pull-bar-text { color: var(--yellow); }
 .pull-bar-progress { color: var(--text-dim); }
+
+.pull-bar-gauge {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.pull-bar-gauge-fill {
+  height: 100%;
+  background: var(--yellow);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
 
 .picker-list {
   overflow-y: auto;
@@ -754,6 +772,21 @@ body {
   text-align: center;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+/* System info bar in Recommend view */
+.picker-system-info {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.picker-recommend-star {
+  color: var(--yellow);
 }
 
 /* View tabs (Catalog / Discover) */

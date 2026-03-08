@@ -180,6 +180,8 @@ class JsonLineServer:
                     self._handle_set_api_key(req_id, req.get("api_key", ""))
                 elif req_type == "claude_logout":
                     self._handle_claude_logout(req_id)
+                elif req_type == "recommend":
+                    self._handle_recommend(req_id)
                 else:
                     _send({"id": req_id, "type": "error", "message": f"Unknown type: {req_type}"})
             except Exception as exc:
@@ -587,6 +589,37 @@ class JsonLineServer:
             self._messages.append({"role": "system", "content": self._system_prompt})
             _send({"id": req_id, "type": "provider_changed", "provider": "ollama"})
         _send({"id": req_id, "type": "api_key_set", "has_claude": False})
+
+    def _handle_recommend(self, req_id: int) -> None:
+        """Return model recommendations based on system specs."""
+        from local_cli.system_info import get_system_info, recommend_models
+
+        info = get_system_info()
+        recommendations = recommend_models(ram_gb=info.get("ram_gb"))
+
+        # Mark installed status.
+        installed_names: set[str] = set()
+        try:
+            models = self._client.list_models()
+            for m in models:
+                name = m.get("name", "")
+                installed_names.add(name)
+                installed_names.add(name.split(":")[0])
+        except OllamaConnectionError:
+            pass
+
+        for rec in recommendations:
+            rec["installed"] = (
+                rec["name"] in installed_names
+                or rec["name"].split(":")[0] in installed_names
+            )
+
+        _send({
+            "id": req_id,
+            "type": "recommend",
+            "system": info,
+            "models": recommendations,
+        })
 
     def _handle_clear(self, req_id: int) -> None:
         self._messages.clear()

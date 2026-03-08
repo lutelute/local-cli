@@ -53,6 +53,8 @@ export type PythonMessage = {
   has_claude?: boolean
   has_updates?: boolean
   success?: boolean
+  models?: unknown
+  system?: unknown
 }
 
 declare global {

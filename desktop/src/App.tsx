@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { Message, AppStatus, PythonMessage, ToolCall, ToolResult } from './types'
 import { Banner } from './components/Banner'
 import { MessageBlock } from './components/MessageBlock'
-import { ModelPicker, CatalogModel, SearchResult } from './components/ModelPicker'
+import { ModelPicker, CatalogModel, SearchResult, Recommendation, SystemInfo } from './components/ModelPicker'
 import { FileExplorer } from './components/FileExplorer'
 import { ProviderSelector } from './components/ProviderSelector'
 import { FileViewer } from './components/FileViewer'
@@ -27,6 +27,8 @@ export default function App() {
   const [pullProgress, setPullProgress] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [searching, setSearching] = useState(false)
+  const [recommendations, setRecommendations] = useState<Recommendation[] | null>(null)
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
   const [updating, setUpdating] = useState(false)
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [updateMessage, setUpdateMessage] = useState('')
@@ -209,6 +211,11 @@ export default function App() {
           setSearching(false)
           break
 
+        case 'recommend':
+          if (msg.models) setRecommendations(msg.models as Recommendation[])
+          if (msg.system) setSystemInfo(msg.system as SystemInfo)
+          break
+
         case 'catalog_updating':
           setUpdating(true)
           break
@@ -309,6 +316,9 @@ export default function App() {
   }, [])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Ignore key events during IME composition (e.g. Japanese input).
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+
     if (e.key === 'Escape' && streaming) {
       e.preventDefault()
       handleStop()
@@ -348,6 +358,10 @@ export default function App() {
 
   const handleDelete = useCallback((model: string) => {
     window.api.sendToPython({ id: nextId(), type: 'delete_model', model })
+  }, [])
+
+  const handleRecommend = useCallback(() => {
+    window.api.sendToPython({ id: nextId(), type: 'recommend' })
   }, [])
 
   const handleClear = useCallback(() => {
@@ -460,7 +474,7 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.5.1" />
+                  <Banner version="0.5.3" />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.
@@ -526,6 +540,9 @@ export default function App() {
           pullProgress={pullProgress}
           searching={searching}
           updating={updating}
+          recommendations={recommendations}
+          systemInfo={systemInfo}
+          onRequestRecommend={handleRecommend}
         />
       )}
 

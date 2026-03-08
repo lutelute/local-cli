@@ -11,6 +11,23 @@ export type CatalogModel = {
   installed: boolean
 }
 
+export type Recommendation = {
+  name: string
+  display: string
+  size_gb: number
+  reason: string
+  rank: number
+  installed: boolean
+}
+
+export type SystemInfo = {
+  ram_gb: number
+  chip: string
+  gpu: string
+  os: string
+  arch: string
+}
+
 export type SearchResult = {
   name: string
   description: string
@@ -36,13 +53,22 @@ type Props = {
   pullProgress: string
   searching: boolean
   updating: boolean
+  recommendations: Recommendation[] | null
+  systemInfo: SystemInfo | null
+  onRequestRecommend: () => void
 }
 
-type ViewMode = 'catalog' | 'discover'
+function parsePullPercent(progress: string): number {
+  const m = progress.match(/(\d+)%/)
+  return m ? parseInt(m[1], 10) : 0
+}
+
+type ViewMode = 'catalog' | 'discover' | 'recommend'
 
 export function ModelPicker({
   catalog, searchResults, current, onSelect, onPull, onDelete,
   onSearch, onUpdate, onClose, pulling, pullProgress, searching, updating,
+  recommendations, systemInfo, onRequestRecommend,
 }: Props) {
   const [filter, setFilter] = useState('')
   const [activeCategory, setActiveCategory] = useState<string | null>(null)
@@ -171,7 +197,7 @@ export function ModelPicker({
             placeholder="Search ollama.com..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleSearchSubmit() }}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleSearchSubmit() }}
           />
         </div>
         <div className="picker-tabs">
@@ -211,6 +237,56 @@ export function ModelPicker({
     )
   }
 
+  // --- Recommend view ---
+  function renderRecommend() {
+    if (!recommendations) {
+      return <div className="picker-empty">Detecting system specs...</div>
+    }
+
+    return (
+      <>
+        {systemInfo && (
+          <div className="picker-system-info">
+            <span>{systemInfo.chip || systemInfo.os}</span>
+            <span>{systemInfo.ram_gb} GB RAM</span>
+          </div>
+        )}
+        <div className="picker-list">
+          {recommendations.map(rec => (
+            <div
+              key={rec.name}
+              className={`picker-model ${rec.name === current ? 'current' : ''} ${rec.installed ? 'installed' : ''}`}
+              onClick={rec.installed ? () => onSelect(rec.name) : undefined}
+            >
+              <div className="picker-model-main">
+                <div className="picker-model-name">
+                  {rec.rank === 1 && <span className="picker-recommend-star">★ </span>}
+                  {rec.display}
+                  <span className="picker-model-params">{rec.size_gb} GB</span>
+                </div>
+                <div className="picker-model-desc">{rec.reason}</div>
+              </div>
+              <div className="picker-model-right">
+                {rec.name === current ? (
+                  <span className="picker-badge current-badge">active</span>
+                ) : rec.installed ? (
+                  <button className="picker-action use" onClick={e => { e.stopPropagation(); onSelect(rec.name) }}>Use</button>
+                ) : pulling === rec.name ? (
+                  <span className="picker-badge pulling-badge">pulling...</span>
+                ) : (
+                  <button className="picker-action download" onClick={e => { e.stopPropagation(); onPull(rec.name) }}>Download</button>
+                )}
+              </div>
+            </div>
+          ))}
+          {recommendations.length === 0 && (
+            <div className="picker-empty">Could not detect system specs.</div>
+          )}
+        </div>
+      </>
+    )
+  }
+
   const installedCount = catalog?.models.filter(m => m.installed).length ?? 0
 
   return (
@@ -218,6 +294,10 @@ export function ModelPicker({
       <div className="picker picker-wide" onClick={e => e.stopPropagation()}>
         <div className="picker-header">
           <div className="picker-view-tabs">
+            <button
+              className={`picker-view-tab ${view === 'recommend' ? 'active' : ''}`}
+              onClick={() => { setView('recommend'); onRequestRecommend() }}
+            >For You</button>
             <button
               className={`picker-view-tab ${view === 'catalog' ? 'active' : ''}`}
               onClick={() => setView('catalog')}
@@ -242,12 +322,20 @@ export function ModelPicker({
 
         {pulling && (
           <div className="pull-bar">
-            <span className="pull-bar-text">Downloading {pulling}...</span>
-            <span className="pull-bar-progress">{pullProgress}</span>
+            <div className="pull-bar-top">
+              <span className="pull-bar-text">Downloading {pulling}...</span>
+              <span className="pull-bar-progress">{pullProgress}</span>
+            </div>
+            <div className="pull-bar-gauge">
+              <div
+                className="pull-bar-gauge-fill"
+                style={{ width: `${parsePullPercent(pullProgress)}%` }}
+              />
+            </div>
           </div>
         )}
 
-        {view === 'catalog' ? renderCatalog() : renderDiscover()}
+        {view === 'recommend' ? renderRecommend() : view === 'catalog' ? renderCatalog() : renderDiscover()}
       </div>
     </div>
   )
