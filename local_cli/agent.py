@@ -13,6 +13,7 @@ from typing import Any, Generator
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
 from local_cli.providers.base import ProviderStreamError
 from local_cli.spinner import Spinner
+from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
 from local_cli.tools.base import Tool
 
@@ -54,6 +55,7 @@ _COMPACT_KEEP_RECENT = 10
 def collect_streaming_response(
     stream: Generator[dict[str, Any], None, None],
     spinner: Spinner | None = None,
+    tracker: TokenTracker | None = None,
 ) -> dict[str, Any]:
     """Accumulate a streaming chat response and print tokens as they arrive.
 
@@ -62,10 +64,17 @@ def collect_streaming_response(
     chunks.  Content tokens are printed to stdout immediately for a
     responsive user experience.
 
+    When a *tracker* is provided, token usage is extracted from the
+    final response and recorded.  For Ollama, ``prompt_eval_count``
+    and ``eval_count`` are read from the final chunk (``done: true``).
+    For Claude, the ``usage`` metadata dict is used instead.
+
     Args:
         stream: A generator yielding parsed NDJSON chunks from the Ollama
             streaming chat API.
         spinner: Optional spinner to stop once the first content arrives.
+        tracker: Optional :class:`TokenTracker` for recording token
+            usage from this response.
 
     Returns:
         A dictionary representing the full response, structured as::
@@ -159,6 +168,15 @@ def collect_streaming_response(
     # with our assembled message.
     result: dict[str, Any] = dict(last_chunk)
     result["message"] = assembled_message
+
+    # Record token usage if a tracker is provided.  For Ollama the
+    # final chunk carries ``prompt_eval_count`` / ``eval_count`` at
+    # the top level; for Claude the ``usage`` dict contains the counts.
+    if tracker is not None:
+        if "usage" in result:
+            tracker.record_from_claude(result)
+        else:
+            tracker.record_from_ollama(result)
 
     return result
 
@@ -387,6 +405,7 @@ def agent_loop(
     messages: list[dict[str, Any]],
     debug: bool = False,
     cache: ToolCache | None = None,
+    tracker: TokenTracker | None = None,
 ) -> None:
     """Core agent loop: prompt LLM, execute tool calls, repeat.
 
@@ -416,6 +435,11 @@ def agent_loop(
             checks the cache before executing cacheable tools and stores
             results after successful execution.  Pass ``None`` to disable
             caching (the default).
+        tracker: An optional :class:`TokenTracker` instance for recording
+            token usage from each LLM call.  When provided, token counts
+            are extracted from each streaming response and accumulated
+            for the session.  Pass ``None`` to disable tracking (the
+            default).
 
     Raises:
         KeyboardInterrupt: Propagated if the user presses Ctrl+C during
@@ -445,7 +469,7 @@ def agent_loop(
         try:
             stream = client.chat_stream(model, messages, tools=tool_defs)
             full_response = collect_streaming_response(
-                stream, spinner=thinking_spinner,
+                stream, spinner=thinking_spinner, tracker=tracker,
             )
         except ProviderStreamError as exc:
             thinking_spinner.stop()

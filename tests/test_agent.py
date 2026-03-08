@@ -1124,5 +1124,266 @@ class TestAgentLoopCacheInvalidation(unittest.TestCase):
         self.assertEqual(cached, "cached content")
 
 
+# ---------------------------------------------------------------------------
+# Token tracker integration
+# ---------------------------------------------------------------------------
+
+
+class TestCollectStreamingResponseTracker(unittest.TestCase):
+    """Tests for token tracker integration in collect_streaming_response()."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        sys.stdout = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+
+    def test_ollama_tokens_recorded(self) -> None:
+        """Ollama prompt_eval_count and eval_count are recorded via tracker."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        chunks = [
+            {"message": {"role": "assistant", "content": "Hi"}, "done": False},
+            {
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "prompt_eval_count": 150,
+                "eval_count": 75,
+            },
+        ]
+        collect_streaming_response(iter(chunks), tracker=tracker)
+
+        self.assertEqual(tracker.message_count, 1)
+        record = tracker.records[0]
+        self.assertEqual(record.input_tokens, 150)
+        self.assertEqual(record.output_tokens, 75)
+        self.assertEqual(record.provider, "ollama")
+
+    def test_claude_usage_recorded(self) -> None:
+        """Claude usage metadata is recorded via tracker."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        chunks = [
+            {"message": {"role": "assistant", "content": "Hello"}, "done": False},
+            {
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "usage": {"input_tokens": 500, "output_tokens": 200},
+            },
+        ]
+        collect_streaming_response(iter(chunks), tracker=tracker)
+
+        self.assertEqual(tracker.message_count, 1)
+        record = tracker.records[0]
+        self.assertEqual(record.input_tokens, 500)
+        self.assertEqual(record.output_tokens, 200)
+        self.assertEqual(record.provider, "claude")
+
+    def test_no_tracker_does_not_record(self) -> None:
+        """When tracker is None, no recording occurs (backward compatible)."""
+        chunks = [
+            {
+                "message": {"role": "assistant", "content": "Hi"},
+                "done": True,
+                "prompt_eval_count": 100,
+                "eval_count": 50,
+            },
+        ]
+        # Should work fine without tracker.
+        result = collect_streaming_response(iter(chunks))
+        self.assertEqual(result["message"]["content"], "Hi")
+
+    def test_empty_stream_with_tracker(self) -> None:
+        """Empty stream with tracker records zero tokens."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        collect_streaming_response(iter([]), tracker=tracker)
+
+        # Should record from the empty result (zero tokens).
+        self.assertEqual(tracker.message_count, 1)
+        record = tracker.records[0]
+        self.assertEqual(record.input_tokens, 0)
+        self.assertEqual(record.output_tokens, 0)
+
+    def test_stream_error_does_not_record(self) -> None:
+        """ProviderStreamError prevents token recording (re-raises before)."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+
+        def error_stream():
+            yield {"message": {"role": "assistant", "content": "partial"}, "done": False}
+            raise OllamaStreamError("server error")
+
+        with self.assertRaises(OllamaStreamError):
+            collect_streaming_response(error_stream(), tracker=tracker)
+
+        # Tracker should NOT have recorded anything since the error
+        # is raised before the recording logic.
+        self.assertEqual(tracker.message_count, 0)
+
+    def test_keyboard_interrupt_still_records(self) -> None:
+        """KeyboardInterrupt during streaming still records partial usage."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+
+        def interrupt_stream():
+            yield {
+                "message": {"role": "assistant", "content": "par"},
+                "done": False,
+                "prompt_eval_count": 50,
+            }
+            raise KeyboardInterrupt
+
+        result = collect_streaming_response(interrupt_stream(), tracker=tracker)
+
+        # KeyboardInterrupt is caught, partial content returned, and
+        # tracker records from whatever last_chunk data is available.
+        self.assertEqual(tracker.message_count, 1)
+        self.assertEqual(result["message"]["content"], "par")
+
+    def test_missing_token_fields_recorded_as_zero(self) -> None:
+        """Missing prompt_eval_count/eval_count defaults to zero."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        chunks = [
+            {
+                "message": {"role": "assistant", "content": "Done"},
+                "done": True,
+                "model": "qwen3:8b",
+            },
+        ]
+        collect_streaming_response(iter(chunks), tracker=tracker)
+
+        self.assertEqual(tracker.message_count, 1)
+        record = tracker.records[0]
+        self.assertEqual(record.input_tokens, 0)
+        self.assertEqual(record.output_tokens, 0)
+
+
+class TestAgentLoopTokenTracker(unittest.TestCase):
+    """Tests for token tracker integration in agent_loop()."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_tracker_records_each_llm_call(self) -> None:
+        """Tracker records token usage for each LLM call in the loop."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        tool = _DummyTool(name="bash", result="output")
+
+        # Round 1: tool call with token counts.
+        tc = [{"function": {"name": "bash", "arguments": {}}}]
+        chunks1 = [
+            {"message": {"role": "assistant", "content": "", "tool_calls": tc}, "done": True, "prompt_eval_count": 100, "eval_count": 30},
+        ]
+        # Round 2: final response with token counts.
+        chunks2 = [
+            {"message": {"role": "assistant", "content": "Done."}, "done": True, "prompt_eval_count": 200, "eval_count": 50},
+        ]
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [iter(chunks1), iter(chunks2)]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Run it"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, tracker=tracker)
+
+        # Two LLM calls = two records.
+        self.assertEqual(tracker.message_count, 2)
+        self.assertEqual(tracker.records[0].input_tokens, 100)
+        self.assertEqual(tracker.records[0].output_tokens, 30)
+        self.assertEqual(tracker.records[1].input_tokens, 200)
+        self.assertEqual(tracker.records[1].output_tokens, 50)
+        self.assertEqual(tracker.total_tokens, 380)
+
+    def test_no_tracker_backward_compatible(self) -> None:
+        """agent_loop works without tracker parameter (backward compatible)."""
+        chunks = [
+            {"message": {"role": "assistant", "content": "Hello"}, "done": True, "prompt_eval_count": 50, "eval_count": 10},
+        ]
+        client = MagicMock()
+        client.chat_stream.return_value = iter(chunks)
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hi"},
+        ]
+        # Should work fine without tracker.
+        agent_loop(client, "qwen3:8b", [], messages)
+        self.assertEqual(messages[1]["content"], "Hello")
+
+    def test_tracker_with_stream_error(self) -> None:
+        """Stream errors do not record to tracker."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+
+        def error_stream():
+            yield {"message": {"role": "assistant", "content": ""}, "done": False}
+            raise OllamaStreamError("fail")
+
+        client = MagicMock()
+        client.chat_stream.return_value = error_stream()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hi"},
+        ]
+        agent_loop(client, "qwen3:8b", [], messages, tracker=tracker)
+
+        # Stream error means no token recording.
+        self.assertEqual(tracker.message_count, 0)
+
+    def test_tracker_with_cache_and_tools(self) -> None:
+        """Tracker works alongside cache in the agent loop."""
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        cache = ToolCache()
+        tool = _CacheableDummyTool(name="read", result="content")
+
+        tc = [{"function": {"name": "read", "arguments": {"file_path": "/a"}}}]
+        chunks1 = [
+            {"message": {"role": "assistant", "content": "", "tool_calls": tc}, "done": True, "prompt_eval_count": 80, "eval_count": 20},
+        ]
+        chunks2 = [
+            {"message": {"role": "assistant", "content": "Got it."}, "done": True, "prompt_eval_count": 150, "eval_count": 40},
+        ]
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [iter(chunks1), iter(chunks2)]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read file"},
+        ]
+        agent_loop(
+            client, "qwen3:8b", [tool], messages,
+            cache=cache, tracker=tracker,
+        )
+
+        # Both LLM calls recorded.
+        self.assertEqual(tracker.message_count, 2)
+        self.assertEqual(tracker.total_input_tokens, 230)  # 80 + 150
+        self.assertEqual(tracker.total_output_tokens, 60)   # 20 + 40
+
+        # Cache should also have the result.
+        self.assertIsNotNone(cache.get("read", {"file_path": "/a"}))
+
+
 if __name__ == "__main__":
     unittest.main()
