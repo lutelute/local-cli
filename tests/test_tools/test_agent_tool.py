@@ -471,5 +471,352 @@ class TestSubAgentToolExclusions(unittest.TestCase):
         self.assertNotIn("ask_user", sub_agent_tool_names)
 
 
+# ===========================================================================
+# Edge Case Tests (subtask-5-3)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Recursive spawning blocked — sub-agent tools don't include AgentTool
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolRecursionBlocked(unittest.TestCase):
+    """Tests that AgentTool prevents recursive agent spawning."""
+
+    def test_sub_agent_tools_do_not_include_agent(self) -> None:
+        """The sub_agent_tools list should never include an AgentTool."""
+        from local_cli.tools import get_sub_agent_tools
+
+        tools = get_sub_agent_tools()
+        for tool in tools:
+            self.assertNotIsInstance(tool, AgentTool)
+            self.assertNotEqual(tool.name, "agent")
+
+    def test_agent_tool_not_in_sub_agent_tool_names(self) -> None:
+        """get_sub_agent_tools() does not include 'agent' tool by name."""
+        from local_cli.tools import get_sub_agent_tools
+
+        tools = get_sub_agent_tools()
+        tool_names = [t.name for t in tools]
+        self.assertNotIn("agent", tool_names)
+
+    def test_execute_creates_sub_agent_without_agent_tool(self) -> None:
+        """When execute() creates a SubAgent, it has no AgentTool in tools."""
+        mock_result = SubAgentResult(
+            agent_id="agent-no-recurse",
+            description="no recursion",
+            content="done",
+            status="success",
+            duration_seconds=0.1,
+            messages_count=2,
+            tool_calls_count=0,
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        # Construct with sub_agent_tools that don't include AgentTool.
+        sub_tools = [_DummyTool("bash"), _DummyTool("read")]
+        tool = AgentTool(
+            runner=runner,
+            provider=MagicMock(),
+            model="qwen3:8b",
+            sub_agent_tools=sub_tools,
+        )
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            tool.execute(description="test", prompt="do something")
+
+        # Inspect the SubAgent passed to runner.submit.
+        call_args = runner.submit.call_args
+        sub_agent = call_args[0][0]
+        sub_agent_tool_names = [t.name for t in sub_agent._tools]
+        self.assertNotIn("agent", sub_agent_tool_names)
+
+
+# ---------------------------------------------------------------------------
+# Empty/invalid prompt validation edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolPromptValidationEdgeCases(unittest.TestCase):
+    """Extended edge case tests for prompt/description validation."""
+
+    def test_none_prompt_returns_error(self) -> None:
+        """None prompt returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute(description="test", prompt=None)
+        self.assertIn("Error", result)
+
+    def test_list_prompt_returns_error(self) -> None:
+        """List as prompt returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute(description="test", prompt=["do", "something"])
+        self.assertIn("Error", result)
+
+    def test_dict_prompt_returns_error(self) -> None:
+        """Dict as prompt returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute(description="test", prompt={"task": "do"})
+        self.assertIn("Error", result)
+
+    def test_tab_only_prompt_returns_error(self) -> None:
+        """Tab-only prompt returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute(description="test", prompt="\t\t")
+        self.assertIn("Error", result)
+
+    def test_newline_only_prompt_returns_error(self) -> None:
+        """Newline-only prompt returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute(description="test", prompt="\n\n")
+        self.assertIn("Error", result)
+
+    def test_none_description_returns_error(self) -> None:
+        """None description returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute(description=None, prompt="do something")
+        self.assertIn("Error", result)
+
+    def test_missing_both_returns_error(self) -> None:
+        """Missing both prompt and description returns error."""
+        tool = _make_agent_tool()
+        result = tool.execute()
+        self.assertIn("Error", result)
+
+    def test_valid_prompt_with_leading_whitespace_accepted(self) -> None:
+        """Prompt with leading whitespace but valid content is accepted."""
+        mock_result = SubAgentResult(
+            agent_id="agent-ws",
+            description="whitespace test",
+            content="done",
+            status="success",
+            duration_seconds=0.1,
+            messages_count=2,
+            tool_calls_count=0,
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            result = tool.execute(
+                description="test",
+                prompt="  valid prompt  ",
+            )
+
+        # Should succeed (not return error).
+        self.assertNotIn("Error", result)
+        runner.submit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Provider creation failure edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolProviderFailureEdgeCases(unittest.TestCase):
+    """Extended tests for provider creation failures."""
+
+    def test_connection_refused_returns_error_string(self) -> None:
+        """Connection refused during provider creation returns error."""
+        tool = _make_agent_tool()
+
+        with patch.object(
+            tool,
+            "_create_fresh_provider",
+            side_effect=ConnectionError("connection refused"),
+        ):
+            result = tool.execute(description="test", prompt="do something")
+
+        self.assertIn("Error", result)
+        self.assertIn("connection refused", result)
+
+    def test_value_error_in_provider_returns_error_string(self) -> None:
+        """ValueError during provider creation returns error."""
+        tool = _make_agent_tool()
+
+        with patch.object(
+            tool,
+            "_create_fresh_provider",
+            side_effect=ValueError("Unknown provider: openai"),
+        ):
+            result = tool.execute(description="test", prompt="do something")
+
+        self.assertIn("Error", result)
+        self.assertIn("Unknown provider", result)
+
+
+# ---------------------------------------------------------------------------
+# Background mode edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolBackgroundEdgeCases(unittest.TestCase):
+    """Edge case tests for background execution mode."""
+
+    def test_run_in_background_string_true_uses_foreground(self) -> None:
+        """String 'true' for run_in_background defaults to foreground."""
+        mock_result = SubAgentResult(
+            agent_id="agent-str-bool",
+            description="str bool test",
+            content="done",
+            status="success",
+            duration_seconds=0.1,
+            messages_count=2,
+            tool_calls_count=0,
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            tool.execute(
+                description="test",
+                prompt="do something",
+                run_in_background="true",  # String, not bool.
+            )
+
+        # Should use foreground (submit, not submit_background).
+        runner.submit.assert_called_once()
+        runner.submit_background.assert_not_called()
+
+    def test_run_in_background_int_1_uses_foreground(self) -> None:
+        """Integer 1 for run_in_background defaults to foreground."""
+        mock_result = SubAgentResult(
+            agent_id="agent-int-bool",
+            description="int bool test",
+            content="done",
+            status="success",
+            duration_seconds=0.1,
+            messages_count=2,
+            tool_calls_count=0,
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            tool.execute(
+                description="test",
+                prompt="do something",
+                run_in_background=1,  # Int, not bool.
+            )
+
+        runner.submit.assert_called_once()
+        runner.submit_background.assert_not_called()
+
+    def test_background_true_bool_uses_background(self) -> None:
+        """Boolean True for run_in_background uses background mode."""
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit_background.return_value = "agent-bg-true"
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            result = tool.execute(
+                description="bg test",
+                prompt="do something",
+                run_in_background=True,
+            )
+
+        runner.submit_background.assert_called_once()
+        runner.submit.assert_not_called()
+        self.assertIn("agent-bg-true", result)
+
+    def test_background_false_bool_uses_foreground(self) -> None:
+        """Boolean False for run_in_background uses foreground mode."""
+        mock_result = SubAgentResult(
+            agent_id="agent-fg",
+            description="fg test",
+            content="done",
+            status="success",
+            duration_seconds=0.1,
+            messages_count=2,
+            tool_calls_count=0,
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            tool.execute(
+                description="fg test",
+                prompt="do something",
+                run_in_background=False,
+            )
+
+        runner.submit.assert_called_once()
+        runner.submit_background.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Foreground error result formatting
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolErrorResultFormatting(unittest.TestCase):
+    """Tests that error results from foreground execution are formatted."""
+
+    def test_foreground_error_result_contains_error_info(self) -> None:
+        """Foreground error result includes error details in formatted output."""
+        mock_result = SubAgentResult(
+            agent_id="agent-err",
+            description="error task",
+            content="",
+            status="error",
+            duration_seconds=0.5,
+            messages_count=2,
+            tool_calls_count=0,
+            error_message="RuntimeError: something crashed",
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            result = tool.execute(description="error task", prompt="crash")
+
+        self.assertIn("error", result)
+        self.assertIn("RuntimeError", result)
+
+    def test_foreground_timeout_result_contains_timeout_info(self) -> None:
+        """Foreground timeout result includes timeout details."""
+        mock_result = SubAgentResult(
+            agent_id="agent-timeout",
+            description="timeout task",
+            content="partial work",
+            status="timeout",
+            duration_seconds=300.0,
+            messages_count=10,
+            tool_calls_count=5,
+            error_message="Sub-agent timed out after 300.0s",
+        )
+        runner = MagicMock(spec=SubAgentRunner)
+        runner.submit.return_value = mock_result
+
+        tool = _make_agent_tool(runner=runner)
+
+        with patch.object(tool, "_create_fresh_provider") as mock_create:
+            mock_create.return_value = MagicMock()
+            result = tool.execute(description="timeout task", prompt="slow work")
+
+        self.assertIn("timeout", result)
+        self.assertIn("300.0s", result)
+        self.assertIn("partial work", result)
+
+
 if __name__ == "__main__":
     unittest.main()

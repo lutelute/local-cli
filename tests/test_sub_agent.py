@@ -1,18 +1,22 @@
 """Tests for local_cli.sub_agent module."""
 
 import os
+import subprocess
 import sys
+import threading
 import time
 import types
 import unittest
+import warnings
 from io import StringIO
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from local_cli.config import Config
 from local_cli.orchestrator import Orchestrator
 from local_cli.providers.base import (
     LLMProvider,
+    ProviderRequestError,
     ProviderStreamError,
 )
 from local_cli.sub_agent import (
@@ -20,8 +24,12 @@ from local_cli.sub_agent import (
     SubAgentResult,
     SubAgentRunner,
     _DEFAULT_TIMEOUT,
+    _RETRY_BASE_DELAY,
+    _RETRY_MAX_ATTEMPTS,
     _SUB_AGENT_SYSTEM_PROMPT,
     _SubAgentTimeout,
+    _WorktreeError,
+    _is_overloaded_error,
 )
 from local_cli.tools.base import Tool
 
@@ -2732,6 +2740,1201 @@ class TestAgentLoopWithAgentTool(unittest.TestCase):
         self.assertIn("Tool calls: 1", tool_content)
 
         runner.shutdown()
+
+
+# ===========================================================================
+# Edge Case Tests (subtask-5-3)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Recursive agent spawning blocked
+# ---------------------------------------------------------------------------
+
+
+class TestRecursiveAgentSpawningBlocked(unittest.TestCase):
+    """Tests that sub-agents cannot recursively spawn more agents."""
+
+    def test_sub_agent_tools_exclude_agent_tool(self) -> None:
+        """get_sub_agent_tools() never includes 'agent' in its tool list."""
+        from local_cli.tools import get_sub_agent_tools
+
+        tools = get_sub_agent_tools()
+        tool_names = [t.name for t in tools]
+        self.assertNotIn("agent", tool_names)
+
+    def test_sub_agent_tools_exclude_ask_user(self) -> None:
+        """get_sub_agent_tools() never includes 'ask_user'."""
+        from local_cli.tools import get_sub_agent_tools
+
+        tools = get_sub_agent_tools()
+        tool_names = [t.name for t in tools]
+        self.assertNotIn("ask_user", tool_names)
+
+    def test_sub_agent_constructed_without_agent_tool(self) -> None:
+        """SubAgent constructed with sub-agent tools has no AgentTool."""
+        from local_cli.tools import get_sub_agent_tools
+        from local_cli.tools.agent_tool import AgentTool
+
+        sub_tools = get_sub_agent_tools()
+        for tool in sub_tools:
+            self.assertNotIsInstance(tool, AgentTool)
+
+    def test_sub_agent_cannot_call_agent_tool(self) -> None:
+        """Sub-agent receiving an 'agent' tool call gets 'unknown tool' error."""
+        provider = _make_mock_provider()
+        # LLM tries to call 'agent' tool, which is not in the tool list.
+        _setup_provider_tool_then_response(
+            provider,
+            tool_name="agent",
+            tool_args={"description": "nested", "prompt": "nest task"},
+            final_content="Recovered from unknown tool",
+        )
+        # Sub-agent has only a dummy tool, no AgentTool.
+        dummy = _DummyTool(name="bash", result="ok")
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[dummy],
+            prompt="try to nest",
+        )
+        result = agent.run()
+
+        # The agent loop continues after the unknown tool error.
+        self.assertEqual(result.status, "success")
+        tool_msgs = [m for m in agent._messages if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertIn("unknown tool", tool_msgs[0]["content"])
+        self.assertIn("agent", tool_msgs[0]["content"])
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent timeout returns partial results
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentTimeoutPartialResults(unittest.TestCase):
+    """Tests that timeouts return partial results correctly."""
+
+    def test_timeout_returns_partial_content_from_first_reply(self) -> None:
+        """Timeout preserves content from the first assistant response."""
+        provider = _make_mock_provider()
+
+        call_count = 0
+
+        def first_ok_then_hang(*args: Any, **kwargs: Any):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                tc = [{"function": {"name": "dummy", "arguments": {}}}]
+                return iter(_make_chunks(["Partial work done"], tool_calls=tc))
+            # Second call exceeds timeout.
+            time.sleep(0.5)
+            return iter(_make_chunks(["Never reached"]))
+
+        provider.chat_stream.side_effect = first_ok_then_hang
+        tool = _DummyTool(name="dummy", result="ok")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[tool],
+            prompt="task",
+            timeout=0.05,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "timeout")
+        self.assertIn("Partial work done", result.content)
+        self.assertIn("timed out", result.error_message)
+
+    def test_timeout_with_zero_content_returns_empty(self) -> None:
+        """Timeout with no assistant message returns empty content."""
+        provider = _make_mock_provider()
+        # Provider hangs immediately.
+        provider.chat_stream.side_effect = lambda *a, **k: (_ for _ in [])
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            timeout=0.0,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "timeout")
+        self.assertEqual(result.content, "")
+
+    def test_timeout_result_has_correct_metadata(self) -> None:
+        """Timeout result still has valid metadata fields."""
+        provider = _make_mock_provider()
+        _setup_provider_simple_response(provider)
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            agent_id="timeout-meta",
+            description="timeout test",
+            timeout=0.0,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.agent_id, "timeout-meta")
+        self.assertEqual(result.description, "timeout test")
+        self.assertGreaterEqual(result.duration_seconds, 0)
+        self.assertIsInstance(result.messages_count, int)
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent crash (exception) returns error without crashing main
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentCrashReturnsError(unittest.TestCase):
+    """Tests that sub-agent exceptions return error status, not crash main."""
+
+    def test_runtime_error_returns_error_result(self) -> None:
+        """RuntimeError in sub-agent produces error SubAgentResult."""
+        provider = _make_mock_provider()
+        provider.chat_stream.side_effect = RuntimeError("segfault simulation")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="crash task",
+            agent_id="crash-001",
+        )
+        # Should NOT raise — should return result.
+        result = agent.run()
+
+        self.assertIsInstance(result, SubAgentResult)
+        self.assertEqual(result.status, "error")
+        self.assertIn("RuntimeError", result.error_message)
+        self.assertIn("segfault simulation", result.error_message)
+
+    def test_value_error_returns_error_result(self) -> None:
+        """ValueError in sub-agent produces error SubAgentResult."""
+        provider = _make_mock_provider()
+        provider.chat_stream.side_effect = ValueError("bad model name")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("ValueError", result.error_message)
+
+    def test_keyboard_interrupt_in_stream_raises(self) -> None:
+        """KeyboardInterrupt during stream is NOT caught by run()."""
+        provider = _make_mock_provider()
+
+        def interrupt_stream(*args: Any, **kwargs: Any):
+            def gen():
+                yield {
+                    "message": {"role": "assistant", "content": "partial"},
+                    "done": False,
+                }
+                raise KeyboardInterrupt()
+            return gen()
+
+        provider.chat_stream.side_effect = interrupt_stream
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        # KeyboardInterrupt is a BaseException, should propagate.
+        with self.assertRaises(KeyboardInterrupt):
+            agent.run()
+
+    def test_runner_submit_catches_crash_via_future(self) -> None:
+        """SubAgentRunner.submit() propagates crash as exception, not hang."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = _make_mock_sub_agent(
+                agent_id="crash-runner",
+                side_effect=RuntimeError("agent died"),
+            )
+            # The future.result() re-raises the exception from the thread.
+            with self.assertRaises(RuntimeError) as ctx:
+                runner.submit(agent)
+            self.assertIn("agent died", str(ctx.exception))
+        finally:
+            runner.shutdown()
+
+    def test_submit_all_with_one_crash_returns_mixed(self) -> None:
+        """submit_all() with one crashing agent returns results for others."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            good1 = _make_mock_sub_agent(
+                agent_id="good-1", content="ok-1", delay=0.01,
+            )
+            good2 = _make_mock_sub_agent(
+                agent_id="good-2", content="ok-2", delay=0.01,
+            )
+            # Real SubAgent that will crash.
+            crash_provider = _make_mock_provider()
+            crash_provider.chat_stream.side_effect = RuntimeError("boom")
+            crash_agent = SubAgent(
+                provider=crash_provider,
+                model="qwen3:8b",
+                tools=[],
+                prompt="crash",
+                agent_id="crash-3",
+            )
+
+            results = runner.submit_all([good1, good2, crash_agent])
+
+            # All three should produce results (success + error).
+            self.assertEqual(len(results), 3)
+            statuses = {r.agent_id: r.status for r in results}
+            self.assertEqual(statuses.get("good-1"), "success")
+            self.assertEqual(statuses.get("good-2"), "success")
+            self.assertEqual(statuses.get("crash-3"), "error")
+        finally:
+            runner.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Ollama 503 retry with backoff
+# ---------------------------------------------------------------------------
+
+
+class TestOllama503RetryWithBackoff(unittest.TestCase):
+    """Tests for 503/overload retry logic with exponential backoff."""
+
+    def test_is_overloaded_error_detects_503(self) -> None:
+        """_is_overloaded_error detects '503' in exception message."""
+        exc = ProviderRequestError("HTTP 503 Service Unavailable")
+        self.assertTrue(_is_overloaded_error(exc))
+
+    def test_is_overloaded_error_detects_service_unavailable(self) -> None:
+        """_is_overloaded_error detects 'service unavailable' (case insensitive)."""
+        exc = ProviderRequestError("Service Unavailable")
+        self.assertTrue(_is_overloaded_error(exc))
+
+    def test_is_overloaded_error_detects_overloaded(self) -> None:
+        """_is_overloaded_error detects 'overloaded' keyword."""
+        exc = ProviderRequestError("Model is overloaded")
+        self.assertTrue(_is_overloaded_error(exc))
+
+    def test_is_overloaded_error_returns_false_for_other(self) -> None:
+        """_is_overloaded_error returns False for non-overload errors."""
+        exc = ProviderRequestError("Model not found: qwen99:8b")
+        self.assertFalse(_is_overloaded_error(exc))
+
+    def test_retry_on_503_then_success(self) -> None:
+        """chat_with_retry retries on 503 and succeeds on subsequent attempt."""
+        provider = _make_mock_provider()
+
+        call_count = 0
+
+        def failing_then_success(*args: Any, **kwargs: Any):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ProviderRequestError("HTTP 503 Service Unavailable")
+            return iter(_make_chunks(["Recovered after 503"]))
+
+        provider.chat_stream.side_effect = failing_then_success
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            timeout=30.0,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.content, "Recovered after 503")
+        self.assertEqual(call_count, 2)
+
+    def test_retry_exhausted_returns_error(self) -> None:
+        """After exhausting retries, the error is propagated as error status."""
+        provider = _make_mock_provider()
+        # Always 503.
+        provider.chat_stream.side_effect = ProviderRequestError(
+            "HTTP 503 Service Unavailable"
+        )
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            timeout=60.0,
+        )
+
+        with patch("local_cli.sub_agent.time.sleep"):
+            result = agent.run()
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("503", result.error_message)
+        # Should have been called _RETRY_MAX_ATTEMPTS + 1 times.
+        self.assertEqual(
+            provider.chat_stream.call_count,
+            _RETRY_MAX_ATTEMPTS + 1,
+        )
+
+    def test_non_503_error_not_retried(self) -> None:
+        """Non-overload ProviderRequestError is NOT retried."""
+        provider = _make_mock_provider()
+        provider.chat_stream.side_effect = ProviderRequestError(
+            "Model not found: bad_model"
+        )
+
+        agent = SubAgent(
+            provider=provider,
+            model="bad_model",
+            tools=[],
+            prompt="task",
+            timeout=30.0,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("Model not found", result.error_message)
+        # Should have been called exactly once (no retries).
+        self.assertEqual(provider.chat_stream.call_count, 1)
+
+    @patch("local_cli.sub_agent.time.sleep")
+    def test_retry_uses_exponential_backoff(
+        self, mock_sleep: MagicMock,
+    ) -> None:
+        """Retry delays follow exponential backoff: 1s, 2s, 4s."""
+        provider = _make_mock_provider()
+
+        call_count = 0
+
+        def fail_then_succeed(*args: Any, **kwargs: Any):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 3:
+                raise ProviderRequestError("HTTP 503")
+            return iter(_make_chunks(["Eventually ok"]))
+
+        provider.chat_stream.side_effect = fail_then_succeed
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            timeout=60.0,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "success")
+        # Verify exponential backoff delays: 1s, 2s, 4s.
+        sleep_calls = mock_sleep.call_args_list
+        # First call: delay = _RETRY_BASE_DELAY * 2^0 = 1.0
+        # Second call: delay = _RETRY_BASE_DELAY * 2^1 = 2.0
+        # Third call: delay = _RETRY_BASE_DELAY * 2^2 = 4.0
+        delays = [c[0][0] for c in sleep_calls]
+        self.assertIn(_RETRY_BASE_DELAY * 1, delays)
+        self.assertIn(_RETRY_BASE_DELAY * 2, delays)
+        self.assertIn(_RETRY_BASE_DELAY * 4, delays)
+
+    def test_provider_stream_error_not_retried(self) -> None:
+        """ProviderStreamError (mid-stream) is NOT retried, treated as error."""
+        provider = _make_mock_provider()
+
+        def stream_error(*args: Any, **kwargs: Any):
+            def gen():
+                yield {
+                    "message": {"role": "assistant", "content": "partial"},
+                    "done": False,
+                }
+                raise ProviderStreamError("stream broken mid-response")
+            return gen()
+
+        provider.chat_stream.side_effect = stream_error
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            timeout=30.0,
+        )
+        result = agent.run()
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("ProviderStreamError", result.error_message)
+        # Should NOT have retried.
+        self.assertEqual(provider.chat_stream.call_count, 1)
+
+
+# ---------------------------------------------------------------------------
+# All sub-agents fail (main agent receives error results)
+# ---------------------------------------------------------------------------
+
+
+class TestAllSubAgentsFail(unittest.TestCase):
+    """Tests that the main agent receives error results when all sub-agents fail."""
+
+    def test_submit_all_all_fail_returns_all_errors(self) -> None:
+        """submit_all() returns error results for every failing sub-agent."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            # Create 3 sub-agents that all crash.
+            agents = []
+            for i in range(3):
+                prov = _make_mock_provider()
+                prov.chat_stream.side_effect = RuntimeError(f"crash-{i}")
+                agent = SubAgent(
+                    provider=prov,
+                    model="qwen3:8b",
+                    tools=[],
+                    prompt=f"task-{i}",
+                    agent_id=f"fail-{i}",
+                )
+                agents.append(agent)
+
+            results = runner.submit_all(agents)
+
+            self.assertEqual(len(results), 3)
+            for r in results:
+                self.assertEqual(r.status, "error")
+                self.assertIn("RuntimeError", r.error_message)
+        finally:
+            runner.shutdown()
+
+    def test_orchestrator_all_fail_returns_error_results(self) -> None:
+        """Orchestrator.spawn_agent() returns error results when LLM crashes."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with patch("local_cli.providers.get_provider") as mock_get:
+            crash_prov = _make_mock_provider()
+            crash_prov.chat_stream.side_effect = RuntimeError("total failure")
+            mock_get.return_value = crash_prov
+
+            results = []
+            for i in range(3):
+                result = orch.spawn_agent(
+                    prompt=f"failing task {i}",
+                    description=f"fail-{i}",
+                )
+                results.append(result)
+
+        for r in results:
+            self.assertIsInstance(r, SubAgentResult)
+            self.assertEqual(r.status, "error")
+
+        orch.shutdown_agents()
+
+
+# ---------------------------------------------------------------------------
+# Background agent completion polling
+# ---------------------------------------------------------------------------
+
+
+class TestBackgroundAgentPolling(unittest.TestCase):
+    """Tests for polling background agent completion."""
+
+    def test_poll_returns_none_then_result(self) -> None:
+        """Polling first returns None, eventually returns the result."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = _make_mock_sub_agent(
+                agent_id="poll-test", content="poll result", delay=0.1,
+            )
+            runner.submit_background(agent)
+
+            # First poll: should be None (still running).
+            immediate = runner.get_background_result("poll-test")
+            self.assertIsNone(immediate)
+
+            # Wait and poll again.
+            result = None
+            for _ in range(30):
+                result = runner.get_background_result("poll-test")
+                if result is not None:
+                    break
+                time.sleep(0.02)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.content, "poll result")
+            self.assertEqual(result.status, "success")
+        finally:
+            runner.shutdown()
+
+    def test_list_background_transitions_running_to_completed(self) -> None:
+        """list_background_agents shows transition from running to completed."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = _make_mock_sub_agent(
+                agent_id="transition-test", delay=0.15,
+            )
+            runner.submit_background(agent)
+
+            # Immediately should be running.
+            agents = runner.list_background_agents()
+            self.assertEqual(len(agents), 1)
+            self.assertEqual(agents[0]["status"], "running")
+
+            # Wait for completion.
+            time.sleep(0.3)
+            agents = runner.list_background_agents()
+            self.assertEqual(agents[0]["status"], "completed")
+        finally:
+            runner.shutdown()
+
+    def test_poll_unknown_agent_id_always_none(self) -> None:
+        """Polling an unknown agent ID always returns None."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            self.assertIsNone(runner.get_background_result("nonexistent"))
+            # Even after some agents run.
+            agent = _make_mock_sub_agent(agent_id="real-agent")
+            runner.submit(agent)
+            self.assertIsNone(runner.get_background_result("nonexistent"))
+        finally:
+            runner.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# KeyboardInterrupt during sub-agent
+# ---------------------------------------------------------------------------
+
+
+class TestKeyboardInterruptDuringSubAgent(unittest.TestCase):
+    """Tests for KeyboardInterrupt handling during sub-agent execution."""
+
+    def test_submit_keyboard_interrupt_returns_error_result(self) -> None:
+        """submit() handles KeyboardInterrupt gracefully, returns error.
+
+        We verify the KeyboardInterrupt handling logic by mocking the
+        executor to return a Future whose result() raises
+        KeyboardInterrupt, without actually putting KeyboardInterrupt
+        into a real thread pool (which causes process-level issues).
+        """
+        from concurrent.futures import Future
+
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = MagicMock(spec=SubAgent)
+            agent.agent_id = "interrupt-001"
+            agent.description = "interrupted task"
+            agent.isolation = None
+
+            # Create a mock future that raises KeyboardInterrupt on result().
+            mock_future = MagicMock(spec=Future)
+            mock_future.result.side_effect = KeyboardInterrupt()
+            mock_future.done.return_value = False
+            mock_future.cancelled.return_value = False
+
+            mock_executor = MagicMock()
+            mock_executor.submit.return_value = mock_future
+
+            with patch.object(runner, "_ensure_executor", return_value=mock_executor):
+                result = runner.submit(agent)
+
+            self.assertIsInstance(result, SubAgentResult)
+            self.assertEqual(result.status, "error")
+            self.assertIn("KeyboardInterrupt", result.error_message)
+            self.assertEqual(result.agent_id, "interrupt-001")
+        finally:
+            runner.shutdown()
+
+    def test_submit_all_keyboard_interrupt_returns_partial(self) -> None:
+        """submit_all() on KeyboardInterrupt returns results for all agents."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            fast = _make_mock_sub_agent(
+                agent_id="fast-int", content="done fast", delay=0.01,
+            )
+            slow = _make_mock_sub_agent(
+                agent_id="slow-int", content="done slow", delay=0.05,
+            )
+
+            # Mock as_completed to raise KeyboardInterrupt after first result.
+            original_as_completed = __import__(
+                "concurrent.futures", fromlist=["as_completed"]
+            ).as_completed
+
+            call_count = 0
+
+            def interrupting_as_completed(futures, **kwargs):
+                nonlocal call_count
+                for future in original_as_completed(futures, **kwargs):
+                    call_count += 1
+                    yield future
+                    if call_count >= 1:
+                        raise KeyboardInterrupt()
+
+            with patch(
+                "local_cli.sub_agent.as_completed",
+                interrupting_as_completed,
+            ):
+                results = runner.submit_all([fast, slow])
+
+            # Should have results for both agents.
+            agent_ids = {r.agent_id for r in results}
+            # At least the fast one should be present.
+            self.assertIn("fast-int", agent_ids)
+            # The slow agent should have an error or success status.
+            if "slow-int" in agent_ids:
+                slow_result = next(
+                    r for r in results if r.agent_id == "slow-int"
+                )
+                self.assertIn(
+                    slow_result.status, ("error", "success"),
+                )
+        finally:
+            runner.shutdown()
+
+    def test_keyboard_interrupt_in_collect_silent_response(self) -> None:
+        """KeyboardInterrupt during _collect_silent_response is re-raised."""
+        def interrupted_stream():
+            yield {
+                "message": {"role": "assistant", "content": "start"},
+                "done": False,
+            }
+            raise KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            SubAgent._collect_silent_response(interrupted_stream())
+
+
+# ---------------------------------------------------------------------------
+# Empty/invalid prompt validation
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyInvalidPromptValidation(unittest.TestCase):
+    """Tests for empty/invalid prompt validation in sub-agent system."""
+
+    def test_orchestrator_empty_prompt_raises(self) -> None:
+        """Orchestrator.spawn_agent() raises ValueError for empty prompt."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with self.assertRaises(ValueError):
+            orch.spawn_agent(prompt="", description="test")
+
+        orch.shutdown_agents()
+
+    def test_orchestrator_whitespace_prompt_raises(self) -> None:
+        """Orchestrator.spawn_agent() raises ValueError for whitespace prompt."""
+        config = _make_config()
+        orch = Orchestrator(config)
+
+        with self.assertRaises(ValueError):
+            orch.spawn_agent(prompt="   \t\n  ", description="test")
+
+        orch.shutdown_agents()
+
+    def test_sub_agent_with_empty_prompt_sends_empty_to_provider(self) -> None:
+        """SubAgent with empty prompt sends it as-is (validation is caller's job)."""
+        provider = _make_mock_provider()
+        _setup_provider_simple_response(provider, "ok")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="",
+        )
+        result = agent.run()
+
+        # SubAgent itself does not validate -- it just runs.
+        self.assertEqual(result.status, "success")
+        # But the user message is empty.
+        call_args = provider.chat_stream.call_args
+        messages = call_args[0][1]
+        self.assertEqual(messages[1]["content"], "")
+
+    def test_agent_tool_empty_prompt_returns_error(self) -> None:
+        """AgentTool.execute() with empty prompt returns error string."""
+        from local_cli.tools.agent_tool import AgentTool
+
+        runner = MagicMock(spec=SubAgentRunner)
+        tool = AgentTool(
+            runner=runner,
+            provider=MagicMock(),
+            model="qwen3:8b",
+            sub_agent_tools=[],
+        )
+        result = tool.execute(description="test", prompt="")
+        self.assertIn("Error", result)
+        self.assertIn("prompt", result)
+
+    def test_agent_tool_none_prompt_returns_error(self) -> None:
+        """AgentTool.execute() with None prompt returns error string."""
+        from local_cli.tools.agent_tool import AgentTool
+
+        runner = MagicMock(spec=SubAgentRunner)
+        tool = AgentTool(
+            runner=runner,
+            provider=MagicMock(),
+            model="qwen3:8b",
+            sub_agent_tools=[],
+        )
+        result = tool.execute(description="test", prompt=None)
+        self.assertIn("Error", result)
+
+    def test_agent_tool_empty_description_returns_error(self) -> None:
+        """AgentTool.execute() with empty description returns error string."""
+        from local_cli.tools.agent_tool import AgentTool
+
+        runner = MagicMock(spec=SubAgentRunner)
+        tool = AgentTool(
+            runner=runner,
+            provider=MagicMock(),
+            model="qwen3:8b",
+            sub_agent_tools=[],
+        )
+        result = tool.execute(description="", prompt="do something")
+        self.assertIn("Error", result)
+        self.assertIn("description", result)
+
+    def test_agent_tool_numeric_prompt_returns_error(self) -> None:
+        """AgentTool.execute() with non-string prompt returns error string."""
+        from local_cli.tools.agent_tool import AgentTool
+
+        runner = MagicMock(spec=SubAgentRunner)
+        tool = AgentTool(
+            runner=runner,
+            provider=MagicMock(),
+            model="qwen3:8b",
+            sub_agent_tools=[],
+        )
+        result = tool.execute(description="test", prompt=42)
+        self.assertIn("Error", result)
+
+
+# ---------------------------------------------------------------------------
+# Git worktree cleanup failure (log warning, don't fail)
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeCleanupFailure(unittest.TestCase):
+    """Tests that worktree cleanup failures are handled gracefully."""
+
+    def test_teardown_worktree_no_path_returns_false(self) -> None:
+        """_teardown_worktree returns False when no worktree is set."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        # No worktree set.
+        self.assertFalse(agent._teardown_worktree())
+
+    @patch("local_cli.sub_agent.subprocess.run")
+    def test_teardown_worktree_remove_fails_gracefully(
+        self, mock_run: MagicMock,
+    ) -> None:
+        """Worktree removal failure does not raise an exception."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/fake-worktree"
+        agent._worktree_branch = "sub-agent-test"
+        agent._worktree_base_commit = "abc123"
+
+        # _has_worktree_changes returns False (clean).
+        with patch.object(agent, "_has_worktree_changes", return_value=False):
+            # Make subprocess.run raise OSError on worktree remove.
+            mock_run.side_effect = OSError("permission denied")
+
+            # Should NOT raise -- graceful cleanup.
+            result = agent._teardown_worktree()
+
+        # Returns False (worktree "cleaned up" even though it failed).
+        self.assertFalse(result)
+
+    @patch("local_cli.sub_agent.subprocess.run")
+    def test_teardown_worktree_timeout_fails_gracefully(
+        self, mock_run: MagicMock,
+    ) -> None:
+        """Worktree removal timeout does not raise an exception."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/fake-worktree"
+        agent._worktree_branch = "sub-agent-test"
+        agent._worktree_base_commit = "abc123"
+
+        with patch.object(agent, "_has_worktree_changes", return_value=False):
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd="git", timeout=30,
+            )
+            # Should NOT raise.
+            result = agent._teardown_worktree()
+
+        self.assertFalse(result)
+
+    @patch("local_cli.sub_agent.subprocess.run")
+    def test_has_worktree_changes_error_defaults_true(
+        self, mock_run: MagicMock,
+    ) -> None:
+        """_has_worktree_changes returns True on error (safe default)."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/fake-worktree"
+        agent._worktree_base_commit = "abc123"
+
+        # subprocess.run raises OSError.
+        mock_run.side_effect = OSError("git not found")
+        result = agent._has_worktree_changes()
+
+        # Should return True as safe default.
+        self.assertTrue(result)
+
+    def test_has_worktree_changes_no_path_returns_false(self) -> None:
+        """_has_worktree_changes returns False when no worktree path set."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        self.assertFalse(agent._has_worktree_changes())
+
+    @patch("local_cli.sub_agent.subprocess.run")
+    def test_teardown_preserves_worktree_with_changes(
+        self, mock_run: MagicMock,
+    ) -> None:
+        """_teardown_worktree preserves worktree when changes detected."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/changed-worktree"
+        agent._worktree_branch = "sub-agent-test"
+        agent._worktree_base_commit = "abc123"
+
+        with patch.object(agent, "_has_worktree_changes", return_value=True):
+            result = agent._teardown_worktree()
+
+        # Should return True (worktree preserved).
+        self.assertTrue(result)
+        # subprocess.run should NOT have been called (no cleanup needed).
+        mock_run.assert_not_called()
+
+    @patch("local_cli.sub_agent.subprocess.run")
+    def test_setup_worktree_failure_raises_worktree_error(
+        self, mock_run: MagicMock,
+    ) -> None:
+        """_setup_worktree raises _WorktreeError when git command fails."""
+        provider = _make_mock_provider()
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            agent_id="wt-fail",
+        )
+
+        # Mock subprocess.run to return non-zero exit code.
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+        mock_result.stderr = "fatal: cannot create worktree"
+        mock_run.return_value = mock_result
+
+        with self.assertRaises(_WorktreeError) as ctx:
+            agent._setup_worktree()
+        self.assertIn("git worktree add failed", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Concurrent worktree creation serialized correctly
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentWorktreeCreationSerialized(unittest.TestCase):
+    """Tests that worktree creation is serialized via a lock."""
+
+    def test_prepare_isolation_uses_lock(self) -> None:
+        """_prepare_isolation acquires the worktree lock."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = MagicMock(spec=SubAgent)
+            agent.isolation = "worktree"
+            agent.agent_id = "wt-lock-test"
+
+            with patch.object(runner, "_worktree_lock") as mock_lock:
+                mock_lock.__enter__ = MagicMock(return_value=None)
+                mock_lock.__exit__ = MagicMock(return_value=False)
+                runner._prepare_isolation(agent)
+
+            # The lock should have been used as a context manager.
+            mock_lock.__enter__.assert_called_once()
+            mock_lock.__exit__.assert_called_once()
+            # _setup_worktree should have been called on the agent.
+            agent._setup_worktree.assert_called_once()
+        finally:
+            runner.shutdown()
+
+    def test_prepare_isolation_skips_non_worktree(self) -> None:
+        """_prepare_isolation does nothing for non-worktree agents."""
+        runner = SubAgentRunner(max_workers=2)
+        try:
+            agent = MagicMock(spec=SubAgent)
+            agent.isolation = None
+            agent.agent_id = "no-wt"
+
+            runner._prepare_isolation(agent)
+
+            # _setup_worktree should NOT have been called.
+            agent._setup_worktree.assert_not_called()
+        finally:
+            runner.shutdown()
+
+    def test_concurrent_worktree_creation_is_serialized(self) -> None:
+        """Two agents with worktree isolation have serialized setup."""
+        runner = SubAgentRunner(max_workers=4)
+        try:
+            order: list[str] = []
+            lock = threading.Lock()
+
+            agent1 = MagicMock(spec=SubAgent)
+            agent1.isolation = "worktree"
+            agent1.agent_id = "wt-1"
+
+            def setup_wt1():
+                with lock:
+                    order.append("start-1")
+                time.sleep(0.05)
+                with lock:
+                    order.append("end-1")
+                return "/tmp/wt-1"
+
+            agent1._setup_worktree.side_effect = setup_wt1
+
+            agent2 = MagicMock(spec=SubAgent)
+            agent2.isolation = "worktree"
+            agent2.agent_id = "wt-2"
+
+            def setup_wt2():
+                with lock:
+                    order.append("start-2")
+                time.sleep(0.05)
+                with lock:
+                    order.append("end-2")
+                return "/tmp/wt-2"
+
+            agent2._setup_worktree.side_effect = setup_wt2
+
+            # Prepare both in sequence (as SubAgentRunner does).
+            runner._prepare_isolation(agent1)
+            runner._prepare_isolation(agent2)
+
+            # Both should have been called.
+            agent1._setup_worktree.assert_called_once()
+            agent2._setup_worktree.assert_called_once()
+
+            # Because of the lock, start-1 must come before end-1,
+            # and they should not interleave.
+            self.assertEqual(order[0], "start-1")
+            self.assertEqual(order[1], "end-1")
+            self.assertEqual(order[2], "start-2")
+            self.assertEqual(order[3], "end-2")
+        finally:
+            runner.shutdown()
+
+    def test_worktree_isolation_property(self) -> None:
+        """SubAgent.isolation returns the configured isolation mode."""
+        provider = _make_mock_provider()
+
+        agent_wt = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+            isolation="worktree",
+        )
+        self.assertEqual(agent_wt.isolation, "worktree")
+
+        agent_none = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        self.assertIsNone(agent_none.isolation)
+
+
+# ---------------------------------------------------------------------------
+# Concurrency warning tests
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrencyWarning(unittest.TestCase):
+    """Tests for concurrency limit warning."""
+
+    def test_warning_emitted_when_exceeding_parallel_limit(self) -> None:
+        """Warning is emitted when agents exceed OLLAMA_NUM_PARALLEL."""
+        with patch.dict(os.environ, {"OLLAMA_NUM_PARALLEL": "1"}):
+            runner = SubAgentRunner(max_workers=4)
+            try:
+                # Submit one background agent.
+                agent1 = _make_mock_sub_agent(
+                    agent_id="warn-1", delay=1.0,
+                )
+                runner.submit_background(agent1)
+
+                # Second submit should emit a warning.
+                agent2 = _make_mock_sub_agent(
+                    agent_id="warn-2", delay=0.01,
+                )
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    runner.submit_background(agent2)
+
+                # Should have at least one warning.
+                self.assertTrue(
+                    any("OLLAMA_NUM_PARALLEL" in str(warning.message)
+                        for warning in w),
+                    f"Expected warning about OLLAMA_NUM_PARALLEL, got: {w}",
+                )
+            finally:
+                runner.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# WorktreeError exception
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeError(unittest.TestCase):
+    """Tests for _WorktreeError internal exception."""
+
+    def test_is_exception(self) -> None:
+        """_WorktreeError is an Exception."""
+        self.assertTrue(issubclass(_WorktreeError, Exception))
+
+    def test_message_preserved(self) -> None:
+        """Error message is preserved."""
+        exc = _WorktreeError("git worktree add failed: something")
+        self.assertEqual(str(exc), "git worktree add failed: something")
+
+
+# ---------------------------------------------------------------------------
+# SubAgent.run() with worktree isolation (mocked)
+# ---------------------------------------------------------------------------
+
+
+class TestSubAgentRunWithWorktreeIsolation(unittest.TestCase):
+    """Tests for SubAgent.run() with worktree isolation."""
+
+    @patch("local_cli.sub_agent.os.chdir")
+    @patch("local_cli.sub_agent.os.getcwd")
+    def test_run_changes_to_worktree_dir_and_restores(
+        self,
+        mock_getcwd: MagicMock,
+        mock_chdir: MagicMock,
+    ) -> None:
+        """run() changes to worktree dir and restores original cwd."""
+        mock_getcwd.return_value = "/original/cwd"
+
+        provider = _make_mock_provider()
+        _setup_provider_simple_response(provider, "done in worktree")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/test-worktree"
+
+        with patch.object(agent, "_teardown_worktree", return_value=False):
+            result = agent.run()
+
+        self.assertEqual(result.status, "success")
+        # Should have changed to worktree dir.
+        mock_chdir.assert_any_call("/tmp/test-worktree")
+        # Should have restored original dir.
+        mock_chdir.assert_any_call("/original/cwd")
+
+    @patch("local_cli.sub_agent.os.chdir")
+    @patch("local_cli.sub_agent.os.getcwd")
+    def test_run_restores_cwd_even_on_error(
+        self,
+        mock_getcwd: MagicMock,
+        mock_chdir: MagicMock,
+    ) -> None:
+        """run() restores original cwd even when the agent errors."""
+        mock_getcwd.return_value = "/original/cwd"
+
+        provider = _make_mock_provider()
+        provider.chat_stream.side_effect = RuntimeError("error in worktree")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/test-worktree"
+
+        with patch.object(agent, "_teardown_worktree", return_value=False):
+            result = agent.run()
+
+        self.assertEqual(result.status, "error")
+        # Should still have restored original dir.
+        mock_chdir.assert_any_call("/original/cwd")
+
+    @patch("local_cli.sub_agent.os.chdir")
+    @patch("local_cli.sub_agent.os.getcwd")
+    def test_worktree_preserved_in_result_when_changes(
+        self,
+        mock_getcwd: MagicMock,
+        mock_chdir: MagicMock,
+    ) -> None:
+        """Result includes worktree_path when changes are detected."""
+        mock_getcwd.return_value = "/original"
+
+        provider = _make_mock_provider()
+        _setup_provider_simple_response(provider, "modified files")
+
+        agent = SubAgent(
+            provider=provider,
+            model="qwen3:8b",
+            tools=[],
+            prompt="task",
+        )
+        agent._worktree_path = "/tmp/changed-worktree"
+
+        with patch.object(agent, "_teardown_worktree", return_value=True):
+            result = agent.run()
+
+        self.assertEqual(result.worktree_path, "/tmp/changed-worktree")
 
 
 if __name__ == "__main__":
