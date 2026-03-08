@@ -91,6 +91,8 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/brain [model]": "Set or show the orchestrator brain model.",
     "/registry": "Show current model-to-task routing registry.",
     "/update": "Check for updates and pull the latest version.",
+    "/undo": "Undo the most recent file modifications (git checkout).",
+    "/diff": "Show uncommitted changes in the working tree.",
 }
 
 
@@ -304,6 +306,34 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print("git is not installed. Cannot rollback.")
         except GitError as exc:
             print(f"Rollback failed: {exc}")
+        return True
+
+    # -- /undo --------------------------------------------------------------
+    if cmd == "/undo":
+        try:
+            if not ctx.git_ops.is_git_repo():
+                print("Not a git repository. Cannot undo.")
+                return True
+            result = ctx.git_ops.undo_last_change()
+            print(result)
+        except GitNotInstalledError:
+            print("git is not installed. Cannot undo.")
+        except GitError as exc:
+            print(f"Undo failed: {exc}")
+        return True
+
+    # -- /diff --------------------------------------------------------------
+    if cmd == "/diff":
+        try:
+            if not ctx.git_ops.is_git_repo():
+                print("Not a git repository. Cannot show diff.")
+                return True
+            result = ctx.git_ops.diff_working_tree()
+            print(result)
+        except GitNotInstalledError:
+            print("git is not installed. Cannot show diff.")
+        except GitError as exc:
+            print(f"Diff failed: {exc}")
         return True
 
     # -- /install <model> ---------------------------------------------------
