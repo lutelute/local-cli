@@ -11,6 +11,7 @@ from typing import Any, Generator
 
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
 from local_cli.providers.base import ProviderStreamError
+from local_cli.spinner import Spinner
 from local_cli.tools.base import Tool
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ _COMPACT_KEEP_RECENT = 10
 
 def collect_streaming_response(
     stream: Generator[dict[str, Any], None, None],
+    spinner: Spinner | None = None,
 ) -> dict[str, Any]:
     """Accumulate a streaming chat response and print tokens as they arrive.
 
@@ -61,6 +63,7 @@ def collect_streaming_response(
     Args:
         stream: A generator yielding parsed NDJSON chunks from the Ollama
             streaming chat API.
+        spinner: Optional spinner to stop once the first content arrives.
 
     Returns:
         A dictionary representing the full response, structured as::
@@ -86,6 +89,7 @@ def collect_streaming_response(
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     last_chunk: dict[str, Any] = {}
+    spinner_stopped = False
 
     try:
         for chunk in stream:
@@ -96,6 +100,10 @@ def collect_streaming_response(
             # Accumulate content deltas and print to stdout.
             delta = message.get("content", "")
             if delta:
+                # Stop the spinner on first content token.
+                if spinner and not spinner_stopped:
+                    spinner.stop()
+                    spinner_stopped = True
                 content_parts.append(delta)
                 sys.stdout.write(delta)
                 sys.stdout.flush()
@@ -104,10 +112,16 @@ def collect_streaming_response(
             # handle them appearing in any chunk for robustness).
             chunk_tool_calls = message.get("tool_calls")
             if chunk_tool_calls:
+                # Stop the spinner when tool calls arrive (no content yet).
+                if spinner and not spinner_stopped:
+                    spinner.stop()
+                    spinner_stopped = True
                 tool_calls.extend(chunk_tool_calls)
 
     except KeyboardInterrupt:
         # User interrupted streaming.  Return what we have so far.
+        if spinner and not spinner_stopped:
+            spinner.stop()
         sys.stdout.write("\n")
         sys.stdout.flush()
 
@@ -116,9 +130,15 @@ def collect_streaming_response(
         # separate any partial output, then re-raise so the caller can
         # decide how to handle it.  Catches both OllamaStreamError and
         # other provider-specific stream errors via inheritance.
+        if spinner and not spinner_stopped:
+            spinner.stop()
         sys.stdout.write("\n")
         sys.stdout.flush()
         raise
+
+    # Ensure spinner is stopped after stream completes.
+    if spinner and not spinner_stopped:
+        spinner.stop()
 
     # Print a trailing newline after streamed content (if any was printed).
     if content_parts:
@@ -390,10 +410,16 @@ def agent_loop(
                 f"[debug] Sending {len(messages)} messages to {model}\n"
             )
 
+        thinking_spinner = Spinner("Thinking")
+        thinking_spinner.start()
+
         try:
             stream = client.chat_stream(model, messages, tools=tool_defs)
-            full_response = collect_streaming_response(stream)
+            full_response = collect_streaming_response(
+                stream, spinner=thinking_spinner,
+            )
         except ProviderStreamError as exc:
+            thinking_spinner.stop()
             # Use provider-specific prefix when possible for backward
             # compatibility (existing tests assert "Error from Ollama").
             if isinstance(exc, OllamaStreamError):
@@ -407,6 +433,7 @@ def agent_loop(
             })
             break
         except KeyboardInterrupt:
+            thinking_spinner.stop()
             sys.stderr.write("\nInterrupted.\n")
             break
 
@@ -445,11 +472,14 @@ def agent_loop(
                 result = f"Error: unknown tool '{tool_name}'"
                 sys.stderr.write(f"  Unknown tool: {tool_name}\n")
             else:
-                sys.stderr.write(f"  Running tool: {tool_name}\n")
+                tool_spinner = Spinner(f"Running {tool_name}")
+                tool_spinner.start()
 
                 try:
                     result = _execute_tool(tool, arguments, debug=debug)
+                    tool_spinner.stop()
                 except KeyboardInterrupt:
+                    tool_spinner.stop()
                     result = "Error: tool execution interrupted by user."
                     sys.stderr.write(f"  Tool {tool_name} interrupted.\n")
                     tool_msg: dict[str, Any] = {
