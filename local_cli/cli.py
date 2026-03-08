@@ -12,6 +12,7 @@ from local_cli import __version__
 from local_cli.agent import agent_loop
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
+from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.session import SessionManager
 from local_cli.tools.base import Tool
@@ -748,6 +749,18 @@ def run_repl(
         # Build user message and add to history.
         messages.append({"role": "user", "content": prompt_content})
 
+        # Build merged inference options: defaults < presets < user config.
+        default_options: dict = {"num_ctx": 8192}
+        preset_options = get_model_preset(config.model)
+        user_options: dict = {"num_ctx": config.num_ctx}
+        if config.temperature is not None:
+            user_options["temperature"] = config.temperature
+        if config.top_p is not None:
+            user_options["top_p"] = config.top_p
+        if config.top_k is not None:
+            user_options["top_k"] = config.top_k
+        inference_options = {**default_options, **preset_options, **user_options}
+
         # Run the agent loop (streams response to stdout).
         try:
             agent_loop(
@@ -756,6 +769,7 @@ def run_repl(
                 tools=tools,
                 messages=messages,
                 debug=config.debug,
+                options=inference_options,
             )
         except KeyboardInterrupt:
             print("\nInterrupted.")

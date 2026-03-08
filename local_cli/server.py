@@ -32,6 +32,7 @@ from typing import Any
 
 from local_cli.config import Config
 from local_cli.model_catalog import get_merged_catalog, update_catalog
+from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
@@ -252,6 +253,38 @@ class JsonLineServer:
         self._stop_flag.clear()
         self._messages.append({"role": "user", "content": content})
 
+        # Build merged inference options: defaults < presets < user config.
+        default_options: dict[str, Any] = {"num_ctx": 8192}
+        preset_options = get_model_preset(self._config.model)
+        user_options: dict[str, Any] = {"num_ctx": self._config.num_ctx}
+        if self._config.temperature is not None:
+            user_options["temperature"] = self._config.temperature
+        if self._config.top_p is not None:
+            user_options["top_p"] = self._config.top_p
+        if self._config.top_k is not None:
+            user_options["top_k"] = self._config.top_k
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        # Determine think mode (only for models that support it).
+        family = get_model_family(self._config.model)
+        think = True if self._config.think_mode and family in SUPPORTS_THINKING else None
+
+        # Build keep_alive from config.
+        keep_alive = self._config.keep_alive
+
+        # Build extra kwargs for providers that support them (Ollama).
+        chat_kwargs: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": self._messages,
+            "tools": self._tool_defs,
+        }
+        if hasattr(self._provider, "chat_stream") and self._provider.name == "ollama":
+            chat_kwargs["options"] = inference_options
+            if think is not None:
+                chat_kwargs["think"] = think
+            if keep_alive is not None:
+                chat_kwargs["keep_alive"] = keep_alive
+
         max_iterations = 15
         for _ in range(max_iterations):
             if self._stop_flag.is_set():
@@ -263,11 +296,7 @@ class JsonLineServer:
             tool_calls = []
 
             try:
-                for chunk in self._provider.chat_stream(
-                    model=self._config.model,
-                    messages=self._messages,
-                    tools=self._tool_defs,
-                ):
+                for chunk in self._provider.chat_stream(**chat_kwargs):
                     if self._stop_flag.is_set():
                         break
 
