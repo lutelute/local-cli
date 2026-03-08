@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'path'
 
-const APP_VERSION = '0.5.0'
+const APP_VERSION = '0.5.1'
 const GITHUB_REPO = 'lutelute/local-cli'
 
 // Claude auth credential storage path.
@@ -252,18 +252,35 @@ function exchangeOAuthCode(code: string): Promise<{ apiKey?: string; error?: str
 // ---------------------------------------------------------------------------
 
 function findPython(): string {
-  // Try python3 first, then python.
-  return process.platform === 'win32' ? 'python' : 'python3'
+  if (process.platform === 'win32') return 'python'
+
+  // macOS GUI apps get a minimal PATH that only includes /usr/bin/python3
+  // (often Python 3.9), but local-cli requires Python 3.10+.
+  // Check common Homebrew/system paths for a modern Python.
+  const candidates = [
+    '/opt/homebrew/bin/python3',   // macOS ARM Homebrew
+    '/usr/local/bin/python3',      // macOS Intel Homebrew / Linux
+    'python3',                     // fallback to PATH
+  ]
+  for (const candidate of candidates) {
+    try {
+      const { execFileSync } = require('child_process')
+      execFileSync(candidate, ['--version'], { stdio: 'ignore' })
+      return candidate
+    } catch {
+      // Not found, try next.
+    }
+  }
+  return 'python3'
 }
 
 function findProjectRoot(): string {
   // In dev mode: __dirname is desktop/dist-electron, so ../../ is project root.
-  // In packaged app: try extraResources path first, fall back to dev path.
-  const devRoot = path.resolve(__dirname, '..', '..')
-  const resourcesRoot = process.resourcesPath
-    ? path.resolve(process.resourcesPath)
-    : devRoot
-  return devRoot
+  // In packaged app: local_cli/ and pyproject.toml are in Resources/ via extraResources.
+  if (app.isPackaged && process.resourcesPath) {
+    return path.resolve(process.resourcesPath)
+  }
+  return path.resolve(__dirname, '..', '..')
 }
 
 function startPythonServer() {
