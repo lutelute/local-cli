@@ -12,6 +12,9 @@ silently -- no stdout streaming, no spinners, no interactive I/O.
 
 import json
 import os
+import subprocess
+import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -61,6 +64,7 @@ class SubAgentResult:
     messages_count: int
     tool_calls_count: int
     error_message: str = ""
+    worktree_path: str = ""
 
     def format_result(self) -> str:
         """Format the result as a human-readable string for the LLM.
@@ -78,6 +82,8 @@ class SubAgentResult:
         ]
         if self.error_message:
             lines.append(f"Error: {self.error_message}")
+        if self.worktree_path:
+            lines.append(f"Worktree: {self.worktree_path}")
         if self.content:
             lines.append(f"\nResult:\n{self.content}")
         return "\n".join(lines)
@@ -124,6 +130,14 @@ class SubAgent:
         agent_id: Optional unique identifier.  If ``None``, one is
             generated automatically.
         timeout: Maximum execution time in seconds.  Defaults to 300.
+        isolation: Optional isolation mode.  When set to
+            ``'worktree'``, the sub-agent runs in a temporary git
+            worktree.  Worktree creation is serialized by
+            :class:`SubAgentRunner` to avoid races on the shared
+            ``.git`` directory.  If the worktree has changes after
+            execution, it is preserved and its path is returned in
+            :attr:`SubAgentResult.worktree_path`.  Defaults to
+            ``None`` (no isolation).
     """
 
     def __init__(
@@ -135,6 +149,7 @@ class SubAgent:
         description: str = "",
         agent_id: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
+        isolation: str | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -143,10 +158,16 @@ class SubAgent:
         self._description = description or "sub-agent task"
         self._agent_id = agent_id or self._generate_agent_id()
         self._timeout = timeout
+        self._isolation = isolation
 
         # Each sub-agent gets its own isolated message list.
         self._messages: list[dict[str, Any]] = []
         self._tool_calls_count = 0
+
+        # Worktree isolation state -- populated by _setup_worktree().
+        self._worktree_path: str = ""
+        self._worktree_branch: str = ""
+        self._worktree_base_commit: str = ""
 
     # ------------------------------------------------------------------
     # Read-only properties
@@ -162,6 +183,11 @@ class SubAgent:
         """Short description of the sub-agent's task."""
         return self._description
 
+    @property
+    def isolation(self) -> str | None:
+        """Isolation mode for this sub-agent (``'worktree'`` or ``None``)."""
+        return self._isolation
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -173,6 +199,13 @@ class SubAgent:
         configured provider, model, tools, and prompt.  The loop
         continues until the LLM responds without tool calls or the
         timeout is reached.
+
+        When worktree isolation is active (``_worktree_path`` is set by
+        :meth:`_setup_worktree`), the working directory is changed to
+        the worktree before the agent loop runs and restored afterward.
+        After completion, the worktree is cleaned up if no changes were
+        detected; otherwise it is preserved and its path included in
+        the result.
 
         This method is designed to be called from a thread and is
         safe for concurrent execution (each sub-agent uses its own
@@ -192,6 +225,12 @@ class SubAgent:
         self._tool_calls_count = 0
         final_content = ""
 
+        # Change to worktree directory if isolation is active.
+        original_cwd = ""
+        if self._worktree_path:
+            original_cwd = os.getcwd()
+            os.chdir(self._worktree_path)
+
         try:
             final_content = self._run_agent_loop(start_time)
             status = "success"
@@ -205,8 +244,21 @@ class SubAgent:
             status = "error"
             error_message = f"{type(exc).__name__}: {exc}"
             final_content = self._extract_last_assistant_content()
+        finally:
+            # Restore original working directory.
+            if original_cwd:
+                try:
+                    os.chdir(original_cwd)
+                except OSError:
+                    pass
 
         duration = time.monotonic() - start_time
+
+        # Clean up worktree; preserve if changes were detected.
+        preserved_worktree = ""
+        if self._worktree_path:
+            if self._teardown_worktree():
+                preserved_worktree = self._worktree_path
 
         return SubAgentResult(
             agent_id=self._agent_id,
@@ -217,6 +269,7 @@ class SubAgent:
             messages_count=len(self._messages),
             tool_calls_count=self._tool_calls_count,
             error_message=error_message,
+            worktree_path=preserved_worktree,
         )
 
     # ------------------------------------------------------------------
@@ -403,6 +456,151 @@ class SubAgent:
                 return msg.get("content", "")
         return ""
 
+    # ------------------------------------------------------------------
+    # Internal: worktree isolation
+    # ------------------------------------------------------------------
+
+    def _setup_worktree(self) -> str:
+        """Create a temporary git worktree for this sub-agent.
+
+        Creates a new branch and worktree directory using
+        ``git worktree add``.  Records the base commit hash so that
+        :meth:`_has_worktree_changes` can detect new commits.
+
+        This method is called by :class:`SubAgentRunner` in the main
+        thread (serialized) before the sub-agent is submitted to the
+        thread pool, to avoid races on the shared ``.git`` directory.
+
+        Returns:
+            The filesystem path to the created worktree directory.
+
+        Raises:
+            _WorktreeError: If ``git worktree add`` fails.
+        """
+        branch_name = f"sub-agent-{self._agent_id}"
+        worktree_dir = os.path.join(
+            tempfile.gettempdir(),
+            f"local-cli-worktree-{self._agent_id}",
+        )
+
+        result = subprocess.run(
+            ["git", "worktree", "add", "-b", branch_name, worktree_dir],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise _WorktreeError(
+                f"git worktree add failed: {result.stderr.strip()}"
+            )
+
+        # Record base commit for change detection.
+        rev_result = subprocess.run(
+            ["git", "-C", worktree_dir, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self._worktree_path = worktree_dir
+        self._worktree_branch = branch_name
+        self._worktree_base_commit = rev_result.stdout.strip()
+        return worktree_dir
+
+    def _teardown_worktree(self) -> bool:
+        """Clean up the worktree if no changes were detected.
+
+        Checks for both uncommitted changes and new commits.  If the
+        worktree is clean, removes it via ``git worktree remove`` and
+        deletes the associated branch.  If changes are detected, the
+        worktree is preserved.
+
+        Cleanup failures are handled gracefully (silently ignored) to
+        avoid masking the sub-agent's actual result.
+
+        Returns:
+            ``True`` if changes were detected and the worktree was
+            preserved; ``False`` if the worktree was cleaned up (or
+            was not set).
+        """
+        if not self._worktree_path:
+            return False
+
+        has_changes = self._has_worktree_changes()
+
+        if not has_changes:
+            # Remove the worktree directory.
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", self._worktree_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                pass  # Graceful cleanup -- don't fail.
+
+            # Delete the temporary branch.
+            try:
+                subprocess.run(
+                    ["git", "branch", "-d", self._worktree_branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                pass  # Graceful cleanup -- don't fail.
+
+            self._worktree_path = ""
+            return False
+
+        return True
+
+    def _has_worktree_changes(self) -> bool:
+        """Check if the worktree has uncommitted or committed changes.
+
+        Detects two kinds of changes:
+
+        1. **Uncommitted changes** -- via ``git status --porcelain``.
+        2. **New commits** -- by comparing the current HEAD to the
+           base commit recorded at worktree creation time.
+
+        Returns ``True`` on any error as a safe default (preserves
+        the worktree rather than accidentally deleting work).
+
+        Returns:
+            ``True`` if changes were detected, ``False`` if the
+            worktree is clean.
+        """
+        if not self._worktree_path:
+            return False
+
+        try:
+            # Check for uncommitted changes.
+            status_result = subprocess.run(
+                ["git", "-C", self._worktree_path,
+                 "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if status_result.stdout.strip():
+                return True
+
+            # Check if HEAD has moved (new commits).
+            rev_result = subprocess.run(
+                ["git", "-C", self._worktree_path,
+                 "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            current_commit = rev_result.stdout.strip()
+            return current_commit != self._worktree_base_commit
+
+        except (subprocess.TimeoutExpired, OSError):
+            # Assume changes on error (safe default).
+            return True
+
     @staticmethod
     def _generate_agent_id() -> str:
         """Generate a unique agent identifier.
@@ -449,6 +647,8 @@ class SubAgentRunner:
         self._max_workers = min(max_workers, ollama_parallel)
         self._executor: ThreadPoolExecutor | None = None
         self._background: dict[str, Future[SubAgentResult]] = {}
+        # Serializes worktree creation to avoid races on .git.
+        self._worktree_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -456,6 +656,10 @@ class SubAgentRunner:
 
     def submit(self, sub_agent: "SubAgent") -> SubAgentResult:
         """Submit a sub-agent for execution and block until completion.
+
+        If the sub-agent has ``isolation='worktree'``, its worktree is
+        created (serialized) in the calling thread before the agent is
+        submitted to the thread pool.
 
         Creates a thread in the pool to run the sub-agent's
         :meth:`~SubAgent.run` method and waits for the result.
@@ -466,12 +670,17 @@ class SubAgentRunner:
         Returns:
             The sub-agent's execution result.
         """
+        self._prepare_isolation(sub_agent)
         executor = self._ensure_executor()
         future = executor.submit(sub_agent.run)
         return future.result()
 
     def submit_background(self, sub_agent: "SubAgent") -> str:
         """Submit a sub-agent for background execution.
+
+        If the sub-agent has ``isolation='worktree'``, its worktree is
+        created (serialized) in the calling thread before the agent is
+        submitted to the thread pool.
 
         Returns immediately with the agent ID.  The result can be
         retrieved later via :meth:`get_background_result`.
@@ -482,6 +691,7 @@ class SubAgentRunner:
         Returns:
             The agent ID for tracking the background execution.
         """
+        self._prepare_isolation(sub_agent)
         executor = self._ensure_executor()
         future = executor.submit(sub_agent.run)
         self._background[sub_agent.agent_id] = future
@@ -542,6 +752,23 @@ class SubAgentRunner:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _prepare_isolation(self, sub_agent: "SubAgent") -> None:
+        """Set up worktree isolation if the sub-agent requests it.
+
+        Worktree creation is serialized via a lock to avoid races on
+        the shared ``.git`` directory.  Called in the main thread
+        before the sub-agent is submitted to the thread pool.
+
+        Args:
+            sub_agent: The sub-agent whose isolation to prepare.
+
+        Raises:
+            _WorktreeError: If worktree creation fails.
+        """
+        if sub_agent.isolation == "worktree":
+            with self._worktree_lock:
+                sub_agent._setup_worktree()
+
     def _ensure_executor(self) -> ThreadPoolExecutor:
         """Return the thread pool executor, creating it lazily if needed.
 
@@ -577,3 +804,7 @@ class SubAgentRunner:
 
 class _SubAgentTimeout(Exception):
     """Raised internally when a sub-agent exceeds its timeout."""
+
+
+class _WorktreeError(Exception):
+    """Raised when git worktree creation or management fails."""
