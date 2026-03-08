@@ -16,6 +16,7 @@ from local_cli.agent import (
     _compact_message,
     _estimate_tokens,
     _execute_tool,
+    _extract_file_path,
     _needs_compaction,
     _truncate,
     agent_loop,
@@ -23,6 +24,7 @@ from local_cli.agent import (
     compact_messages,
 )
 from local_cli.ollama_client import OllamaStreamError
+from local_cli.tool_cache import ToolCache
 from local_cli.tools.base import Tool
 
 
@@ -711,6 +713,415 @@ class TestAgentLoopErrorHandling(unittest.TestCase):
         tool_msg = messages[2]
         self.assertEqual(tool_msg["role"], "tool")
         self.assertIn("Error", tool_msg["content"])
+
+
+# ---------------------------------------------------------------------------
+# _extract_file_path
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFilePath(unittest.TestCase):
+    """Tests for _extract_file_path()."""
+
+    def test_read_tool_returns_file_path(self) -> None:
+        """Returns file_path argument for 'read' tool."""
+        result = _extract_file_path("read", {"file_path": "/tmp/test.py"})
+        self.assertEqual(result, "/tmp/test.py")
+
+    def test_read_tool_missing_file_path(self) -> None:
+        """Returns None when 'read' tool has no file_path argument."""
+        result = _extract_file_path("read", {})
+        self.assertIsNone(result)
+
+    def test_read_tool_non_string_file_path(self) -> None:
+        """Returns None when file_path is not a string."""
+        result = _extract_file_path("read", {"file_path": 123})
+        self.assertIsNone(result)
+
+    def test_glob_tool_returns_none(self) -> None:
+        """Returns None for 'glob' tool (directory-based, no single file)."""
+        result = _extract_file_path("glob", {"pattern": "*.py"})
+        self.assertIsNone(result)
+
+    def test_grep_tool_returns_none(self) -> None:
+        """Returns None for 'grep' tool (may search multiple files)."""
+        result = _extract_file_path("grep", {"pattern": "def", "path": "/tmp"})
+        self.assertIsNone(result)
+
+    def test_unknown_tool_returns_none(self) -> None:
+        """Returns None for unrecognized tool names."""
+        result = _extract_file_path("bash", {"command": "ls"})
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Cacheable dummy tool
+# ---------------------------------------------------------------------------
+
+
+class _CacheableDummyTool(_DummyTool):
+    """A cacheable tool for testing cache integration."""
+
+    @property
+    def cacheable(self) -> bool:
+        return True
+
+
+# ---------------------------------------------------------------------------
+# agent_loop cache integration
+# ---------------------------------------------------------------------------
+
+
+class TestAgentLoopCacheHit(unittest.TestCase):
+    """Tests for cache hit behaviour in agent_loop."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_cache_hit_skips_execution(self) -> None:
+        """When cache has result, tool execution is skipped."""
+        tool = _CacheableDummyTool(name="read", result="SHOULD NOT SEE THIS")
+
+        cache = ToolCache()
+        args = {"file_path": "/tmp/test.py"}
+        cache.put("read", args, "cached file content")
+
+        # LLM calls the read tool.
+        tc = [{"function": {"name": "read", "arguments": args}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Done."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read the file"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, cache=cache)
+
+        # The tool message should contain the cached result, not the tool's
+        # default result.
+        tool_msg = messages[2]
+        self.assertEqual(tool_msg["role"], "tool")
+        self.assertEqual(tool_msg["content"], "cached file content")
+
+    def test_cache_hit_logs_debug(self) -> None:
+        """In debug mode, cache hits are logged to stderr."""
+        tool = _CacheableDummyTool(name="read", result="live result")
+
+        cache = ToolCache()
+        cache.put("read", {"file_path": "/tmp/a.py"}, "cached")
+
+        tc = [{"function": {"name": "read", "arguments": {"file_path": "/tmp/a.py"}}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Ok."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, debug=True, cache=cache)
+
+        stderr = sys.stderr.getvalue()
+        self.assertIn("cache hit", stderr)
+        self.assertIn("read", stderr)
+
+
+class TestAgentLoopCacheMiss(unittest.TestCase):
+    """Tests for cache miss and store behaviour in agent_loop."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_cache_miss_executes_and_stores(self) -> None:
+        """On cache miss, tool is executed and result stored in cache."""
+        tool = _CacheableDummyTool(name="read", result="file contents here")
+
+        cache = ToolCache()
+        args = {"file_path": "/tmp/test.py"}
+
+        tc = [{"function": {"name": "read", "arguments": args}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Done."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read file"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, cache=cache)
+
+        # Tool result should be in messages.
+        tool_msg = messages[2]
+        self.assertEqual(tool_msg["content"], "file contents here")
+
+        # Result should now be in cache.
+        cached = cache.get("read", args)
+        self.assertEqual(cached, "file contents here")
+
+    def test_cache_miss_logs_debug(self) -> None:
+        """In debug mode, cache misses are logged to stderr."""
+        tool = _CacheableDummyTool(name="read", result="content")
+
+        cache = ToolCache()
+        tc = [{"function": {"name": "read", "arguments": {"file_path": "/tmp/x.py"}}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Ok."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, debug=True, cache=cache)
+
+        stderr = sys.stderr.getvalue()
+        self.assertIn("cache miss", stderr)
+        self.assertIn("read", stderr)
+
+    def test_error_result_not_cached(self) -> None:
+        """Error results from tools are not stored in cache."""
+        tool = _CacheableDummyTool(
+            name="read",
+            side_effect=FileNotFoundError("no such file"),
+        )
+
+        cache = ToolCache()
+        args = {"file_path": "/nonexistent"}
+        tc = [{"function": {"name": "read", "arguments": args}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Noted."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read file"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, cache=cache)
+
+        # Tool result is an error.
+        tool_msg = messages[2]
+        self.assertIn("Error:", tool_msg["content"])
+
+        # Error should NOT be cached.
+        cached = cache.get("read", args)
+        self.assertIsNone(cached)
+
+    def test_second_call_uses_cache(self) -> None:
+        """Second identical tool call uses cached result from first call."""
+        call_count = 0
+
+        class CountingTool(_CacheableDummyTool):
+            def execute(self, **kwargs: object) -> str:
+                nonlocal call_count
+                call_count += 1
+                return "file content"
+
+        tool = CountingTool(name="read")
+        cache = ToolCache()
+        args = {"file_path": "/tmp/test.py"}
+
+        # Round 1: read tool call -> miss -> execute.
+        tc1 = [{"function": {"name": "read", "arguments": args}}]
+        chunks1 = _make_chunks([""], tool_calls=tc1)
+
+        # Round 2: same read tool call -> hit -> skip execution.
+        tc2 = [{"function": {"name": "read", "arguments": args}}]
+        chunks2 = _make_chunks([""], tool_calls=tc2)
+
+        # Round 3: final text response.
+        chunks3 = _make_chunks(["All done."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(chunks1),
+            iter(chunks2),
+            iter(chunks3),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read file twice"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, cache=cache)
+
+        # The tool should have been executed only once.
+        self.assertEqual(call_count, 1)
+
+        # Both tool messages should have the same content.
+        self.assertEqual(messages[2]["content"], "file content")
+        self.assertEqual(messages[4]["content"], "file content")
+
+
+class TestAgentLoopCacheNonCacheable(unittest.TestCase):
+    """Tests that non-cacheable tools bypass the cache."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_non_cacheable_tool_not_cached(self) -> None:
+        """Non-cacheable tool results are not stored in cache."""
+        tool = _DummyTool(name="bash", result="command output")
+
+        cache = ToolCache()
+        args = {"command": "ls"}
+        tc = [{"function": {"name": "bash", "arguments": args}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Done."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Run ls"},
+        ]
+        agent_loop(client, "qwen3:8b", [tool], messages, cache=cache)
+
+        # Cache should be empty — bash is not cacheable.
+        self.assertEqual(cache.size, 0)
+
+    def test_no_cache_parameter_backward_compatible(self) -> None:
+        """agent_loop works without cache parameter (backward compatible)."""
+        tool = _CacheableDummyTool(name="read", result="content")
+
+        tc = [{"function": {"name": "read", "arguments": {"file_path": "/a"}}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Ok."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Read"},
+        ]
+        # Should work fine with no cache argument.
+        agent_loop(client, "qwen3:8b", [tool], messages)
+
+        self.assertEqual(messages[2]["role"], "tool")
+        self.assertEqual(messages[2]["content"], "content")
+
+
+class TestAgentLoopCacheInvalidation(unittest.TestCase):
+    """Tests for cache invalidation when mutating tools run."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_write_tool_invalidates_cache(self) -> None:
+        """Non-cacheable tool with file_path argument invalidates cache entries."""
+        read_tool = _CacheableDummyTool(name="read", result="content")
+        write_tool = _DummyTool(name="write", result="Successfully wrote 10 bytes")
+
+        cache = ToolCache()
+        file_args = {"file_path": "/tmp/test.py"}
+
+        # Pre-populate cache with a read result.
+        cache.put("read", file_args, "old content", file_path="/tmp/test.py")
+        self.assertEqual(cache.size, 1)
+
+        # LLM calls the write tool with the same file_path.
+        tc = [{"function": {"name": "write", "arguments": {"file_path": "/tmp/test.py", "content": "new"}}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Written."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Write file"},
+        ]
+        agent_loop(client, "qwen3:8b", [read_tool, write_tool], messages, cache=cache)
+
+        # The cached read entry for that file should have been invalidated.
+        cached = cache.get("read", file_args)
+        self.assertIsNone(cached)
+
+    def test_error_write_does_not_invalidate(self) -> None:
+        """Error results from mutating tools do not invalidate cache."""
+        read_tool = _CacheableDummyTool(name="read", result="content")
+        write_tool = _DummyTool(
+            name="write",
+            side_effect=PermissionError("denied"),
+        )
+
+        cache = ToolCache()
+        file_args = {"file_path": "/tmp/test.py"}
+        cache.put("read", file_args, "cached content", file_path="/tmp/test.py")
+
+        tc = [{"function": {"name": "write", "arguments": {"file_path": "/tmp/test.py", "content": "x"}}}]
+        first_chunks = _make_chunks([""], tool_calls=tc)
+        second_chunks = _make_chunks(["Failed."])
+
+        client = MagicMock()
+        client.chat_stream.side_effect = [
+            iter(first_chunks),
+            iter(second_chunks),
+        ]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Write file"},
+        ]
+        agent_loop(client, "qwen3:8b", [read_tool, write_tool], messages, cache=cache)
+
+        # Cache should NOT be invalidated since the write failed.
+        cached = cache.get("read", file_args)
+        self.assertEqual(cached, "cached content")
 
 
 if __name__ == "__main__":
