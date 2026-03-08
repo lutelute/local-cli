@@ -42,11 +42,15 @@ from local_cli.tools import get_default_tools
 from local_cli.tools.base import Tool
 
 
+_send_lock = threading.Lock()
+
+
 def _send(obj: dict[str, Any]) -> None:
     """Write a JSON line to stdout (thread-safe)."""
-    line = json.dumps(obj, ensure_ascii=False)
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with _send_lock:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def _build_system_prompt(tools: list[Tool]) -> str:
