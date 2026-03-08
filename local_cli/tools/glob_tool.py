@@ -14,6 +14,10 @@ class GlobTool(Tool):
     """Find files matching a glob pattern."""
 
     @property
+    def cacheable(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "glob"
 
