@@ -106,6 +106,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/diff": "Show uncommitted changes in the working tree.",
     "/context": "Show context window usage (messages, tokens, compaction).",
     "/copy": "Copy last assistant response to clipboard.",
+    "/usage": "Show per-message token usage and session totals.",
 }
 
 
@@ -579,6 +580,15 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print("Clipboard not available.")
         except ClipboardError as exc:
             print(f"Copy failed: {exc}")
+        return True
+
+    # -- /usage -------------------------------------------------------------
+    if cmd == "/usage":
+        if ctx.token_tracker is None:
+            print("Token tracking not available.")
+            return True
+
+        print(ctx.token_tracker.format_table())
         return True
 
     # -- Unknown command ----------------------------------------------------
