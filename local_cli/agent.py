@@ -8,10 +8,15 @@ tokens arrive.
 
 import json
 import sys
+import time
 from typing import Any, Generator
 
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
-from local_cli.providers.base import LLMProvider, ProviderStreamError
+from local_cli.providers.base import (
+    LLMProvider,
+    ProviderRequestError,
+    ProviderStreamError,
+)
 from local_cli.spinner import Spinner
 from local_cli.tools.base import Tool
 
@@ -600,6 +605,80 @@ def agent_loop(
 # Silent agent loop (for sub-agents)
 # ---------------------------------------------------------------------------
 
+# Maximum number of retries on provider overload (HTTP 503).
+_RETRY_MAX_ATTEMPTS = 3
+
+# Base delay in seconds for exponential backoff (1s, 2s, 4s).
+_RETRY_BASE_DELAY = 1.0
+
+
+def _is_overloaded_error(exc: Exception) -> bool:
+    """Check if an exception indicates a provider overload (HTTP 503).
+
+    Inspects the exception message for common overload indicators
+    such as HTTP 503 status codes and "Service Unavailable" messages.
+    Used to decide whether to retry a failed provider request in
+    :func:`sub_agent_loop`.
+
+    Args:
+        exc: The exception to check.
+
+    Returns:
+        ``True`` if the error indicates a 503 or overload condition.
+    """
+    msg = str(exc).lower()
+    return "503" in msg or "service unavailable" in msg or "overloaded" in msg
+
+
+def _chat_with_retry_silent(
+    provider: LLMProvider,
+    model: str,
+    messages: list[dict[str, Any]],
+    tool_defs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Call provider.chat_stream with retry on overload (HTTP 503).
+
+    Silent variant (no I/O) suitable for sub-agent execution in
+    threads.  Retries up to ``_RETRY_MAX_ATTEMPTS`` times with
+    exponential backoff (1s, 2s, 4s) when the provider returns an
+    overload error.  Non-overload request errors are raised
+    immediately without retry.
+
+    Args:
+        provider: The LLM provider instance.
+        model: Model name for the chat request.
+        messages: Conversation history.
+        tool_defs: Tool definitions in the provider's format.
+
+    Returns:
+        The assembled response dict from the silent collector.
+
+    Raises:
+        ProviderRequestError: If retries are exhausted or the error
+            is not an overload condition.
+        ProviderStreamError: If a mid-stream error occurs (not
+            retried).
+    """
+    for attempt in range(_RETRY_MAX_ATTEMPTS + 1):
+        if attempt > 0:
+            # Exponential backoff: 1s, 2s, 4s.
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            time.sleep(delay)
+        try:
+            stream = provider.chat_stream(model, messages, tools=tool_defs)
+            return _collect_silent_response(stream)
+        except ProviderRequestError as exc:
+            if not _is_overloaded_error(exc):
+                raise
+            if attempt == _RETRY_MAX_ATTEMPTS:
+                raise
+            # Will retry on next iteration.
+
+    # Unreachable -- the loop always returns or raises.
+    raise ProviderRequestError(  # pragma: no cover
+        "Provider overloaded after retries"
+    )
+
 
 def sub_agent_loop(
     provider: LLMProvider,
@@ -650,15 +729,24 @@ def sub_agent_loop(
 
         # ---------------------------------------------------------------
         # 1. Send messages to the LLM and collect the response silently.
+        #    Retries on HTTP 503 overload with exponential backoff.
         # ---------------------------------------------------------------
         try:
-            stream = provider.chat_stream(model, messages, tools=tool_defs)
-            full_response = _collect_silent_response(stream)
+            full_response = _chat_with_retry_silent(
+                provider, model, messages, tool_defs,
+            )
         except ProviderStreamError:
             # Record the error in the message history and stop.
             messages.append({
                 "role": "assistant",
                 "content": "[Error from provider during streaming]",
+            })
+            break
+        except ProviderRequestError as exc:
+            # Request error (including exhausted 503 retries).
+            messages.append({
+                "role": "assistant",
+                "content": f"[Error from provider: {exc}]",
             })
             break
         except KeyboardInterrupt:

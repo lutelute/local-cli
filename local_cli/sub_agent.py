@@ -17,12 +17,17 @@ import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+import warnings
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from local_cli.providers.base import LLMProvider, ProviderStreamError
+from local_cli.providers.base import (
+    LLMProvider,
+    ProviderRequestError,
+    ProviderStreamError,
+)
 from local_cli.tools.base import Tool
 
 
@@ -104,6 +109,33 @@ _SUB_AGENT_SYSTEM_PROMPT = (
 
 # Default timeout for sub-agent execution (seconds).
 _DEFAULT_TIMEOUT = 300.0
+
+# ---------------------------------------------------------------------------
+# Retry constants for 503/overload handling
+# ---------------------------------------------------------------------------
+
+# Maximum number of retries on provider overload (HTTP 503).
+_RETRY_MAX_ATTEMPTS = 3
+
+# Base delay in seconds for exponential backoff (1s, 2s, 4s).
+_RETRY_BASE_DELAY = 1.0
+
+
+def _is_overloaded_error(exc: Exception) -> bool:
+    """Check if an exception indicates a provider overload (HTTP 503).
+
+    Inspects the exception message for common overload indicators
+    such as HTTP 503 status codes and "Service Unavailable" messages.
+    Used to decide whether to retry a failed provider request.
+
+    Args:
+        exc: The exception to check.
+
+    Returns:
+        ``True`` if the error indicates a 503 or overload condition.
+    """
+    msg = str(exc).lower()
+    return "503" in msg or "service unavailable" in msg or "overloaded" in msg
 
 
 class SubAgent:
@@ -304,13 +336,10 @@ class SubAgent:
             # Check timeout before each LLM call.
             self._check_timeout(start_time)
 
-            # Send messages to the LLM and collect the response silently.
-            stream = self._provider.chat_stream(
-                self._model,
-                self._messages,
-                tools=tool_defs,
+            # Send messages to the LLM with retry on 503 overload.
+            full_response = self._chat_with_retry(
+                tool_defs, start_time,
             )
-            full_response = self._collect_silent_response(stream)
 
             # Check timeout after response collection (streaming can
             # take a long time).
@@ -365,6 +394,59 @@ class SubAgent:
                 self._messages.append(tool_msg)
 
         return final_content
+
+    def _chat_with_retry(
+        self,
+        tool_defs: list[dict[str, Any]],
+        start_time: float,
+    ) -> dict[str, Any]:
+        """Call provider.chat_stream with retry on overload (HTTP 503).
+
+        Retries up to ``_RETRY_MAX_ATTEMPTS`` times with exponential
+        backoff (1s, 2s, 4s) when the provider returns an overload
+        error (HTTP 503 / Service Unavailable).  Non-overload request
+        errors are raised immediately without retry.
+
+        Args:
+            tool_defs: Tool definitions in the provider's format.
+            start_time: Monotonic timestamp for timeout checking
+                between retries.
+
+        Returns:
+            The assembled response dict from the silent collector.
+
+        Raises:
+            ProviderRequestError: If retries are exhausted or the
+                error is not an overload condition.
+            ProviderStreamError: If a mid-stream error occurs (not
+                retried).
+            _SubAgentTimeout: If the timeout is exceeded during
+                retry backoff.
+        """
+        for attempt in range(_RETRY_MAX_ATTEMPTS + 1):
+            if attempt > 0:
+                # Exponential backoff: 1s, 2s, 4s.
+                delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                time.sleep(delay)
+                self._check_timeout(start_time)
+            try:
+                stream = self._provider.chat_stream(
+                    self._model,
+                    self._messages,
+                    tools=tool_defs,
+                )
+                return self._collect_silent_response(stream)
+            except ProviderRequestError as exc:
+                if not _is_overloaded_error(exc):
+                    raise
+                if attempt == _RETRY_MAX_ATTEMPTS:
+                    raise
+                # Will retry on next iteration.
+
+        # Unreachable -- the loop always returns or raises.
+        raise ProviderRequestError(  # pragma: no cover
+            "Provider overloaded after retries"
+        )
 
     @staticmethod
     def _collect_silent_response(
@@ -645,6 +727,7 @@ class SubAgentRunner:
     def __init__(self, max_workers: int = _DEFAULT_MAX_WORKERS) -> None:
         ollama_parallel = self._get_ollama_num_parallel()
         self._max_workers = min(max_workers, ollama_parallel)
+        self._ollama_parallel = ollama_parallel
         self._executor: ThreadPoolExecutor | None = None
         self._background: dict[str, Future[SubAgentResult]] = {}
         # Serializes worktree creation to avoid races on .git.
@@ -664,16 +747,40 @@ class SubAgentRunner:
         Creates a thread in the pool to run the sub-agent's
         :meth:`~SubAgent.run` method and waits for the result.
 
+        Handles ``KeyboardInterrupt`` gracefully by cancelling the
+        future and returning an error result instead of crashing.
+
         Args:
             sub_agent: The sub-agent to execute.
 
         Returns:
             The sub-agent's execution result.
         """
+        self._check_concurrency_warning()
         self._prepare_isolation(sub_agent)
         executor = self._ensure_executor()
         future = executor.submit(sub_agent.run)
-        return future.result()
+        try:
+            return future.result()
+        except KeyboardInterrupt:
+            future.cancel()
+            # If the future already completed, return its result.
+            if future.done() and not future.cancelled():
+                try:
+                    return future.result(timeout=0)
+                except Exception:
+                    pass
+            # Return an error result for the interrupted agent.
+            return SubAgentResult(
+                agent_id=sub_agent.agent_id,
+                description=sub_agent.description,
+                content="",
+                status="error",
+                duration_seconds=0.0,
+                messages_count=0,
+                tool_calls_count=0,
+                error_message="Cancelled by KeyboardInterrupt",
+            )
 
     def submit_background(self, sub_agent: "SubAgent") -> str:
         """Submit a sub-agent for background execution.
@@ -691,6 +798,7 @@ class SubAgentRunner:
         Returns:
             The agent ID for tracking the background execution.
         """
+        self._check_concurrency_warning()
         self._prepare_isolation(sub_agent)
         executor = self._ensure_executor()
         future = executor.submit(sub_agent.run)
@@ -738,6 +846,89 @@ class SubAgentRunner:
             agents.append({"agent_id": agent_id, "status": status})
         return agents
 
+    def submit_all(
+        self,
+        sub_agents: list["SubAgent"],
+    ) -> list[SubAgentResult]:
+        """Submit multiple sub-agents and wait for all to complete.
+
+        Prepares isolation (if any) for all agents in the calling
+        thread, then submits them all to the thread pool.  Uses
+        :func:`~concurrent.futures.as_completed` to collect results
+        as they finish.
+
+        Handles ``KeyboardInterrupt`` gracefully by cancelling
+        pending futures and returning partial results for any
+        agents that have already completed.
+
+        Args:
+            sub_agents: A list of sub-agents to execute concurrently.
+
+        Returns:
+            A list of :class:`SubAgentResult` objects.  On normal
+            completion, one result per sub-agent.  On interruption,
+            results for completed agents plus error results for
+            cancelled agents.
+        """
+        self._check_concurrency_warning()
+
+        # Prepare isolation for all agents (serialized).
+        for sa in sub_agents:
+            self._prepare_isolation(sa)
+
+        executor = self._ensure_executor()
+        futures: dict[Future[SubAgentResult], SubAgent] = {}
+        for sa in sub_agents:
+            future = executor.submit(sa.run)
+            futures[future] = sa
+
+        results: list[SubAgentResult] = []
+        try:
+            for future in as_completed(futures):
+                results.append(future.result())
+        except KeyboardInterrupt:
+            # Cancel pending futures.
+            for future in futures:
+                if not future.done():
+                    future.cancel()
+            # Collect results from completed (non-cancelled) futures.
+            for future, sa in futures.items():
+                if future.done() and not future.cancelled():
+                    try:
+                        result = future.result(timeout=0)
+                        # Avoid duplicates (already collected above).
+                        if result not in results:
+                            results.append(result)
+                    except Exception:
+                        results.append(SubAgentResult(
+                            agent_id=sa.agent_id,
+                            description=sa.description,
+                            content="",
+                            status="error",
+                            duration_seconds=0.0,
+                            messages_count=0,
+                            tool_calls_count=0,
+                            error_message="Error during KeyboardInterrupt",
+                        ))
+            # Add error results for cancelled agents.
+            for future, sa in futures.items():
+                if future.cancelled() or not future.done():
+                    # Check if this agent's result is already collected.
+                    collected_ids = {r.agent_id for r in results}
+                    if sa.agent_id not in collected_ids:
+                        results.append(SubAgentResult(
+                            agent_id=sa.agent_id,
+                            description=sa.description,
+                            content="",
+                            status="error",
+                            duration_seconds=0.0,
+                            messages_count=0,
+                            tool_calls_count=0,
+                            error_message="Cancelled by KeyboardInterrupt",
+                        ))
+
+        return results
+
     def shutdown(self) -> None:
         """Shut down the thread pool executor.
 
@@ -751,6 +942,26 @@ class SubAgentRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_concurrency_warning(self) -> None:
+        """Emit a warning if spawning exceeds Ollama's parallel limit.
+
+        Counts the number of currently running background agents and
+        warns if adding another agent would exceed the configured
+        ``OLLAMA_NUM_PARALLEL`` limit.  Excess agents will be queued
+        by Ollama rather than running in parallel.
+        """
+        running = sum(
+            1 for f in self._background.values() if not f.done()
+        )
+        # +1 for the agent about to be submitted.
+        if running + 1 > self._ollama_parallel:
+            warnings.warn(
+                f"Spawning sub-agent with {running} already running. "
+                f"OLLAMA_NUM_PARALLEL is {self._ollama_parallel}; "
+                f"excess requests may be queued or return 503.",
+                stacklevel=3,
+            )
 
     def _prepare_isolation(self, sub_agent: "SubAgent") -> None:
         """Set up worktree isolation if the sub-agent requests it.
