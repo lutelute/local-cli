@@ -21,6 +21,12 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "provider": "ollama",
     "model_registry_file": "",
     "orchestrator_model": "",
+    "num_ctx": 8192,
+    "temperature": None,
+    "top_p": None,
+    "top_k": None,
+    "think_mode": False,
+    "keep_alive": None,
 }
 
 # Mapping of environment variable names to config keys.
@@ -30,6 +36,12 @@ ENV_VAR_MAP: dict[str, str] = {
     "LOCAL_CLI_DEBUG": "debug",
     "LOCAL_CLI_PROVIDER": "provider",
     "OLLAMA_HOST": "ollama_host",
+    "LOCAL_CLI_NUM_CTX": "num_ctx",
+    "LOCAL_CLI_TEMPERATURE": "temperature",
+    "LOCAL_CLI_TOP_P": "top_p",
+    "LOCAL_CLI_TOP_K": "top_k",
+    "LOCAL_CLI_THINK_MODE": "think_mode",
+    "LOCAL_CLI_KEEP_ALIVE": "keep_alive",
 }
 
 # Maximum config file size in bytes (10KB).
@@ -90,6 +102,53 @@ def load_config_file(path: str) -> dict[str, str]:
             result[key] = value
 
     return result
+
+
+def _parse_optional_float(value: object) -> float | None:
+    """Parse a value as an optional float.
+
+    Returns ``None`` when the value is ``None`` or an empty string.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        return float(value)
+    return float(value)
+
+
+def _parse_optional_int(value: object) -> int | None:
+    """Parse a value as an optional int.
+
+    Returns ``None`` when the value is ``None`` or an empty string.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        return int(value)
+    return int(value)
+
+
+def _parse_optional_str(value: object) -> str | None:
+    """Parse a value as an optional string.
+
+    Returns ``None`` when the value is ``None`` or an empty string.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
 
 
 def _parse_bool(value: object) -> bool:
@@ -164,6 +223,12 @@ class Config:
         self.provider: str = str(merged["provider"])
         self.model_registry_file: str = str(merged["model_registry_file"])
         self.orchestrator_model: str = str(merged["orchestrator_model"])
+        self.num_ctx: int = int(merged["num_ctx"])  # type: ignore[arg-type]
+        self.temperature: float | None = _parse_optional_float(merged["temperature"])
+        self.top_p: float | None = _parse_optional_float(merged["top_p"])
+        self.top_k: int | None = _parse_optional_int(merged["top_k"])
+        self.think_mode: bool = _parse_bool(merged["think_mode"])
+        self.keep_alive: str | None = _parse_optional_str(merged["keep_alive"])
 
     @property
     def has_claude_access(self) -> bool:
