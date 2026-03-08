@@ -194,8 +194,9 @@
             "command": "python -m pytest tests/test_tools/test_agent_tool.py -v --tb=short -q",
             "expected": "All tests pass"
           },
-          "status": "pending",
-          "notes": "Follow test_bash_tool.py pattern for metadata tests. Use MagicMock for runner and provider. Verify execute() creates SubAgent with correct parameters. Verify result string contains status and content."
+          "status": "completed",
+          "notes": "All 34 tests pass. Tests cover: metadata (name, description, parameters schema, required fields), to_ollama_tool/to_claude_tool formats, validation (empty/missing/invalid prompt and description), foreground execution (blocking, returns formatted result), background execution (non-blocking, returns agent_id), provider creation failure, and sub-agent tool exclusions (no AgentTool or AskUserTool).",
+          "updated_at": "2026-03-08T17:04:47.219210+00:00"
         }
       ]
     },
@@ -225,8 +226,9 @@
             "command": "python -c \"from local_cli.orchestrator import Orchestrator; print('OK')\"",
             "expected": "OK"
           },
-          "status": "pending",
-          "notes": "create_fresh_provider() is key: unlike get_provider() which caches, this creates a new instance every time. It uses _create_provider() internally but does NOT add to the cache. This ensures each sub-agent thread gets its own OllamaClient/provider instance. spawn_agent() uses get_sub_agent_tools() for sub-agent tools."
+          "status": "completed",
+          "notes": "Added sub-agent support to Orchestrator: _sub_agent_runner attribute (lazily created), create_fresh_provider() for uncached provider instances (thread safety), spawn_agent() convenience method using active provider/model/sub-agent tools, get_background_result() delegation, shutdown_agents() cleanup. Uses from __future__ import annotations + TYPE_CHECKING for forward references to SubAgentRunner/SubAgentResult. All lazy imports in methods to avoid circular dependencies. All 192 tests pass (55 orchestrator + 103 sub_agent + 34 agent_tool).",
+          "updated_at": "2026-03-09T00:00:00.000000+00:00"
         },
         {
           "id": "subtask-4-2",
@@ -488,12 +490,12 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-08T17:01:07.378Z",
+  "updated_at": "2026-03-08T17:05:17.965Z",
   "lastEvent": {
     "eventId": "2e59f469-7508-496e-8e84-d9593fc51983",
     "sequence": 0,
     "type": "PLANNING_COMPLETE",
     "timestamp": "2026-03-08T16:31:23.314833+00:00"
   },
-  "last_updated": "2026-03-08T16:56:35.935216+00:00"
+  "last_updated": "2026-03-08T17:04:47.219215+00:00"
 }
