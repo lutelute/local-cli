@@ -9,6 +9,10 @@ export type CatalogModel = {
   description: string
   tags: string[]
   installed: boolean
+  context_length?: number
+  release_date?: string
+  strengths?: string[]
+  ease_of_use?: number
 }
 
 export type Recommendation = {
@@ -165,12 +169,7 @@ export function ModelPicker({
               {grouped[cat]?.map(m => (
                 <CatalogRow
                   key={m.name}
-                  name={m.name}
-                  display={m.display}
-                  desc={m.description}
-                  size={`${m.size_gb} GB`}
-                  params={m.params}
-                  installed={m.installed}
+                  model={m}
                   isCurrent={m.name === current}
                   isPulling={pulling === m.name}
                   onSelect={() => m.installed && onSelect(m.name)}
@@ -341,13 +340,27 @@ export function ModelPicker({
   )
 }
 
+function formatContext(ctx: number): string {
+  if (!ctx) return ''
+  return ctx >= 1024 ? `${Math.round(ctx / 1024)}K` : `${ctx}`
+}
+
+function EaseStars({ rating }: { rating: number }) {
+  if (!rating) return null
+  return (
+    <span className="picker-ease" title={`使いやすさ ${rating}/5`}>
+      {'★'.repeat(rating)}{'☆'.repeat(5 - rating)}
+    </span>
+  )
+}
+
 // --- Catalog row ---
-function CatalogRow({ name, display, desc, size, params, installed, isCurrent, isPulling, onSelect, onPull, onDelete }: {
-  name: string; display: string; desc: string; size: string; params: string
-  installed: boolean; isCurrent: boolean; isPulling: boolean
+function CatalogRow({ model, isCurrent, isPulling, onSelect, onPull, onDelete }: {
+  model: CatalogModel; isCurrent: boolean; isPulling: boolean
   onSelect: () => void; onPull: () => void; onDelete: () => void
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const { display, params, description, installed, size_gb, context_length, release_date, strengths, ease_of_use } = model
 
   return (
     <div
@@ -358,11 +371,21 @@ function CatalogRow({ name, display, desc, size, params, installed, isCurrent, i
         <div className="picker-model-name">
           {display}
           {params && <span className="picker-model-params">{params}</span>}
+          {context_length ? <span className="picker-model-params">{formatContext(context_length)} ctx</span> : null}
+          {release_date && <span className="picker-model-date">{release_date}</span>}
         </div>
-        <div className="picker-model-desc">{desc}</div>
+        <div className="picker-model-desc">{description}</div>
+        {((strengths && strengths.length > 0) || (ease_of_use && ease_of_use > 0)) && (
+          <div className="picker-model-meta">
+            {strengths && strengths.map(s => (
+              <span key={s} className="picker-model-strength">{s}</span>
+            ))}
+            {ease_of_use ? <EaseStars rating={ease_of_use} /> : null}
+          </div>
+        )}
       </div>
       <div className="picker-model-right">
-        <span className="picker-model-size">{size}</span>
+        <span className="picker-model-size">{size_gb} GB</span>
         {isCurrent ? (
           <span className="picker-badge current-badge">active</span>
         ) : installed ? (

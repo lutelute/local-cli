@@ -127,6 +127,10 @@ class OllamaClient:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            raise OllamaRequestError(
+                f"Ollama API error {exc.code} at {url}: {exc.reason}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise OllamaConnectionError(
                 f"Failed to connect to Ollama at {url}: {exc}"
@@ -175,6 +179,10 @@ class OllamaClient:
 
         try:
             resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            raise OllamaRequestError(
+                f"Ollama API error {exc.code} at {url}: {exc.reason}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise OllamaConnectionError(
                 f"Failed to connect to Ollama at {url}: {exc}"

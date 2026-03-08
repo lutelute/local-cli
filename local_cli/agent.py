@@ -6,6 +6,7 @@ responds without requesting tools.  All output is streamed to stdout as
 tokens arrive.
 """
 
+import json
 import sys
 from typing import Any, Generator
 
@@ -465,6 +466,12 @@ def agent_loop(
             func = tc.get("function", {})
             tool_name = func.get("name", "")
             arguments = func.get("arguments", {})
+            # Ollama sometimes returns arguments as a JSON string.
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (json.JSONDecodeError, ValueError):
+                    arguments = {}
             tool_call_id = tc.get("id")
 
             tool = tool_map.get(tool_name)

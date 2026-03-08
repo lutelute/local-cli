@@ -34,7 +34,7 @@ from local_cli.config import Config
 from local_cli.model_catalog import get_merged_catalog, update_catalog
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
-from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderStreamError
+from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
 from local_cli.providers.claude_provider import ClaudeProvider
 from local_cli.providers.ollama_provider import OllamaProvider
 from local_cli.security import validate_model_name
@@ -51,12 +51,29 @@ def _send(obj: dict[str, Any]) -> None:
 
 def _build_system_prompt(tools: list[Tool]) -> str:
     tool_lines = [f"- {t.name}: {t.description}" for t in tools]
+    cwd = os.getcwd()
     return (
-        "You are a helpful AI coding assistant running locally via Ollama. "
-        "You have access to the following tools:\n\n"
+        "You are a coding agent — an autonomous AI assistant that completes tasks by "
+        "using tools. You operate in an agent loop: think about what to do, use a tool, "
+        "observe the result, then decide the next step. Continue until the task is fully done.\n\n"
+        f"WORKING DIRECTORY: {cwd}\n"
+        "All file paths should be relative to or within this directory unless the user "
+        "specifies an absolute path.\n\n"
+        "AVAILABLE TOOLS:\n"
         + "\n".join(tool_lines)
-        + "\n\nUse these tools to help the user with their coding tasks. "
-        "Be concise and accurate."
+        + "\n\nRULES:\n"
+        "1. ALWAYS use tools to interact with the filesystem. Never guess file contents.\n"
+        "2. Before editing a file, ALWAYS read it first to understand its current state.\n"
+        "3. Use glob/grep to find files before reading them.\n"
+        "4. When asked to write or modify code, actually do it using write/edit tools. "
+        "Do NOT just show code in your response.\n"
+        "5. After making changes, verify them (read the file back, run tests if applicable).\n"
+        "6. Use bash to run commands (tests, builds, git, etc.) when needed.\n"
+        "7. If a task requires multiple steps, execute them one by one. Do not stop halfway.\n"
+        "8. Be concise in your explanations. Let tool outputs speak for themselves.\n"
+        "9. If you encounter an error, try to fix it rather than just reporting it.\n"
+        "10. When creating new files, use the write tool. When modifying existing files, "
+        "prefer the edit tool for precise changes.\n"
     )
 
 
@@ -152,7 +169,13 @@ class JsonLineServer:
                 elif req_type == "catalog":
                     self._handle_catalog(req_id)
                 elif req_type == "pull_model":
-                    self._handle_pull_model(req_id, req.get("model", ""))
+                    # Run pull in a background thread so it doesn't block
+                    # the stdin loop (allows model switch, catalog, etc.).
+                    threading.Thread(
+                        target=self._handle_pull_model,
+                        args=(req_id, req.get("model", "")),
+                        daemon=True,
+                    ).start()
                 elif req_type == "delete_model":
                     self._handle_delete_model(req_id, req.get("model", ""))
                 elif req_type == "update_catalog":
@@ -182,6 +205,8 @@ class JsonLineServer:
                     self._handle_claude_logout(req_id)
                 elif req_type == "recommend":
                     self._handle_recommend(req_id)
+                elif req_type == "set_cwd":
+                    self._handle_set_cwd(req_id, req.get("path", ""))
                 else:
                     _send({"id": req_id, "type": "error", "message": f"Unknown type: {req_type}"})
             except Exception as exc:
@@ -231,6 +256,9 @@ class JsonLineServer:
                     if chunk.get("done"):
                         break
 
+            except ProviderRequestError as exc:
+                _send({"id": req_id, "type": "error", "message": f"API error: {exc}"})
+                return
             except ProviderConnectionError as exc:
                 _send({"id": req_id, "type": "error", "message": f"Connection error: {exc}"})
                 return
@@ -268,6 +296,12 @@ class JsonLineServer:
                 func = tc.get("function", {})
                 tool_name = func.get("name", "")
                 tool_args = func.get("arguments", {})
+                # Ollama sometimes returns arguments as a JSON string.
+                if isinstance(tool_args, str):
+                    try:
+                        tool_args = json.loads(tool_args)
+                    except (json.JSONDecodeError, ValueError):
+                        tool_args = {}
                 tool_call_id = tc.get("id")
 
                 _send({
@@ -293,10 +327,11 @@ class JsonLineServer:
                     "output": result if len(result) <= 10000 else result[:10000] + "\n...(truncated)",
                 })
 
-                # Include tool_call_id in the tool result message
-                # (critical for Claude compatibility).
+                # Include tool_name and tool_call_id in the tool result
+                # message (critical for Claude compatibility).
                 tool_msg: dict[str, Any] = {
                     "role": "tool",
+                    "tool_name": tool_name,
                     "content": result,
                 }
                 if tool_call_id:
@@ -432,13 +467,23 @@ class JsonLineServer:
             for m in models:
                 name = m.get("name", "")
                 if name and name not in catalog_names:
+                    details = m.get("details", {})
+                    params = details.get("parameter_size", "")
+                    family = details.get("family", "")
+                    quant = details.get("quantization_level", "")
+                    desc_parts = []
+                    if family:
+                        desc_parts.append(family)
+                    if quant:
+                        desc_parts.append(quant)
+                    desc = " · ".join(desc_parts) if desc_parts else "Locally installed model."
                     catalog.append({
                         "name": name,
                         "display": name,
                         "category": "Installed",
-                        "params": "",
+                        "params": params,
                         "size_gb": round(m.get("size", 0) / (1024**3), 1),
-                        "description": "Locally installed model.",
+                        "description": desc,
                         "tags": [],
                         "installed": True,
                     })
@@ -620,6 +665,22 @@ class JsonLineServer:
             "system": info,
             "models": recommendations,
         })
+
+    def _handle_set_cwd(self, req_id: int, path: str) -> None:
+        """Change the working directory and update the system prompt."""
+        if not path:
+            _send({"id": req_id, "type": "error", "message": "No path specified"})
+            return
+        try:
+            os.chdir(path)
+            # Rebuild system prompt with new cwd.
+            self._system_prompt = _build_system_prompt(self._tools)
+            # Update system message in conversation history.
+            if self._messages and self._messages[0].get("role") == "system":
+                self._messages[0] = {"role": "system", "content": self._system_prompt}
+            _send({"id": req_id, "type": "cwd_changed", "path": path})
+        except OSError as exc:
+            _send({"id": req_id, "type": "error", "message": f"Cannot change directory: {exc}"})
 
     def _handle_clear(self, req_id: int) -> None:
         self._messages.clear()

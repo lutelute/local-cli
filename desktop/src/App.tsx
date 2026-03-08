@@ -41,6 +41,7 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [hasClaude, setHasClaude] = useState(false)
   const [rootDir, setRootDir] = useState<string | null>(null)
+  const [explorerRefreshKey, setExplorerRefreshKey] = useState(0)
   const terminalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const activeMessageId = useRef('')
@@ -159,6 +160,11 @@ export default function App() {
             }
             return prev
           })
+          // Refresh explorer when file-modifying tools complete.
+          const fsTools = ['write', 'edit', 'bash']
+          if (fsTools.includes(msg.name || '')) {
+            setExplorerRefreshKey(k => k + 1)
+          }
           break
         }
 
@@ -385,6 +391,8 @@ export default function App() {
   const handleRootChange = useCallback((path: string) => {
     setRootDir(path)
     setSelectedFile(null)
+    // Notify Python server to change working directory.
+    window.api.sendToPython({ id: nextId(), type: 'set_cwd', path })
   }, [])
 
   const handleInput = useCallback(() => {
@@ -400,6 +408,7 @@ export default function App() {
     <div className="app">
       <div className="titlebar">
         <span className="titlebar-text">local-cli</span>
+        {import.meta.env.DEV && <span className="titlebar-dev">DEV</span>}
       </div>
 
       <div className="statusbar">
@@ -407,14 +416,21 @@ export default function App() {
           <div className={`status-dot ${statusDotClass}`} />
           <span>{status.ready ? 'ready' : 'connecting...'}</span>
         </div>
-        <div className="status-item">
+        <div className="status-item model-status-group">
           <span
             className="model-select"
             onClick={() => { refreshCatalog(); setShowPicker(true) }}
-            title="Click to switch model"
           >
             {status.model || '...'}
           </span>
+          <div className="model-hover-card">
+            <div className="model-hover-name">{status.model}</div>
+            <div className="model-hover-desc">
+              {catalog?.models.find(m => m.name === status.model || m.name === status.model.split(':')[0])?.description
+                || 'Local model via Ollama'}
+            </div>
+            <div className="model-hover-hint">Click model name to switch</div>
+          </div>
         </div>
         <div className="status-item">
           <ProviderSelector
@@ -434,6 +450,16 @@ export default function App() {
         <div className="status-item">
           <span style={{ color: 'var(--text-muted)' }}>{status.tools.length} tools</span>
         </div>
+        <button
+          className={`status-btn ${explorerOpen ? 'active' : ''}`}
+          onClick={() => setExplorerOpen(v => !v)}
+          title="Toggle file explorer (Cmd+B)"
+        >files</button>
+        <button
+          className="status-btn"
+          onClick={() => setShowSettings(true)}
+          title="Settings (Cmd+,)"
+        >settings</button>
         {messages.length > 0 && (
           <button className="status-btn" onClick={handleClear}>clear</button>
         )}
@@ -465,6 +491,7 @@ export default function App() {
               rootDir={rootDir}
               onFileSelect={handleFileSelect}
               onRootChange={handleRootChange}
+              refreshKey={explorerRefreshKey}
             />
           </div>
         )}
@@ -474,11 +501,20 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.5.4" />
+                  <Banner version="0.5.5" />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.
                   </div>
+                  {status.model && (
+                    <div className="model-info-block">
+                      <span className="model-info-name">{status.model}</span>
+                      <span className="model-info-desc">
+                        {catalog?.models.find(m => m.name === status.model || m.name === status.model.split(':')[0])?.description
+                          || 'Local model via Ollama'}
+                      </span>
+                    </div>
+                  )}
                   <div className="welcome-hint">
                     Type a message below to start. Shift+Enter for newline.
                   </div>

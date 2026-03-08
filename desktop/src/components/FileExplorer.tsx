@@ -18,9 +18,10 @@ type Props = {
   rootDir: string | null
   onFileSelect: (path: string) => void
   onRootChange: (path: string) => void
+  refreshKey?: number
 }
 
-export function FileExplorer({ rootDir, onFileSelect, onRootChange }: Props) {
+export function FileExplorer({ rootDir, onFileSelect, onRootChange, refreshKey }: Props) {
   const [nodes, setNodes] = useState<TreeNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -44,7 +45,26 @@ export function FileExplorer({ rootDir, onFileSelect, onRootChange }: Props) {
     }))
   }, [])
 
-  // Load root directory when rootDir changes.
+  // Rebuild tree, preserving expanded directories by reloading their contents.
+  const rebuildTree = useCallback(async (dir: string, expandedPaths: Set<string>): Promise<TreeNode[]> => {
+    const children = await loadDirectory(dir)
+    const result: TreeNode[] = []
+    for (const node of children) {
+      if (node.isDirectory && expandedPaths.has(node.path)) {
+        try {
+          const subChildren = await rebuildTree(node.path, expandedPaths)
+          result.push({ ...node, expanded: true, children: subChildren })
+        } catch {
+          result.push({ ...node, expanded: false, children: null })
+        }
+      } else {
+        result.push(node)
+      }
+    }
+    return result
+  }, [loadDirectory])
+
+  // Load root directory when rootDir or refreshKey changes.
   useEffect(() => {
     if (!rootDir) {
       setNodes([])
@@ -52,7 +72,18 @@ export function FileExplorer({ rootDir, onFileSelect, onRootChange }: Props) {
     }
     setLoading(true)
     setError(null)
-    loadDirectory(rootDir)
+
+    // Collect currently expanded paths before reload.
+    const expandedPaths = new Set<string>()
+    const collectExpanded = (items: TreeNode[]) => {
+      for (const n of items) {
+        if (n.expanded) expandedPaths.add(n.path)
+        if (n.children) collectExpanded(n.children)
+      }
+    }
+    collectExpanded(nodes)
+
+    rebuildTree(rootDir, expandedPaths)
       .then(children => {
         setNodes(children)
         setLoading(false)
@@ -64,7 +95,8 @@ export function FileExplorer({ rootDir, onFileSelect, onRootChange }: Props) {
           : `Failed to read: ${rootDir}`)
         setLoading(false)
       })
-  }, [rootDir, loadDirectory])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootDir, refreshKey, rebuildTree])
 
   const handleOpenFolder = useCallback(async () => {
     const result = await window.api.openDirectoryDialog()
