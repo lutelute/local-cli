@@ -61,6 +61,12 @@ def collect_streaming_response(
     chunks.  Content tokens are printed to stdout immediately for a
     responsive user experience.
 
+    Thinking content (``message.thinking``) from models that support
+    thinking mode (e.g. Qwen3) is accumulated separately and returned
+    as a ``"thinking"`` key in the result dict.  It is **not** included
+    in the assembled ``message.content`` field, keeping the conversation
+    history free of internal reasoning tokens.
+
     Args:
         stream: A generator yielding parsed NDJSON chunks from the Ollama
             streaming chat API.
@@ -75,6 +81,7 @@ def collect_streaming_response(
                     "content": "<accumulated text>",
                     "tool_calls": [...]  # only if present
                 },
+                "thinking": "<accumulated thinking>",  # only if present
                 "done": True,
                 ...  # other fields from the final chunk
             }
@@ -88,6 +95,7 @@ def collect_streaming_response(
             Partial content accumulated so far is returned.
     """
     content_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     last_chunk: dict[str, Any] = {}
     spinner_stopped = False
@@ -97,6 +105,12 @@ def collect_streaming_response(
             last_chunk = chunk
 
             message = chunk.get("message", {})
+
+            # Accumulate thinking content separately (not displayed to
+            # stdout, not included in conversation history content).
+            thinking_delta = message.get("thinking", "")
+            if thinking_delta:
+                thinking_parts.append(thinking_delta)
 
             # Accumulate content deltas and print to stdout.
             delta = message.get("content", "")
@@ -158,6 +172,12 @@ def collect_streaming_response(
     # with our assembled message.
     result: dict[str, Any] = dict(last_chunk)
     result["message"] = assembled_message
+
+    # Include accumulated thinking content as a separate top-level key
+    # for debug display.  This is intentionally NOT part of the message
+    # dict so it does not pollute the conversation history.
+    if thinking_parts:
+        result["thinking"] = "".join(thinking_parts)
 
     return result
 
