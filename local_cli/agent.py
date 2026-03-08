@@ -11,7 +11,7 @@ import sys
 from typing import Any, Generator
 
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
-from local_cli.providers.base import ProviderStreamError
+from local_cli.providers.base import LLMProvider, ProviderStreamError
 from local_cli.spinner import Spinner
 from local_cli.tools.base import Tool
 
@@ -156,6 +156,79 @@ def collect_streaming_response(
 
     # Merge the final chunk's top-level fields (model, done, metrics, etc.)
     # with our assembled message.
+    result: dict[str, Any] = dict(last_chunk)
+    result["message"] = assembled_message
+
+    return result
+
+
+def _collect_silent_response(
+    stream: Generator[dict[str, Any], None, None],
+) -> dict[str, Any]:
+    """Accumulate a streaming chat response silently (no I/O).
+
+    Silent variant of :func:`collect_streaming_response` that accumulates
+    content and tool calls without writing to stdout, creating spinners,
+    or printing debug output.  Designed for sub-agent execution in threads
+    where all output must be captured, not printed.
+
+    Args:
+        stream: A generator yielding parsed streaming chunks from the
+            provider (same format as :func:`collect_streaming_response`).
+
+    Returns:
+        A dictionary representing the full response, in the same format
+        as :func:`collect_streaming_response`::
+
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "<accumulated text>",
+                    "tool_calls": [...]  # only if present
+                },
+                "done": True,
+                ...  # other fields from the final chunk
+            }
+
+    Raises:
+        ProviderStreamError: Re-raised if the stream yields an error.
+        KeyboardInterrupt: Re-raised if the stream is interrupted.
+    """
+    content_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    last_chunk: dict[str, Any] = {}
+
+    try:
+        for chunk in stream:
+            last_chunk = chunk
+            message = chunk.get("message", {})
+
+            # Accumulate content deltas silently (no stdout).
+            delta = message.get("content", "")
+            if delta:
+                content_parts.append(delta)
+
+            # Accumulate tool calls.
+            chunk_tool_calls = message.get("tool_calls")
+            if chunk_tool_calls:
+                tool_calls.extend(chunk_tool_calls)
+
+    except KeyboardInterrupt:
+        # Re-raise -- let the caller decide how to handle.
+        raise
+    except ProviderStreamError:
+        # Re-raise -- let the caller decide how to handle.
+        raise
+
+    # Build the assembled response.
+    assembled_message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    if tool_calls:
+        assembled_message["tool_calls"] = tool_calls
+
+    # Merge the final chunk's top-level fields with our assembled message.
     result: dict[str, Any] = dict(last_chunk)
     result["message"] = assembled_message
 
@@ -359,7 +432,7 @@ def compact_messages(
 
 
 def agent_loop(
-    client: OllamaClient,
+    client: LLMProvider,
     model: str,
     tools: list[Tool],
     messages: list[dict[str, Any]],
@@ -381,9 +454,10 @@ def agent_loop(
     ``tool_use_id`` in subsequent tool result messages).
 
     Args:
-        client: An :class:`OllamaClient` or :class:`LLMProvider` instance.
-            Any object with a ``chat_stream(model, messages, tools=...)``
-            method is accepted.
+        client: An :class:`~local_cli.providers.base.LLMProvider` instance
+            (or any object with a compatible ``chat_stream(model, messages,
+            tools=...)`` method -- including :class:`OllamaClient` which
+            is accepted via duck typing for backward compatibility).
         model: The model name to use (e.g. ``"qwen3:8b"``).
         tools: A list of :class:`Tool` instances available for the LLM.
         messages: The conversation history (mutated in place).
@@ -520,3 +594,137 @@ def agent_loop(
         # ---------------------------------------------------------------
         # 5. Loop back to send tool results to the LLM.
         # ---------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Silent agent loop (for sub-agents)
+# ---------------------------------------------------------------------------
+
+
+def sub_agent_loop(
+    provider: LLMProvider,
+    model: str,
+    tools: list[Tool],
+    messages: list[dict[str, Any]],
+    debug: bool = False,
+) -> str:
+    """Silent agent loop for sub-agent execution.
+
+    Structurally identical to :func:`agent_loop` but operates silently:
+    no ``sys.stdout`` / ``sys.stderr`` output and no spinners.  Uses
+    :func:`_collect_silent_response` for response accumulation and
+    ``provider.format_tools(tools)`` for tool definitions (provider-
+    agnostic, unlike :func:`agent_loop` which uses ``to_ollama_tool()``).
+
+    The *messages* list is mutated in place -- each assistant response and
+    tool result is appended so the caller retains the full conversation
+    history.
+
+    Returns the final assistant message content string instead of
+    ``None``.
+
+    Args:
+        provider: An :class:`~local_cli.providers.base.LLMProvider`
+            instance.  Must be a **fresh** instance (not shared with
+            other agents) for thread safety.
+        model: The model name to use (e.g. ``"qwen3:8b"``).
+        tools: A list of :class:`Tool` instances available for the LLM.
+        messages: The conversation history (mutated in place).
+        debug: Unused (kept for signature parity with :func:`agent_loop`).
+
+    Returns:
+        The final assistant message content string.  Returns an empty
+        string if the LLM produces no content (e.g. on error).
+    """
+    tool_map: dict[str, Tool] = {t.name: t for t in tools}
+    tool_defs: list[dict[str, Any]] = provider.format_tools(tools)
+
+    final_content = ""
+
+    while True:
+        # ---------------------------------------------------------------
+        # 0. Compact conversation history if thresholds are exceeded.
+        # ---------------------------------------------------------------
+        if _needs_compaction(messages):
+            compact_messages(messages, debug=False)
+
+        # ---------------------------------------------------------------
+        # 1. Send messages to the LLM and collect the response silently.
+        # ---------------------------------------------------------------
+        try:
+            stream = provider.chat_stream(model, messages, tools=tool_defs)
+            full_response = _collect_silent_response(stream)
+        except ProviderStreamError:
+            # Record the error in the message history and stop.
+            messages.append({
+                "role": "assistant",
+                "content": "[Error from provider during streaming]",
+            })
+            break
+        except KeyboardInterrupt:
+            break
+
+        # ---------------------------------------------------------------
+        # 2. Append the assistant message to the conversation history.
+        # ---------------------------------------------------------------
+        assistant_message = full_response["message"]
+        messages.append(assistant_message)
+        final_content = assistant_message.get("content", "")
+
+        # ---------------------------------------------------------------
+        # 3. Check for tool calls.  If none, we're done.
+        # ---------------------------------------------------------------
+        tool_calls = assistant_message.get("tool_calls", [])
+        if not tool_calls:
+            break
+
+        # ---------------------------------------------------------------
+        # 4. Execute each tool call and append results.
+        # ---------------------------------------------------------------
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            arguments = func.get("arguments", {})
+            # Ollama sometimes returns arguments as a JSON string.
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (json.JSONDecodeError, ValueError):
+                    arguments = {}
+            tool_call_id = tc.get("id")
+
+            tool = tool_map.get(tool_name)
+            if tool is None:
+                result = f"Error: unknown tool '{tool_name}'"
+            else:
+                try:
+                    result = tool.execute(**arguments)
+                except KeyboardInterrupt:
+                    result = "Error: tool execution interrupted by user."
+                    tool_msg: dict[str, Any] = {
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "content": result,
+                    }
+                    if tool_call_id is not None:
+                        tool_msg["tool_call_id"] = tool_call_id
+                    messages.append(tool_msg)
+                    raise
+                except Exception as exc:
+                    result = f"Error: {type(exc).__name__}: {exc}"
+
+            # Append tool result as a 'tool' role message.
+            tool_msg = {
+                "role": "tool",
+                "tool_name": tool_name,
+                "content": result,
+            }
+            if tool_call_id is not None:
+                tool_msg["tool_call_id"] = tool_call_id
+            messages.append(tool_msg)
+
+        # ---------------------------------------------------------------
+        # 5. Loop back to send tool results to the LLM.
+        # ---------------------------------------------------------------
+
+    return final_content
