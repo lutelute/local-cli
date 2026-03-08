@@ -867,5 +867,240 @@ class TestAgentLoopThinkingAndOptions(unittest.TestCase):
         mock_compact.assert_called()
 
 
+# ---------------------------------------------------------------------------
+# Integration: full options pipeline (Config → agent_loop → _stream_request)
+# ---------------------------------------------------------------------------
+
+
+def _dummy_stream_chunks() -> list[dict[str, Any]]:
+    """Return minimal streaming chunks that make agent_loop complete."""
+    return [
+        {"message": {"role": "assistant", "content": "Done."}, "done": True},
+    ]
+
+
+class TestConfigToAgentOptionsPipeline(unittest.TestCase):
+    """Integration tests verifying Config values reach _stream_request payload."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_config_to_agent_options_pipeline(self) -> None:
+        """Config values flow through merge logic to the Ollama payload."""
+        from local_cli.config import Config
+        from local_cli.model_presets import get_model_preset
+        from local_cli.ollama_client import OllamaClient
+
+        # Create a Config with explicit temperature and top_p.
+        config = Config.__new__(Config)
+        config.model = "qwen3:8b"
+        config.num_ctx = 4096
+        config.temperature = 0.3
+        config.top_p = 0.8
+        config.top_k = None
+        config.think_mode = False
+
+        # Build merged inference options (same logic as cli.py run_repl).
+        default_options: dict = {"num_ctx": 8192}
+        preset_options = get_model_preset(config.model)
+        user_options: dict = {"num_ctx": config.num_ctx}
+        if config.temperature is not None:
+            user_options["temperature"] = config.temperature
+        if config.top_p is not None:
+            user_options["top_p"] = config.top_p
+        if config.top_k is not None:
+            user_options["top_k"] = config.top_k
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        # Create a real OllamaClient and mock _stream_request.
+        client = OllamaClient("http://localhost:11434")
+        captured_payloads: list[dict[str, Any]] = []
+
+        def fake_stream(path: str, data: dict, timeout: int = 120):
+            captured_payloads.append(data)
+            yield from _dummy_stream_chunks()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+        ]
+
+        with patch.object(client, "_stream_request", side_effect=fake_stream):
+            agent_loop(client, config.model, [], messages, options=inference_options)
+
+        # Verify the payload sent to _stream_request.
+        self.assertEqual(len(captured_payloads), 1)
+        payload = captured_payloads[0]
+        self.assertEqual(payload["model"], "qwen3:8b")
+        self.assertTrue(payload["stream"])
+
+        opts = payload["options"]
+        # User config overrides preset and defaults.
+        self.assertEqual(opts["temperature"], 0.3)
+        self.assertEqual(opts["top_p"], 0.8)
+        self.assertEqual(opts["num_ctx"], 4096)
+        # Preset value that wasn't overridden by user should remain.
+        self.assertEqual(opts["top_k"], 20)
+
+    def test_preset_applied_by_default(self) -> None:
+        """Using qwen3:8b without user overrides applies preset temp=0.6."""
+        from local_cli.model_presets import get_model_preset
+        from local_cli.ollama_client import OllamaClient
+
+        # Build options with no user overrides (simulate default config).
+        default_options: dict = {"num_ctx": 8192}
+        preset_options = get_model_preset("qwen3:8b")
+        user_options: dict = {"num_ctx": 8192}
+        # No temperature/top_p/top_k overrides.
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        client = OllamaClient("http://localhost:11434")
+        captured_payloads: list[dict[str, Any]] = []
+
+        def fake_stream(path: str, data: dict, timeout: int = 120):
+            captured_payloads.append(data)
+            yield from _dummy_stream_chunks()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+        ]
+
+        with patch.object(client, "_stream_request", side_effect=fake_stream):
+            agent_loop(client, "qwen3:8b", [], messages, options=inference_options)
+
+        self.assertEqual(len(captured_payloads), 1)
+        opts = captured_payloads[0]["options"]
+        # Qwen3 preset values should be present.
+        self.assertEqual(opts["temperature"], 0.6)
+        self.assertEqual(opts["top_p"], 0.95)
+        self.assertEqual(opts["top_k"], 20)
+        self.assertEqual(opts["num_ctx"], 8192)
+
+    def test_user_config_overrides_preset(self) -> None:
+        """Setting temperature in config overrides the qwen3 preset."""
+        from local_cli.model_presets import get_model_preset
+        from local_cli.ollama_client import OllamaClient
+
+        # Build options with user temperature=0.9 (overriding preset 0.6).
+        default_options: dict = {"num_ctx": 8192}
+        preset_options = get_model_preset("qwen3:8b")
+        user_options: dict = {"num_ctx": 8192, "temperature": 0.9}
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        client = OllamaClient("http://localhost:11434")
+        captured_payloads: list[dict[str, Any]] = []
+
+        def fake_stream(path: str, data: dict, timeout: int = 120):
+            captured_payloads.append(data)
+            yield from _dummy_stream_chunks()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+        ]
+
+        with patch.object(client, "_stream_request", side_effect=fake_stream):
+            agent_loop(client, "qwen3:8b", [], messages, options=inference_options)
+
+        self.assertEqual(len(captured_payloads), 1)
+        opts = captured_payloads[0]["options"]
+        # User temperature should override preset.
+        self.assertEqual(opts["temperature"], 0.9)
+        # Other preset values should remain.
+        self.assertEqual(opts["top_p"], 0.95)
+        self.assertEqual(opts["top_k"], 20)
+
+    def test_think_mode_only_for_supported_models(self) -> None:
+        """think=True is only sent in the payload for models that support it."""
+        from local_cli.model_presets import SUPPORTS_THINKING, get_model_family
+        from local_cli.ollama_client import OllamaClient
+
+        client = OllamaClient("http://localhost:11434")
+        captured_payloads: list[dict[str, Any]] = []
+
+        def fake_stream(path: str, data: dict, timeout: int = 120):
+            captured_payloads.append(data)
+            yield from _dummy_stream_chunks()
+
+        # --- qwen3:8b supports thinking ---
+        family = get_model_family("qwen3:8b")
+        self.assertIn(family, SUPPORTS_THINKING)
+        think_qwen = True  # would be set by server/cli code
+
+        with patch.object(client, "_stream_request", side_effect=fake_stream):
+            # Call chat_stream directly to test the payload building.
+            for _ in client.chat_stream(
+                "qwen3:8b",
+                [{"role": "user", "content": "Hi"}],
+                think=think_qwen,
+            ):
+                pass
+
+        self.assertEqual(len(captured_payloads), 1)
+        self.assertIn("think", captured_payloads[0])
+        self.assertTrue(captured_payloads[0]["think"])
+
+        # --- llama3.2 does NOT support thinking ---
+        captured_payloads.clear()
+        family_llama = get_model_family("llama3.2:latest")
+        think_llama = (
+            True
+            if family_llama is not None and family_llama in SUPPORTS_THINKING
+            else None
+        )
+        # llama family is not in SUPPORTS_THINKING, so think should be None.
+        self.assertIsNone(think_llama)
+
+        with patch.object(client, "_stream_request", side_effect=fake_stream):
+            for _ in client.chat_stream(
+                "llama3.2:latest",
+                [{"role": "user", "content": "Hi"}],
+                think=think_llama,
+            ):
+                pass
+
+        self.assertEqual(len(captured_payloads), 1)
+        # When think=None, it should NOT appear in the payload.
+        self.assertNotIn("think", captured_payloads[0])
+
+    def test_unknown_model_gets_default_preset(self) -> None:
+        """An unknown model family gets safe default preset values."""
+        from local_cli.model_presets import get_model_preset
+        from local_cli.ollama_client import OllamaClient
+
+        default_options: dict = {"num_ctx": 8192}
+        preset_options = get_model_preset("unknown-model:latest")
+        user_options: dict = {"num_ctx": 8192}
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        client = OllamaClient("http://localhost:11434")
+        captured_payloads: list[dict[str, Any]] = []
+
+        def fake_stream(path: str, data: dict, timeout: int = 120):
+            captured_payloads.append(data)
+            yield from _dummy_stream_chunks()
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+        ]
+
+        with patch.object(client, "_stream_request", side_effect=fake_stream):
+            agent_loop(
+                client, "unknown-model:latest", [], messages,
+                options=inference_options,
+            )
+
+        self.assertEqual(len(captured_payloads), 1)
+        opts = captured_payloads[0]["options"]
+        # Default preset values for unknown models.
+        self.assertEqual(opts["temperature"], 0.7)
+        self.assertEqual(opts["num_ctx"], 8192)
+
+
 if __name__ == "__main__":
     unittest.main()
