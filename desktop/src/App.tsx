@@ -34,7 +34,7 @@ export default function App() {
   const [updateMessage, setUpdateMessage] = useState('')
   const [appUpdating, setAppUpdating] = useState(false)
   const [appUpdateResult, setAppUpdateResult] = useState('')
-  const [explorerOpen, setExplorerOpen] = useState(true)
+  const [explorerOpen, setExplorerOpen] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showClaudeLogin, setShowClaudeLogin] = useState(false)
   const [claudeAuthMethod, setClaudeAuthMethod] = useState<string | null>(null)
@@ -58,7 +58,7 @@ export default function App() {
   useEffect(() => {
     if (!window.api) return
     window.api.hasClaudeAccess().then(setHasClaude)
-    window.api.getHomeDir().then(setRootDir)
+    // Don't auto-set rootDir — let the user choose via Open Folder.
     window.api.getClaudeAuth().then(auth => {
       if (auth.authenticated) {
         setHasClaude(true)
@@ -474,7 +474,7 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.5.3" />
+                  <Banner version="0.5.4" />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.
