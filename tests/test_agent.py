@@ -187,6 +187,36 @@ class TestCollectStreamingResponse(unittest.TestCase):
         self.assertEqual(result["message"]["content"], "")
         self.assertNotIn("tool_calls", result["message"])
 
+    def test_thinking_not_in_content(self) -> None:
+        """Thinking content is accumulated separately from message content."""
+        chunks = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello",
+                    "thinking": "Let me think...",
+                },
+                "done": False,
+            },
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": " world",
+                    "thinking": " more thoughts",
+                },
+                "done": True,
+            },
+        ]
+        result = collect_streaming_response(iter(chunks))
+
+        # Content should NOT include thinking tokens.
+        self.assertEqual(result["message"]["content"], "Hello world")
+        self.assertNotIn("thinking", result["message"])
+
+        # Thinking should be a separate top-level key in the result.
+        self.assertIn("thinking", result)
+        self.assertEqual(result["thinking"], "Let me think... more thoughts")
+
 
 # ---------------------------------------------------------------------------
 # _truncate
@@ -711,6 +741,130 @@ class TestAgentLoopErrorHandling(unittest.TestCase):
         tool_msg = messages[2]
         self.assertEqual(tool_msg["role"], "tool")
         self.assertIn("Error", tool_msg["content"])
+
+
+# ---------------------------------------------------------------------------
+# Agent loop: thinking mode, options, and dynamic compaction
+# ---------------------------------------------------------------------------
+
+
+class TestAgentLoopThinkingAndOptions(unittest.TestCase):
+    """Tests for thinking mode handling, options passthrough, and dynamic compaction."""
+
+    def setUp(self) -> None:
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+
+    def tearDown(self) -> None:
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+
+    def test_thinking_not_in_history(self) -> None:
+        """After agent_loop, messages list has no thinking key."""
+        client = MagicMock()
+        # Build chunks with thinking content in the message.
+        chunks = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Answer",
+                    "thinking": "internal reasoning",
+                },
+                "done": True,
+            },
+        ]
+        client.chat_stream.return_value = iter(chunks)
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Question"},
+        ]
+        agent_loop(client, "qwen3:8b", [], messages)
+
+        # No message in the history should contain a "thinking" key.
+        for msg in messages:
+            self.assertNotIn("thinking", msg)
+
+        # The assistant content should still be recorded.
+        self.assertEqual(messages[1]["role"], "assistant")
+        self.assertEqual(messages[1]["content"], "Answer")
+
+    def test_thinking_debug_output(self) -> None:
+        """Thinking content is shown in stderr when debug=True."""
+        client = MagicMock()
+        chunks = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Answer",
+                    "thinking": "my deep reasoning",
+                },
+                "done": True,
+            },
+        ]
+        client.chat_stream.return_value = iter(chunks)
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Question"},
+        ]
+        agent_loop(client, "qwen3:8b", [], messages, debug=True)
+
+        stderr_output = sys.stderr.getvalue()
+        self.assertIn("Thinking", stderr_output)
+        self.assertIn("my deep reasoning", stderr_output)
+
+    def test_agent_loop_with_options(self) -> None:
+        """Options dict is passed through to client.chat_stream."""
+        client = MagicMock()
+        chunks = _make_chunks(["Done."])
+        client.chat_stream.return_value = iter(chunks)
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hi"},
+        ]
+        opts = {"temperature": 0.5, "num_ctx": 8192}
+        agent_loop(client, "qwen3:8b", [], messages, options=opts)
+
+        # Verify options were forwarded as a keyword argument.
+        call_kwargs = client.chat_stream.call_args[1]
+        self.assertIn("options", call_kwargs)
+        self.assertEqual(call_kwargs["options"], opts)
+
+    def test_dynamic_compaction_threshold(self) -> None:
+        """Compaction threshold adjusts with num_ctx via _needs_compaction."""
+        # Create messages with ~5000 estimated tokens (20000 chars / 4).
+        messages = [{"role": "user", "content": "x" * 20000}]
+
+        # Default threshold is 24_000 tokens — 5000 < 24000 → no compaction.
+        self.assertFalse(_needs_compaction(messages))
+
+        # Simulating num_ctx=4096 → threshold would be int(4096 * 0.75) = 3072.
+        # 5000 > 3072 → compaction needed.
+        self.assertTrue(_needs_compaction(messages, token_threshold=3072))
+
+        # Verify the threshold computation inside agent_loop by checking that
+        # compact_messages is called when num_ctx is small enough.
+        client = MagicMock()
+        chunks = _make_chunks(["Ok."])
+        client.chat_stream.return_value = iter(chunks)
+
+        # Enough messages to make compaction meaningful.
+        big_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": "sys"},
+        ]
+        for _ in range(20):
+            big_messages.append(
+                {"role": "tool", "tool_name": "t", "content": "y" * 2000}
+            )
+        big_messages.append({"role": "user", "content": "go"})
+
+        opts = {"num_ctx": 4096}
+        with patch("local_cli.agent.compact_messages") as mock_compact:
+            agent_loop(client, "qwen3:8b", [], big_messages, options=opts)
+
+        # compact_messages should have been triggered due to the low threshold.
+        mock_compact.assert_called()
 
 
 if __name__ == "__main__":
