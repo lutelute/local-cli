@@ -122,8 +122,8 @@
             "expected": "All tests pass"
           },
           "status": "completed",
-          "notes": "Added 38 unit tests for SubAgentRunner in tests/test_sub_agent.py (103 total). Test classes: TestSubAgentRunnerSubmit (5 tests), TestSubAgentRunnerSubmitBackground (4 tests), TestSubAgentRunnerGetBackgroundResult (4 tests), TestSubAgentRunnerListBackground (6 tests), TestSubAgentRunnerParallel (3 tests), TestSubAgentRunnerMaxWorkers (8 tests), TestSubAgentRunnerShutdown (4 tests), TestSubAgentRunnerErrorHandling (4 tests). Covers: submit blocks and returns, submit_background returns agent_id immediately, get_background_result polling, list_background_agents status tracking, parallel execution timing, OLLAMA_NUM_PARALLEL env var capping, shutdown cleanup, error propagation and isolation.",
-          "updated_at": "2026-03-09T00:00:00.000000+00:00"
+          "notes": "Added 38 unit tests for SubAgentRunner in tests/test_sub_agent.py (103 total). Test classes: TestSubAgentRunnerSubmit (5 tests), TestSubAgentRunnerSubmitBackground (4 tests), TestSubAgentRunnerGetBackgroundResult (4 tests), TestSubAgentRunnerListBackground (6 tests), TestSubAgentRunnerParallel (3 tests), TestSubAgentRunnerMaxWorkers (8 tests), TestSubAgentRunnerShutdown (4 tests), TestSubAgentRunnerErrorHandling (4 tests). Covers: submit blocks and returns, submit_background returns agent_id immediately, get_background_result polling, list_background_agents status tracking, parallel execution timing, OLLAMA_NUM_PARALLEL env var capping, shutdown cleanup, error propagation and isolation. All 103 tests pass.",
+          "updated_at": "2026-03-08T16:56:35.935212+00:00"
         }
       ]
     },
@@ -154,8 +154,9 @@
             "command": "python -c \"from local_cli.tools.agent_tool import AgentTool; print('OK')\"",
             "expected": "OK"
           },
-          "status": "pending",
-          "notes": "Critical: execute() must create a FRESH provider instance for each sub-agent (thread safety). For Ollama, create new OllamaProvider(base_url=...). For Claude, create new ClaudeProvider(). Use provider.name to determine which to create, then call providers.get_provider(). The provider passed to constructor is used as a template (to get its name and config), not shared with sub-agents. Validate prompt is non-empty. Format result as readable string with metadata (status, duration, tool_calls_count)."
+          "status": "completed",
+          "notes": "Created AgentTool in local_cli/tools/agent_tool.py. Inherits from Tool. Constructor takes runner (SubAgentRunner), provider (LLMProvider), model (str), sub_agent_tools (list[Tool]). Properties: name='agent', description (detailed with tool list), parameters (JSON Schema with description, prompt, run_in_background). execute() validates inputs, creates a fresh LLMProvider via _create_fresh_provider() using providers.get_provider() (extracts base_url from template Ollama provider, supports Claude), creates SubAgent, submits to runner. Foreground: blocks and returns formatted SubAgentResult. Background: returns agent_id string with status message. Error handling for provider creation failure and input validation. All 1070 existing tests pass.",
+          "updated_at": "2026-03-09T00:00:00.000000+00:00"
         },
         {
           "id": "subtask-3-2",
@@ -487,12 +488,12 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-08T16:49:00.442Z",
+  "updated_at": "2026-03-08T16:57:11.800Z",
   "lastEvent": {
     "eventId": "2e59f469-7508-496e-8e84-d9593fc51983",
     "sequence": 0,
     "type": "PLANNING_COMPLETE",
     "timestamp": "2026-03-08T16:31:23.314833+00:00"
   },
-  "last_updated": "2026-03-08T16:40:43.933341+00:00"
+  "last_updated": "2026-03-08T16:56:35.935216+00:00"
 }
