@@ -9,7 +9,13 @@ import readline  # noqa: F401 — imported for side-effect (line editing/history
 import sys
 
 from local_cli import __version__
-from local_cli.agent import agent_loop
+from local_cli.agent import (
+    _COMPACT_MESSAGE_THRESHOLD,
+    _COMPACT_TOKEN_THRESHOLD,
+    _estimate_tokens,
+    _needs_compaction,
+    agent_loop,
+)
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
@@ -93,6 +99,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/update": "Check for updates and pull the latest version.",
     "/undo": "Undo the most recent file modifications (git checkout).",
     "/diff": "Show uncommitted changes in the working tree.",
+    "/context": "Show context window usage (messages, tokens, compaction).",
 }
 
 
@@ -528,6 +535,20 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         print("Updating...")
         success, update_msg = perform_update()
         print(update_msg)
+        return True
+
+    # -- /context -----------------------------------------------------------
+    if cmd == "/context":
+        msg_count = len(ctx.messages)
+        est_tokens = _estimate_tokens(ctx.messages)
+        token_limit = _COMPACT_TOKEN_THRESHOLD
+        compaction_triggered = _needs_compaction(ctx.messages)
+        compaction_status = "triggered" if compaction_triggered else "not triggered"
+        print(
+            f"Messages: {msg_count} | "
+            f"Est. tokens: ~{est_tokens} / {token_limit} | "
+            f"Compaction: {compaction_status}"
+        )
         return True
 
     # -- Unknown command ----------------------------------------------------
