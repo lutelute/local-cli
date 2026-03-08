@@ -174,8 +174,8 @@
             "command": "python -c \"from local_cli.tools import get_sub_agent_tools; tools = get_sub_agent_tools(); names = [t.name for t in tools]; assert 'ask_user' not in names; assert 'bash' in names; print('OK')\"",
             "expected": "OK"
           },
-          "status": "pending",
-          "notes": "Implementation: filter get_default_tools() to exclude AskUserTool. Can use isinstance check or name check. Keep it simple."
+          "status": "completed",
+          "notes": "Added get_sub_agent_tools() function to local_cli/tools/__init__.py. Returns all default tools minus AskUserTool (sub-agents are non-interactive). Uses explicit lazy imports matching get_default_tools() pattern but without AskUserTool import/instantiation. AgentTool is also excluded (prevents recursive spawning). Updated module docstring. Verification passes: 'ask_user' not in tool names, 'bash' in tool names."
         },
         {
           "id": "subtask-3-3",
@@ -488,7 +488,7 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-08T16:57:11.800Z",
+  "updated_at": "2026-03-08T17:01:07.378Z",
   "lastEvent": {
     "eventId": "2e59f469-7508-496e-8e84-d9593fc51983",
     "sequence": 0,

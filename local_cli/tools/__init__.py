@@ -1,7 +1,8 @@
 """Tool system for local-cli.
 
 Provides :func:`get_default_tools` to obtain instances of every built-in
-tool, and :func:`get_tool_map` for name-based lookup.
+tool, :func:`get_sub_agent_tools` for non-interactive sub-agent contexts,
+and :func:`get_tool_map` for name-based lookup.
 """
 
 from local_cli.tools.base import Tool
@@ -35,6 +36,36 @@ def get_default_tools() -> list[Tool]:
         GrepTool(),
         WebFetchTool(),
         AskUserTool(),
+    ]
+    return tools
+
+
+def get_sub_agent_tools() -> list[Tool]:
+    """Return tools suitable for non-interactive sub-agents.
+
+    This is the same set as :func:`get_default_tools` but excludes
+    ``AskUserTool`` (sub-agents cannot prompt stdin) and ``AgentTool``
+    (prevents recursive agent spawning).
+
+    Returns:
+        A list of :class:`Tool` instances safe for sub-agent use.
+    """
+    from local_cli.tools.bash_tool import BashTool
+    from local_cli.tools.edit_tool import EditTool
+    from local_cli.tools.glob_tool import GlobTool
+    from local_cli.tools.grep_tool import GrepTool
+    from local_cli.tools.read_tool import ReadTool
+    from local_cli.tools.web_fetch_tool import WebFetchTool
+    from local_cli.tools.write_tool import WriteTool
+
+    tools: list[Tool] = [
+        BashTool(),
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        GlobTool(),
+        GrepTool(),
+        WebFetchTool(),
     ]
     return tools
 
