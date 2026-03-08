@@ -1,18 +1,20 @@
 """Sub-agent execution for local-cli.
 
-Provides the :class:`SubAgent` execution unit and :class:`SubAgentResult`
-result container for the multi-agent system.  Each sub-agent runs an
-independent agent loop with its own isolated context (messages, provider,
-tools) and returns structured results.
+Provides the :class:`SubAgent` execution unit, :class:`SubAgentResult`
+result container, and :class:`SubAgentRunner` parallel execution manager
+for the multi-agent system.  Each sub-agent runs an independent agent
+loop with its own isolated context (messages, provider, tools) and
+returns structured results.
 
-Sub-agents are designed to run in threads via :class:`SubAgentRunner`
-(added later) and operate silently -- no stdout streaming, no spinners,
-no interactive I/O.
+Sub-agents run in threads via :class:`SubAgentRunner` and operate
+silently -- no stdout streaming, no spinners, no interactive I/O.
 """
 
 import json
+import os
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -416,6 +418,156 @@ class SubAgent:
         timestamp = now.strftime("%Y%m%d-%H%M%S")
         short_id = uuid.uuid4().hex[:8]
         return f"agent-{timestamp}-{short_id}"
+
+
+# ---------------------------------------------------------------------------
+# Parallel execution manager
+# ---------------------------------------------------------------------------
+
+
+class SubAgentRunner:
+    """Manages concurrent sub-agent execution via ``ThreadPoolExecutor``.
+
+    Supports foreground (blocking) and background (non-blocking) execution
+    modes.  Background agents are tracked by their agent ID and can be
+    polled for completion via :meth:`get_background_result`.
+
+    The thread pool is created lazily on first submission to avoid
+    resource waste when no sub-agents are needed.
+
+    Args:
+        max_workers: Maximum number of concurrent sub-agent threads.
+            Capped to ``min(max_workers, OLLAMA_NUM_PARALLEL)`` to
+            avoid Ollama queue saturation.  Defaults to 3.
+    """
+
+    # Default max concurrent sub-agents.
+    _DEFAULT_MAX_WORKERS = 3
+
+    def __init__(self, max_workers: int = _DEFAULT_MAX_WORKERS) -> None:
+        ollama_parallel = self._get_ollama_num_parallel()
+        self._max_workers = min(max_workers, ollama_parallel)
+        self._executor: ThreadPoolExecutor | None = None
+        self._background: dict[str, Future[SubAgentResult]] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def submit(self, sub_agent: "SubAgent") -> SubAgentResult:
+        """Submit a sub-agent for execution and block until completion.
+
+        Creates a thread in the pool to run the sub-agent's
+        :meth:`~SubAgent.run` method and waits for the result.
+
+        Args:
+            sub_agent: The sub-agent to execute.
+
+        Returns:
+            The sub-agent's execution result.
+        """
+        executor = self._ensure_executor()
+        future = executor.submit(sub_agent.run)
+        return future.result()
+
+    def submit_background(self, sub_agent: "SubAgent") -> str:
+        """Submit a sub-agent for background execution.
+
+        Returns immediately with the agent ID.  The result can be
+        retrieved later via :meth:`get_background_result`.
+
+        Args:
+            sub_agent: The sub-agent to execute in the background.
+
+        Returns:
+            The agent ID for tracking the background execution.
+        """
+        executor = self._ensure_executor()
+        future = executor.submit(sub_agent.run)
+        self._background[sub_agent.agent_id] = future
+        return sub_agent.agent_id
+
+    def get_background_result(
+        self,
+        agent_id: str,
+    ) -> SubAgentResult | None:
+        """Retrieve the result of a background sub-agent.
+
+        Returns ``None`` if the agent is still running or the
+        agent ID is not recognized.
+
+        Args:
+            agent_id: The agent ID returned by :meth:`submit_background`.
+
+        Returns:
+            The sub-agent result if completed, or ``None``.
+        """
+        future = self._background.get(agent_id)
+        if future is None:
+            return None
+        if not future.done():
+            return None
+        return future.result()
+
+    def list_background_agents(self) -> list[dict]:
+        """List all background agents and their current status.
+
+        Returns:
+            A list of dicts, each with ``agent_id`` and ``status``
+            keys.  Status is one of ``'running'``, ``'completed'``,
+            or ``'error'``.
+        """
+        agents: list[dict] = []
+        for agent_id, future in self._background.items():
+            if not future.done():
+                status = "running"
+            elif future.exception() is not None:
+                status = "error"
+            else:
+                status = "completed"
+            agents.append({"agent_id": agent_id, "status": status})
+        return agents
+
+    def shutdown(self) -> None:
+        """Shut down the thread pool executor.
+
+        Cancels pending futures and waits for running threads to
+        complete.  Safe to call multiple times.
+        """
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        """Return the thread pool executor, creating it lazily if needed.
+
+        Returns:
+            The ``ThreadPoolExecutor`` instance.
+        """
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+            )
+        return self._executor
+
+    @staticmethod
+    def _get_ollama_num_parallel() -> int:
+        """Read ``OLLAMA_NUM_PARALLEL`` from the environment.
+
+        Returns:
+            The configured parallelism limit, or ``4`` if the
+            variable is unset or not a valid integer.
+        """
+        raw = os.environ.get("OLLAMA_NUM_PARALLEL", "4")
+        try:
+            value = int(raw)
+            return max(value, 1)
+        except (ValueError, TypeError):
+            return 4
 
 
 # ---------------------------------------------------------------------------
