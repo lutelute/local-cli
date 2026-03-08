@@ -30,7 +30,18 @@ import sys
 import threading
 from typing import Any
 
+from local_cli.agent import (
+    _COMPACT_TOKEN_THRESHOLD,
+    _estimate_tokens,
+    _needs_compaction,
+)
+from local_cli.clipboard import (
+    ClipboardError,
+    ClipboardUnavailableError,
+    copy_to_clipboard,
+)
 from local_cli.config import Config
+from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.model_catalog import get_merged_catalog, update_catalog
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
@@ -38,6 +49,8 @@ from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRe
 from local_cli.providers.claude_provider import ClaudeProvider
 from local_cli.providers.ollama_provider import OllamaProvider
 from local_cli.security import validate_model_name
+from local_cli.token_tracker import TokenTracker
+from local_cli.tool_cache import ToolCache
 from local_cli.tools import get_default_tools
 from local_cli.tools.base import Tool
 
@@ -103,6 +116,9 @@ class JsonLineServer:
         self._tool_defs = self._provider.format_tools(self._tools)
         self._tool_map = {t.name: t for t in self._tools}
         self._stop_flag = threading.Event()
+        self._tool_cache = ToolCache()
+        self._token_tracker = TokenTracker()
+        self._git_ops = GitOps()
 
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
@@ -361,6 +377,16 @@ class JsonLineServer:
             self._handle_status(req_id)
         elif cmd == "/models":
             self._handle_models(req_id)
+        elif cmd == "/undo":
+            self._handle_undo(req_id)
+        elif cmd == "/diff":
+            self._handle_diff(req_id)
+        elif cmd == "/usage":
+            self._handle_usage(req_id)
+        elif cmd == "/context":
+            self._handle_context(req_id)
+        elif cmd == "/copy":
+            self._handle_copy(req_id)
         else:
             _send({"id": req_id, "type": "error", "message": f"Unknown command: {command}"})
 
@@ -705,9 +731,87 @@ class JsonLineServer:
         except OSError as exc:
             _send({"id": req_id, "type": "error", "message": f"Cannot change directory: {exc}"})
 
+    def _handle_undo(self, req_id: int) -> None:
+        """Undo the most recent file modifications via git checkout."""
+        try:
+            if not self._git_ops.is_git_repo():
+                _send({"id": req_id, "type": "error", "message": "Not a git repository. Cannot undo."})
+                return
+            result = self._git_ops.undo_last_change(confirmed=True)
+            _send({"id": req_id, "type": "undo", "data": {"message": result}})
+        except GitNotInstalledError:
+            _send({"id": req_id, "type": "error", "message": "git is not installed. Cannot undo."})
+        except GitError as exc:
+            _send({"id": req_id, "type": "error", "message": f"Undo failed: {exc}"})
+
+    def _handle_diff(self, req_id: int) -> None:
+        """Show uncommitted changes in the working tree."""
+        try:
+            if not self._git_ops.is_git_repo():
+                _send({"id": req_id, "type": "error", "message": "Not a git repository. Cannot show diff."})
+                return
+            result = self._git_ops.diff_working_tree(color=False)
+            _send({"id": req_id, "type": "diff", "data": {"diff": result}})
+        except GitNotInstalledError:
+            _send({"id": req_id, "type": "error", "message": "git is not installed. Cannot show diff."})
+        except GitError as exc:
+            _send({"id": req_id, "type": "error", "message": f"Diff failed: {exc}"})
+
+    def _handle_usage(self, req_id: int) -> None:
+        """Return per-message token usage and session totals."""
+        _send({
+            "id": req_id,
+            "type": "usage",
+            "data": self._token_tracker.to_dict(),
+            "summary": self._token_tracker.format_summary(),
+        })
+
+    def _handle_context(self, req_id: int) -> None:
+        """Return context window usage stats."""
+        msg_count = len(self._messages)
+        est_tokens = _estimate_tokens(self._messages)
+        token_limit = _COMPACT_TOKEN_THRESHOLD
+        compaction_triggered = _needs_compaction(self._messages)
+        _send({
+            "id": req_id,
+            "type": "context",
+            "data": {
+                "messages": msg_count,
+                "estimated_tokens": est_tokens,
+                "token_limit": token_limit,
+                "compaction_triggered": compaction_triggered,
+            },
+        })
+
+    def _handle_copy(self, req_id: int) -> None:
+        """Copy the last assistant response to the system clipboard."""
+        # Find the last assistant message.
+        last_assistant = None
+        for msg in reversed(self._messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if content:
+                    last_assistant = content
+                    break
+
+        if last_assistant is None:
+            _send({"id": req_id, "type": "error", "message": "Nothing to copy."})
+            return
+
+        try:
+            copy_to_clipboard(last_assistant)
+            _send({"id": req_id, "type": "copied"})
+        except ClipboardUnavailableError:
+            _send({"id": req_id, "type": "error", "message": "Clipboard not available."})
+        except ClipboardError as exc:
+            _send({"id": req_id, "type": "error", "message": f"Copy failed: {exc}"})
+
+
     def _handle_clear(self, req_id: int) -> None:
         self._messages.clear()
         self._messages.append({"role": "system", "content": self._system_prompt})
+        self._tool_cache.clear()
+        self._token_tracker.clear()
         _send({"id": req_id, "type": "cleared"})
 
 
