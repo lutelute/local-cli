@@ -195,6 +195,101 @@ class GitOps:
 
         return tag_name
 
+    def undo_last_change(self, confirmed: bool = False) -> str:
+        """Undo the most recent file modifications using git checkout HEAD.
+
+        Reverts both staged and unstaged changes to tracked files.
+        Does NOT remove untracked (new) files — includes a note in the
+        summary if untracked files exist.
+
+        If more than 3 files are affected and *confirmed* is ``False``,
+        returns a preview summary listing the files without reverting,
+        so the caller can prompt for confirmation.
+
+        Args:
+            confirmed: When ``True``, always perform the revert even if
+                more than 3 files are affected.  When ``False`` (default),
+                returns a confirmation-needed message if >3 files.
+
+        Returns:
+            A human-readable summary of what was (or would be) undone.
+
+        Raises:
+            GitNotInstalledError: If git is not available.
+            GitError: If a git command fails.
+        """
+        # Collect unstaged changes.
+        unstaged_result = self._run_git("diff", "--name-only")
+        unstaged_files = [
+            f.strip()
+            for f in unstaged_result.stdout.splitlines()
+            if f.strip()
+        ]
+
+        # Collect staged changes.
+        staged_result = self._run_git("diff", "--name-only", "--cached")
+        staged_files = [
+            f.strip()
+            for f in staged_result.stdout.splitlines()
+            if f.strip()
+        ]
+
+        # Combine unique changed files (preserving order).
+        seen: set[str] = set()
+        changed_files: list[str] = []
+        for f in unstaged_files + staged_files:
+            if f not in seen:
+                seen.add(f)
+                changed_files.append(f)
+
+        # Check for untracked files.
+        untracked_result = self._run_git(
+            "ls-files", "--others", "--exclude-standard"
+        )
+        untracked_files = [
+            f.strip()
+            for f in untracked_result.stdout.splitlines()
+            if f.strip()
+        ]
+
+        # Nothing to undo.
+        if not changed_files:
+            msg = "No changes to undo."
+            if untracked_files:
+                msg += (
+                    f"\nNote: {len(untracked_files)} untracked file(s) exist"
+                    " (not removed by undo)."
+                )
+            return msg
+
+        # Confirmation check for >3 files.
+        if len(changed_files) > 3 and not confirmed:
+            file_list = "\n".join(f"  {f}" for f in changed_files)
+            msg = (
+                f"{len(changed_files)} files have changes:\n"
+                f"{file_list}\n"
+                "Run with confirmation to revert all."
+            )
+            if untracked_files:
+                msg += (
+                    f"\nNote: {len(untracked_files)} untracked file(s) exist"
+                    " (not removed by undo)."
+                )
+            return msg
+
+        # Revert all changed files to HEAD.
+        self._run_git("checkout", "HEAD", "--", *changed_files)
+
+        # Build summary.
+        file_list = "\n".join(f"  {f}" for f in changed_files)
+        msg = f"Reverted {len(changed_files)} file(s):\n{file_list}"
+        if untracked_files:
+            msg += (
+                f"\nNote: {len(untracked_files)} untracked file(s) exist"
+                " (not removed by undo)."
+            )
+        return msg
+
     def rollback_to_checkpoint(self, tag: str) -> None:
         """Roll back the repository to a checkpoint tag.
 
