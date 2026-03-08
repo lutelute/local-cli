@@ -462,5 +462,235 @@ class TestConfigPriorityIntegration(unittest.TestCase):
             os.environ.update(saved_env)
 
 
+class TestAntigravityConfigKeys(unittest.TestCase):
+    """Tests for new antigravity config keys: plan_dir, knowledge_dir, skills_dir, default_mode."""
+
+    def setUp(self) -> None:
+        """Save and clear relevant env vars to isolate tests."""
+        self._saved_env: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                self._saved_env[env_var] = os.environ.pop(env_var)
+
+    def tearDown(self) -> None:
+        """Restore saved env vars."""
+        os.environ.update(self._saved_env)
+
+    def test_new_keys_in_config_defaults(self) -> None:
+        """New antigravity keys are present in CONFIG_DEFAULTS."""
+        self.assertIn("plan_dir", CONFIG_DEFAULTS)
+        self.assertIn("knowledge_dir", CONFIG_DEFAULTS)
+        self.assertIn("skills_dir", CONFIG_DEFAULTS)
+        self.assertIn("default_mode", CONFIG_DEFAULTS)
+
+    def test_default_plan_dir(self) -> None:
+        """Default plan_dir is .agents/plans."""
+        cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+        self.assertEqual(cfg.plan_dir, ".agents/plans")
+
+    def test_default_knowledge_dir(self) -> None:
+        """Default knowledge_dir is .agents/knowledge."""
+        cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+        self.assertEqual(cfg.knowledge_dir, ".agents/knowledge")
+
+    def test_default_skills_dir(self) -> None:
+        """Default skills_dir is .agents/skills."""
+        cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+        self.assertEqual(cfg.skills_dir, ".agents/skills")
+
+    def test_default_mode(self) -> None:
+        """Default default_mode is 'agent'."""
+        cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+        self.assertEqual(cfg.default_mode, "agent")
+
+    def test_config_defaults_values(self) -> None:
+        """CONFIG_DEFAULTS contains expected values for new keys."""
+        self.assertEqual(CONFIG_DEFAULTS["plan_dir"], ".agents/plans")
+        self.assertEqual(CONFIG_DEFAULTS["knowledge_dir"], ".agents/knowledge")
+        self.assertEqual(CONFIG_DEFAULTS["skills_dir"], ".agents/skills")
+        self.assertEqual(CONFIG_DEFAULTS["default_mode"], "agent")
+
+    def test_config_file_overrides_plan_dir(self) -> None:
+        """Config file overrides plan_dir default."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("plan_dir=custom/plans\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.plan_dir, "custom/plans")
+        finally:
+            os.unlink(path)
+
+    def test_config_file_overrides_knowledge_dir(self) -> None:
+        """Config file overrides knowledge_dir default."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("knowledge_dir=/var/knowledge\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.knowledge_dir, "/var/knowledge")
+        finally:
+            os.unlink(path)
+
+    def test_config_file_overrides_skills_dir(self) -> None:
+        """Config file overrides skills_dir default."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("skills_dir=my_skills\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.skills_dir, "my_skills")
+        finally:
+            os.unlink(path)
+
+    def test_config_file_overrides_default_mode(self) -> None:
+        """Config file overrides default_mode default."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("default_mode=ideate\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.default_mode, "ideate")
+        finally:
+            os.unlink(path)
+
+    def test_config_file_overrides_all_new_keys(self) -> None:
+        """Config file can override all new keys at once."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("plan_dir=custom/plans\n")
+            f.write("knowledge_dir=custom/knowledge\n")
+            f.write("skills_dir=custom/skills\n")
+            f.write("default_mode=plan\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.plan_dir, "custom/plans")
+            self.assertEqual(cfg.knowledge_dir, "custom/knowledge")
+            self.assertEqual(cfg.skills_dir, "custom/skills")
+            self.assertEqual(cfg.default_mode, "plan")
+        finally:
+            os.unlink(path)
+
+    def test_cli_args_override_plan_dir(self) -> None:
+        """CLI args override plan_dir from config file."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("plan_dir=file-plans\n")
+            path = f.name
+
+        try:
+            cli = SimpleNamespace(plan_dir="cli-plans")
+            cfg = Config(cli_args=cli, config_file=path)
+            self.assertEqual(cfg.plan_dir, "cli-plans")
+        finally:
+            os.unlink(path)
+
+    def test_cli_args_override_knowledge_dir(self) -> None:
+        """CLI args override knowledge_dir from config file."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("knowledge_dir=file-knowledge\n")
+            path = f.name
+
+        try:
+            cli = SimpleNamespace(knowledge_dir="cli-knowledge")
+            cfg = Config(cli_args=cli, config_file=path)
+            self.assertEqual(cfg.knowledge_dir, "cli-knowledge")
+        finally:
+            os.unlink(path)
+
+    def test_cli_args_override_default_mode(self) -> None:
+        """CLI args override default_mode from config file."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("default_mode=agent\n")
+            path = f.name
+
+        try:
+            cli = SimpleNamespace(default_mode="ideate")
+            cfg = Config(cli_args=cli, config_file=path)
+            self.assertEqual(cfg.default_mode, "ideate")
+        finally:
+            os.unlink(path)
+
+    def test_cli_none_does_not_override_new_keys(self) -> None:
+        """CLI args with None values do not override new key defaults."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("plan_dir=file-plans\n")
+            path = f.name
+
+        try:
+            cli = SimpleNamespace(plan_dir=None, knowledge_dir=None)
+            cfg = Config(cli_args=cli, config_file=path)
+            # plan_dir: file value preserved (CLI was None).
+            self.assertEqual(cfg.plan_dir, "file-plans")
+            # knowledge_dir: default preserved (CLI was None, no file value).
+            self.assertEqual(cfg.knowledge_dir, ".agents/knowledge")
+        finally:
+            os.unlink(path)
+
+    def test_new_keys_are_str_type(self) -> None:
+        """All new config keys are stored as str type."""
+        cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+        self.assertIsInstance(cfg.plan_dir, str)
+        self.assertIsInstance(cfg.knowledge_dir, str)
+        self.assertIsInstance(cfg.skills_dir, str)
+        self.assertIsInstance(cfg.default_mode, str)
+
+    def test_new_keys_coexist_with_existing_defaults(self) -> None:
+        """New keys do not interfere with existing config defaults."""
+        cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+        # Existing defaults still work.
+        self.assertEqual(cfg.model, CONFIG_DEFAULTS["model"])
+        self.assertFalse(cfg.debug)
+        self.assertFalse(cfg.auto_approve)
+        # New defaults also work.
+        self.assertEqual(cfg.plan_dir, ".agents/plans")
+        self.assertEqual(cfg.default_mode, "agent")
+
+    def test_mixed_old_and_new_keys_in_config_file(self) -> None:
+        """Config file with both old and new keys works correctly."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("model=custom-model\n")
+            f.write("debug=true\n")
+            f.write("plan_dir=my/plans\n")
+            f.write("default_mode=plan\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.model, "custom-model")
+            self.assertTrue(cfg.debug)
+            self.assertEqual(cfg.plan_dir, "my/plans")
+            self.assertEqual(cfg.default_mode, "plan")
+            # Unset new keys fall back to defaults.
+            self.assertEqual(cfg.knowledge_dir, ".agents/knowledge")
+            self.assertEqual(cfg.skills_dir, ".agents/skills")
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
