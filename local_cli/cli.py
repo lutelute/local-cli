@@ -580,6 +580,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to model registry JSON file.",
     )
     parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=None,
+        help="Context window size in tokens (default: model-specific).",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature (default: model-specific).",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p (nucleus) sampling threshold (default: model-specific).",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling limit (default: model-specific).",
+    )
+    parser.add_argument(
+        "--think-mode",
+        action="store_true",
+        default=None,
+        help="Enable extended thinking mode for supported models.",
+    )
+    parser.add_argument(
         "--server",
         action="store_true",
         default=False,
