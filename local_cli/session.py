@@ -2,6 +2,10 @@
 
 Saves and loads conversation sessions in JSONL format (one JSON message
 object per line) to the configured state directory.
+
+Token usage metadata can optionally be embedded into assistant messages
+when saving.  Old sessions without this field load fine — the
+``token_usage`` key is simply absent from the loaded dicts.
 """
 
 import json
@@ -9,6 +13,10 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from local_cli.token_tracker import TokenTracker
 
 
 class SessionManager:
@@ -56,15 +64,27 @@ class SessionManager:
         self,
         messages: list[dict],
         session_id: str | None = None,
+        token_tracker: "TokenTracker | None" = None,
     ) -> str:
         """Save a list of messages as a JSONL session file.
 
-        Each message dict is written as a single JSON line.
+        Each message dict is written as a single JSON line.  When a
+        *token_tracker* is provided, assistant messages are enriched with
+        a ``token_usage`` field containing per-exchange token counts.
+        The i-th assistant message receives the i-th tracker record (if
+        available).
+
+        The enrichment is non-destructive — the caller's *messages* list
+        is not modified.  Old sessions saved without ``token_usage``
+        load identically since :meth:`load_session` simply reads
+        whatever fields are present.
 
         Args:
             messages: List of message dictionaries to persist.
             session_id: Optional session identifier.  If ``None``, a new
                 identifier is generated via :meth:`generate_session_id`.
+            token_tracker: Optional :class:`~local_cli.token_tracker.TokenTracker`
+                whose records are embedded into assistant messages.
 
         Returns:
             The session identifier used for saving.
@@ -75,8 +95,24 @@ class SessionManager:
         file_path = self._session_path(session_id)
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Pre-compute token usage mapping for assistant messages.
+        usage_records: list[dict] | None = None
+        if token_tracker is not None:
+            usage_records = [r.to_dict() for r in token_tracker.records]
+
         with open(file_path, "w", encoding="utf-8") as fh:
+            assistant_idx = 0
             for msg in messages:
+                if (
+                    usage_records is not None
+                    and msg.get("role") == "assistant"
+                ):
+                    # Shallow-copy the message to avoid mutating the caller's
+                    # list, then attach token_usage if a matching record exists.
+                    if assistant_idx < len(usage_records):
+                        msg = {**msg, "token_usage": usage_records[assistant_idx]}
+                    assistant_idx += 1
+
                 line = json.dumps(msg, ensure_ascii=False)
                 fh.write(line + "\n")
 

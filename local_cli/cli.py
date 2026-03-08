@@ -109,6 +109,8 @@ class _ReplContext:
         git_ops: GitOps instance for checkpoint/rollback commands.
         orchestrator: Optional orchestrator for provider/brain management.
         model_manager: Optional model manager for install/delete operations.
+        token_tracker: Optional token usage tracker for /usage command.
+        tool_cache: Optional tool result cache for read/glob/grep caching.
     """
 
     __slots__ = (
@@ -123,6 +125,8 @@ class _ReplContext:
         "git_ops",
         "orchestrator",
         "model_manager",
+        "token_tracker",
+        "tool_cache",
     )
 
     def __init__(
@@ -137,6 +141,8 @@ class _ReplContext:
         rag_topk: int = 5,
         orchestrator: object | None = None,
         model_manager: object | None = None,
+        token_tracker: object | None = None,
+        tool_cache: object | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -149,6 +155,8 @@ class _ReplContext:
         self.git_ops = GitOps()
         self.orchestrator = orchestrator
         self.model_manager = model_manager
+        self.token_tracker = token_tracker
+        self.tool_cache = tool_cache
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
