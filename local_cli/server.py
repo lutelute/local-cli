@@ -404,8 +404,27 @@ class JsonLineServer:
             _send({"id": req_id, "type": "error", "message": f"Invalid model name: {model}"})
             return
 
+        # Verify the model is installed on Ollama (when using Ollama provider).
+        if self._provider.name == "ollama":
+            try:
+                models = self._client.list_models()
+                installed = {m.get("name", "") for m in models}
+                # Also check base name (e.g. "qwen3" matches "qwen3:8b").
+                installed_bases = {n.split(":")[0] for n in installed}
+                if model not in installed and model not in installed_bases:
+                    _send({"id": req_id, "type": "error",
+                           "message": f"Model '{model}' is not installed. Pull it first."})
+                    return
+            except OllamaConnectionError:
+                pass  # Can't verify, proceed anyway.
+
         self._config.model = model
+        # Reset conversation to avoid sending incompatible tool_calls
+        # from the previous model.
+        self._messages.clear()
+        self._messages.append({"role": "system", "content": self._system_prompt})
         _send({"id": req_id, "type": "model_changed", "model": model})
+        _send({"id": req_id, "type": "cleared"})
 
     def _handle_switch_provider(self, req_id: int, provider: str) -> None:
         """Switch the active LLM provider (ollama or claude)."""
