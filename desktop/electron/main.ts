@@ -1,6 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
+import http from 'node:http'
 import https from 'node:https'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'path'
@@ -8,12 +10,246 @@ import path from 'path'
 const APP_VERSION = '0.4.0'
 const GITHUB_REPO = 'lutelute/local-cli'
 
+// Claude auth credential storage path.
+const CLAUDE_AUTH_PATH = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+  'local-cli',
+  'claude-auth.json',
+)
+
 let mainWindow: BrowserWindow | null = null
 let pythonProcess: ChildProcess | null = null
 let lineBuffer = ''
 let pendingMessages: object[] = []
 let rendererReady = false
 let lastReadyMessage: object | null = null
+let storedApiKey: string | null = null
+
+// ---------------------------------------------------------------------------
+// Claude credential storage (encrypted with safeStorage when available)
+// ---------------------------------------------------------------------------
+
+type ClaudeAuth = {
+  method: 'api_key' | 'subscription'
+  key: string // encrypted (base64) or plain
+  encrypted: boolean
+}
+
+function loadClaudeAuth(): ClaudeAuth | null {
+  try {
+    if (!fs.existsSync(CLAUDE_AUTH_PATH)) return null
+    const raw = fs.readFileSync(CLAUDE_AUTH_PATH, 'utf-8')
+    const data = JSON.parse(raw) as ClaudeAuth
+    if (data.encrypted && safeStorage.isEncryptionAvailable()) {
+      data.key = safeStorage.decryptString(Buffer.from(data.key, 'base64'))
+    }
+    return data
+  } catch {
+    return null
+  }
+}
+
+function saveClaudeAuth(method: 'api_key' | 'subscription', key: string): void {
+  const dir = path.dirname(CLAUDE_AUTH_PATH)
+  fs.mkdirSync(dir, { recursive: true })
+
+  let storedKey = key
+  let encrypted = false
+  if (safeStorage.isEncryptionAvailable()) {
+    storedKey = safeStorage.encryptString(key).toString('base64')
+    encrypted = true
+  }
+  fs.writeFileSync(
+    CLAUDE_AUTH_PATH,
+    JSON.stringify({ method, key: storedKey, encrypted } as ClaudeAuth),
+    { mode: 0o600 },
+  )
+}
+
+function deleteClaudeAuth(): void {
+  try { fs.unlinkSync(CLAUDE_AUTH_PATH) } catch { /* ignore */ }
+  storedApiKey = null
+}
+
+function initClaudeAuth(): void {
+  // Load stored credentials and set env var for Python.
+  const auth = loadClaudeAuth()
+  if (auth?.key) {
+    storedApiKey = auth.key
+    process.env.ANTHROPIC_API_KEY = auth.key
+  }
+}
+
+/** Validate an API key by making a lightweight request to the Anthropic API. */
+function validateApiKey(key: string): Promise<{ valid: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      model: 'claude-haiku-4-5',
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    const req = https.request(
+      'https://api.anthropic.com/v1/messages',
+      {
+        method: 'POST',
+        headers: {
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        timeout: 15000,
+      },
+      (res) => {
+        let data = ''
+        res.on('data', (c) => { data += c })
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            resolve({ valid: true })
+          } else if (res.statusCode === 401) {
+            resolve({ valid: false, error: 'Invalid API key.' })
+          } else {
+            // 429 (rate limit) or other errors — key format is valid.
+            resolve({ valid: true })
+          }
+        })
+      },
+    )
+    req.on('error', () => resolve({ valid: false, error: 'Could not reach Anthropic API.' }))
+    req.on('timeout', () => { req.destroy(); resolve({ valid: false, error: 'Request timed out.' }) })
+    req.write(body)
+    req.end()
+  })
+}
+
+// ---------------------------------------------------------------------------
+// OAuth flow for Claude subscription
+// ---------------------------------------------------------------------------
+
+function startOAuthFlow(): Promise<{ success: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    // Start a local HTTP server to receive the OAuth callback.
+    const state = crypto.randomBytes(16).toString('hex')
+    let resolved = false
+
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url || '/', `http://localhost`)
+      if (url.pathname !== '/callback') {
+        res.writeHead(404)
+        res.end()
+        return
+      }
+
+      const code = url.searchParams.get('code')
+      const returnedState = url.searchParams.get('state')
+      const error = url.searchParams.get('error')
+
+      if (error) {
+        res.writeHead(200, { 'Content-Type': 'text/html' })
+        res.end('<html><body><h2>Login failed</h2><p>You can close this window.</p></body></html>')
+        if (!resolved) {
+          resolved = true
+          server.close()
+          resolve({ success: false, error: `OAuth error: ${error}` })
+        }
+        return
+      }
+
+      if (!code || returnedState !== state) {
+        res.writeHead(400, { 'Content-Type': 'text/html' })
+        res.end('<html><body><h2>Invalid request</h2></body></html>')
+        return
+      }
+
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.end('<html><body><h2>Login successful!</h2><p>You can close this window and return to Local CLI.</p></body></html>')
+
+      if (!resolved) {
+        resolved = true
+        server.close()
+
+        // Exchange the auth code for a session key.
+        exchangeOAuthCode(code).then((result) => {
+          if (result.apiKey) {
+            saveClaudeAuth('subscription', result.apiKey)
+            storedApiKey = result.apiKey
+            process.env.ANTHROPIC_API_KEY = result.apiKey
+            // Notify Python backend.
+            sendToPython({ type: 'set_api_key', api_key: result.apiKey })
+            resolve({ success: true })
+          } else {
+            resolve({ success: false, error: result.error || 'Failed to exchange code.' })
+          }
+        })
+      }
+    })
+
+    // Listen on a random available port.
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address()
+      if (!addr || typeof addr === 'string') {
+        resolve({ success: false, error: 'Failed to start callback server.' })
+        return
+      }
+      const port = addr.port
+      const redirectUri = `http://127.0.0.1:${port}/callback`
+      const authUrl = `https://console.anthropic.com/oauth/authorize?response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&client_id=local-cli`
+
+      shell.openExternal(authUrl)
+
+      // Timeout after 5 minutes.
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          server.close()
+          resolve({ success: false, error: 'Login timed out. Please try again.' })
+        }
+      }, 300_000)
+    })
+
+    server.on('error', () => {
+      if (!resolved) {
+        resolved = true
+        resolve({ success: false, error: 'Failed to start callback server.' })
+      }
+    })
+  })
+}
+
+function exchangeOAuthCode(code: string): Promise<{ apiKey?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ code, grant_type: 'authorization_code', client_id: 'local-cli' })
+    const req = https.request(
+      'https://console.anthropic.com/oauth/token',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        timeout: 15000,
+      },
+      (res) => {
+        let data = ''
+        res.on('data', (c) => { data += c })
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data)
+            if (json.access_token) {
+              resolve({ apiKey: json.access_token })
+            } else {
+              resolve({ error: json.error || 'No access token returned.' })
+            }
+          } catch {
+            resolve({ error: 'Invalid response from auth server.' })
+          }
+        })
+      },
+    )
+    req.on('error', () => resolve({ error: 'Could not reach auth server.' }))
+    req.on('timeout', () => { req.destroy(); resolve({ error: 'Auth request timed out.' }) })
+    req.write(body)
+    req.end()
+  })
+}
+
+// ---------------------------------------------------------------------------
 
 function findPython(): string {
   // Try python3 first, then python.
@@ -37,10 +273,15 @@ function startPythonServer() {
   console.log(`Starting Python server: ${pythonCmd} -m local_cli --server`)
   console.log(`Working directory: ${projectRoot}`)
 
+  const env: Record<string, string> = { ...process.env as Record<string, string>, PYTHONUNBUFFERED: '1' }
+  if (storedApiKey) {
+    env.ANTHROPIC_API_KEY = storedApiKey
+  }
+
   pythonProcess = spawn(pythonCmd, ['-m', 'local_cli', '--server'], {
     cwd: projectRoot,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    env,
   })
 
   pythonProcess.stdout?.on('data', (data: Buffer) => {
@@ -179,7 +420,38 @@ ipcMain.handle('get-home-dir', () => {
 })
 
 ipcMain.handle('has-claude-access', () => {
-  return !!process.env.ANTHROPIC_API_KEY
+  return !!process.env.ANTHROPIC_API_KEY || !!storedApiKey
+})
+
+ipcMain.handle('get-claude-auth', () => {
+  const auth = loadClaudeAuth()
+  if (!auth) return { method: null, keyHint: null, authenticated: false }
+  const hint = auth.key ? auth.key.slice(0, 10) + '...' + auth.key.slice(-4) : null
+  return { method: auth.method, keyHint: hint, authenticated: true }
+})
+
+ipcMain.handle('save-claude-key', async (_event, key: string) => {
+  const validation = await validateApiKey(key)
+  if (!validation.valid) {
+    return { success: false, error: validation.error }
+  }
+  saveClaudeAuth('api_key', key)
+  storedApiKey = key
+  process.env.ANTHROPIC_API_KEY = key
+  // Notify Python backend about the new key.
+  sendToPython({ type: 'set_api_key', api_key: key })
+  const hint = key.slice(0, 10) + '...' + key.slice(-4)
+  return { success: true, keyHint: hint }
+})
+
+ipcMain.handle('delete-claude-auth', () => {
+  deleteClaudeAuth()
+  delete process.env.ANTHROPIC_API_KEY
+  return { success: true }
+})
+
+ipcMain.handle('start-claude-oauth', async () => {
+  return await startOAuthFlow()
 })
 
 ipcMain.handle('get-app-version', () => APP_VERSION)
@@ -229,6 +501,7 @@ function fetchJson(url: string): Promise<any> {
 }
 
 app.whenReady().then(() => {
+  initClaudeAuth()
   startPythonServer()
   createWindow()
 })

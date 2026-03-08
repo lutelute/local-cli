@@ -1460,6 +1460,201 @@ body {
   text-align: center;
 }
 
+/* ===== Claude Login ===== */
+.claude-login {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 400px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.claude-login-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.claude-login-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.claude-login-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(63, 185, 80, 0.06);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--green);
+}
+
+.claude-login-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+}
+
+.claude-logout-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.claude-logout-btn:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.claude-login-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+
+.claude-login-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.claude-login-tab:hover {
+  color: var(--text-dim);
+}
+
+.claude-login-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.claude-login-body {
+  padding: 16px;
+}
+
+.claude-login-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.claude-login-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.claude-login-link {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.claude-login-link:hover {
+  color: var(--text);
+}
+
+.claude-login-field {
+  display: flex;
+  gap: 8px;
+}
+
+.claude-login-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.claude-login-input:focus {
+  border-color: var(--accent);
+}
+
+.claude-login-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.claude-login-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+}
+
+.claude-login-btn.primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.claude-login-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.claude-login-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.claude-login-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--red);
+  padding: 6px 10px;
+  background: rgba(248, 81, 73, 0.08);
+  border-radius: 4px;
+}
+
+.claude-login-success {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--green);
+  padding: 6px 10px;
+  background: rgba(63, 185, 80, 0.08);
+  border-radius: 4px;
+}
+
+/* Provider login badge */
+.provider-login-badge {
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* ===== Responsive: collapse explorer below 768px ===== */
 @media (max-width: 768px) {
   .explorer-pane {

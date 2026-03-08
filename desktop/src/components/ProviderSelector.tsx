@@ -5,6 +5,7 @@ type Props = {
   hasClaude: boolean
   hasMessages: boolean
   onSwitch: (provider: string) => void
+  onLoginRequest?: () => void
 }
 
 type ProviderOption = {
@@ -18,7 +19,7 @@ const PROVIDERS: ProviderOption[] = [
   { id: 'ollama', label: 'Local LLM', description: 'Ollama' },
 ]
 
-export function ProviderSelector({ currentProvider, hasClaude, hasMessages, onSwitch }: Props) {
+export function ProviderSelector({ currentProvider, hasClaude, hasMessages, onSwitch, onLoginRequest }: Props) {
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -55,7 +56,11 @@ export function ProviderSelector({ currentProvider, hasClaude, hasMessages, onSw
       return
     }
 
-    if (providerId === 'claude' && !hasClaude) return
+    if (providerId === 'claude' && !hasClaude) {
+      setOpen(false)
+      onLoginRequest?.()
+      return
+    }
 
     if (hasMessages) {
       setConfirming(providerId)
@@ -106,20 +111,24 @@ export function ProviderSelector({ currentProvider, hasClaude, hasMessages, onSw
           ) : (
             PROVIDERS.map(p => {
               const isActive = p.id === currentProvider
-              const isDisabled = p.id === 'claude' && !hasClaude
+              const needsLogin = p.id === 'claude' && !hasClaude
 
               return (
                 <div
                   key={p.id}
-                  className={`provider-option ${isActive ? 'active' : ''} ${isDisabled ? 'disabled' : ''}`}
-                  onClick={() => !isDisabled && handleSelect(p.id)}
-                  title={isDisabled ? 'API key required' : undefined}
+                  className={`provider-option ${isActive ? 'active' : ''}`}
+                  onClick={() => handleSelect(p.id)}
                 >
                   <span className="provider-check">{isActive ? '✓' : ''}</span>
                   <div className="provider-option-info">
                     <span className="provider-option-label">{p.label}</span>
-                    <span className="provider-option-desc">{p.description}</span>
+                    <span className="provider-option-desc">
+                      {needsLogin ? 'Login required' : p.description}
+                    </span>
                   </div>
+                  {needsLogin && (
+                    <span className="provider-login-badge">Login</span>
+                  )}
                 </div>
               )
             })

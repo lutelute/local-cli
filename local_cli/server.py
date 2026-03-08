@@ -176,6 +176,10 @@ class JsonLineServer:
                     self._handle_check_update(req_id)
                 elif req_type == "do_update":
                     self._handle_do_update(req_id)
+                elif req_type == "set_api_key":
+                    self._handle_set_api_key(req_id, req.get("api_key", ""))
+                elif req_type == "claude_logout":
+                    self._handle_claude_logout(req_id)
                 else:
                     _send({"id": req_id, "type": "error", "message": f"Unknown type: {req_type}"})
             except Exception as exc:
@@ -564,6 +568,25 @@ class JsonLineServer:
             "success": success,
             "message": message,
         })
+
+    def _handle_set_api_key(self, req_id: int, api_key: str) -> None:
+        """Set the Anthropic API key at runtime (from desktop login)."""
+        if not api_key:
+            _send({"id": req_id, "type": "error", "message": "No API key provided."})
+            return
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+        _send({"id": req_id, "type": "api_key_set", "has_claude": True})
+
+    def _handle_claude_logout(self, req_id: int) -> None:
+        """Clear the stored API key and revert to Ollama if active."""
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        if self._provider.name == "claude":
+            self._provider = OllamaProvider(client=self._client)
+            self._tool_defs = self._provider.format_tools(self._tools)
+            self._messages.clear()
+            self._messages.append({"role": "system", "content": self._system_prompt})
+            _send({"id": req_id, "type": "provider_changed", "provider": "ollama"})
+        _send({"id": req_id, "type": "api_key_set", "has_claude": False})
 
     def _handle_clear(self, req_id: int) -> None:
         self._messages.clear()
