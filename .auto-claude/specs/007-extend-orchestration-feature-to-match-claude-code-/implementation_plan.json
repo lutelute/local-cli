@@ -1,0 +1,497 @@
+{
+  "feature": "Multi-Agent System (Claude Code Teams Parity)",
+  "workflow_type": "feature",
+  "workflow_rationale": "This is a fundamentally new capability (sub-agent spawning, parallel execution, result aggregation) that does not exist in the current codebase. The existing Orchestrator's model-routing logic remains intact; we are adding a new parallel execution layer on top of it.",
+  "phases": [
+    {
+      "id": "phase-1-core-infrastructure",
+      "name": "Core Sub-Agent Infrastructure",
+      "type": "implementation",
+      "description": "Create the foundational SubAgent and SubAgentResult classes, and add a silent agent loop variant to agent.py. This phase establishes the core execution unit that all subsequent phases depend on.",
+      "depends_on": [],
+      "parallel_safe": true,
+      "subtasks": [
+        {
+          "id": "subtask-1-1",
+          "description": "Create SubAgentResult dataclass and SubAgent class in local_cli/sub_agent.py. SubAgentResult holds agent_id, description, content (final output), status (success/error/timeout), duration_seconds, messages_count, tool_calls_count. SubAgent encapsulates an independent agent execution unit with its own messages list, LLMProvider instance, tools list, task prompt, and a run() method.",
+          "service": "local-cli",
+          "files_to_modify": [],
+          "files_to_create": [
+            "local_cli/sub_agent.py"
+          ],
+          "patterns_from": [
+            "local_cli/session.py",
+            "local_cli/providers/base.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.sub_agent import SubAgent, SubAgentResult; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "completed",
+          "notes": "Created local_cli/sub_agent.py with SubAgentResult dataclass and SubAgent class. SubAgentResult holds agent_id, description, content, status, duration_seconds, messages_count, tool_calls_count, error_message plus format_result() method. SubAgent encapsulates an independent agent execution unit with isolated messages list, LLMProvider instance, tools list, and run() method that executes a silent agent loop (_run_agent_loop) with no stdout/stderr/spinners. Includes timeout handling, error handling, tool execution, and context isolation. Verified with import check and behavioral tests (simple response, tool execution, timeout, error handling, context isolation).",
+          "updated_at": "2026-03-08T16:36:03.950755+00:00"
+        },
+        {
+          "id": "subtask-1-2",
+          "description": "Add sub_agent_loop() and _collect_silent_response() functions to local_cli/agent.py. _collect_silent_response() is a silent variant of collect_streaming_response() that accumulates content without stdout/Spinner/stderr I/O. sub_agent_loop() is structurally identical to agent_loop() but uses _collect_silent_response(), generates tool_defs via provider.format_tools(tools), and returns the final assistant content string instead of None.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/agent.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/agent.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.agent import sub_agent_loop, _collect_silent_response; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "completed",
+          "notes": "Added _collect_silent_response() and sub_agent_loop() as module-level functions in agent.py. _collect_silent_response() is a silent variant that accumulates content/tool_calls without any stdout/stderr/Spinner I/O. sub_agent_loop() is structurally identical to agent_loop() but uses _collect_silent_response(), provider.format_tools(tools) for tool defs, includes context compaction, handles KeyboardInterrupt and ProviderStreamError gracefully, and returns the final assistant content string. Updated agent_loop() type annotation from OllamaClient to LLMProvider. All 43 existing agent tests pass with no regressions. Verification: import check passes.",
+          "updated_at": "2026-03-08T16:40:43.933336+00:00"
+        },
+        {
+          "id": "subtask-1-3",
+          "description": "Write unit tests for SubAgent and SubAgentResult in tests/test_sub_agent.py. Test SubAgentResult creation, formatting, field access. Test SubAgent initialization with isolated context. Test SubAgent.run() with a mock provider (returns a simple response, no tool calls). Test SubAgent.run() with tool calls (mock provider returns tool call, sub-agent executes tool). Test SubAgent timeout handling. Test SubAgent error handling (provider raises exception).",
+          "service": "local-cli",
+          "files_to_modify": [],
+          "files_to_create": [
+            "tests/test_sub_agent.py"
+          ],
+          "patterns_from": [
+            "tests/test_agent.py",
+            "tests/test_orchestrator.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -m pytest tests/test_sub_agent.py -v --tb=short -q",
+            "expected": "All tests pass"
+          },
+          "status": "completed",
+          "notes": "Created tests/test_sub_agent.py with 65 unit tests covering: SubAgentResult creation/formatting/field access (8 tests), SubAgent initialization with isolated context (10 tests), SubAgent.run() with simple responses (14 tests), SubAgent.run() with tool calls (8 tests), timeout handling (4 tests), error handling (5 tests), _collect_silent_response (7 tests), _generate_agent_id (3 tests), context isolation (3 tests), _SubAgentTimeout exception (2 tests), and test_duration_non_negative. All 65 tests pass. Full regression suite (1032 tests) passes with no regressions.",
+          "updated_at": "2026-03-09T00:00:00.000000+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-2-parallel-execution",
+      "name": "Parallel Execution Manager",
+      "type": "implementation",
+      "description": "Create SubAgentRunner that manages concurrent sub-agent execution via ThreadPoolExecutor. Supports foreground (blocking) and background (non-blocking) execution modes with result collection.",
+      "depends_on": [
+        "phase-1-core-infrastructure"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-2-1",
+          "description": "Add SubAgentRunner class to local_cli/sub_agent.py. Uses ThreadPoolExecutor with configurable max_workers (default 3, capped to min(requested, int(os.environ.get('OLLAMA_NUM_PARALLEL', 4)))). Methods: submit(sub_agent) -> SubAgentResult (blocking), submit_background(sub_agent) -> str (returns agent_id immediately), get_background_result(agent_id) -> SubAgentResult | None, list_background_agents() -> list[dict], shutdown(). Tracks background agents by ID using a dict of Future objects.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/sub_agent.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/session.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.sub_agent import SubAgentRunner; r = SubAgentRunner(max_workers=2); r.shutdown(); print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "completed",
+          "notes": "Added SubAgentRunner class to local_cli/sub_agent.py. Uses ThreadPoolExecutor with configurable max_workers (default 3, capped to min(requested, OLLAMA_NUM_PARALLEL)). Lazy executor creation. Methods: submit() blocks and returns SubAgentResult, submit_background() returns agent_id immediately and tracks Future in _background dict, get_background_result() returns result or None if still running/unknown, list_background_agents() returns status info dicts, shutdown() cleans up executor (safe to call multiple times). Static helper _get_ollama_num_parallel() reads env var with fallback to 4. All 65 existing tests pass. Verification passes.",
+          "updated_at": "2026-03-09T00:00:00.000000+00:00"
+        },
+        {
+          "id": "subtask-2-2",
+          "description": "Write unit tests for SubAgentRunner. Test submit() blocks and returns result. Test submit_background() returns agent_id immediately. Test get_background_result() returns None while running, result when done. Test list_background_agents() returns status info. Test parallel execution (2 agents run concurrently, elapsed time < sum of individual times). Test max_workers cap (respects OLLAMA_NUM_PARALLEL env var). Test shutdown() cleans up executor. Test error handling (sub-agent raises exception, runner returns error result).",
+          "service": "local-cli",
+          "files_to_modify": [
+            "tests/test_sub_agent.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "tests/test_agent.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -m pytest tests/test_sub_agent.py -v --tb=short -q",
+            "expected": "All tests pass"
+          },
+          "status": "pending",
+          "notes": "Use mock SubAgents with predictable run() results and controlled delays (time.sleep in mock). Test concurrent execution by measuring wall-clock time. Use unittest.mock.patch.dict(os.environ, {'OLLAMA_NUM_PARALLEL': '2'}) for env var testing."
+        }
+      ]
+    },
+    {
+      "id": "phase-3-agent-tool",
+      "name": "AgentTool & Tool Registry",
+      "type": "implementation",
+      "description": "Create the AgentTool (LLM-callable tool for spawning sub-agents) and add get_sub_agent_tools() to the tool registry. AgentTool requires constructor injection of runtime dependencies unlike other tools.",
+      "depends_on": [
+        "phase-2-parallel-execution"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-3-1",
+          "description": "Create AgentTool in local_cli/tools/agent_tool.py. Inherits from Tool. Constructor takes runner (SubAgentRunner), provider (LLMProvider), model (str), sub_agent_tools (list[Tool]). Properties: name='agent', description (detailed), parameters (JSON Schema with description, prompt, run_in_background). execute() creates a SubAgent with a fresh LLMProvider instance, submits to runner. Foreground mode: blocks and returns formatted SubAgentResult. Background mode: returns agent_id string.",
+          "service": "local-cli",
+          "files_to_modify": [],
+          "files_to_create": [
+            "local_cli/tools/agent_tool.py"
+          ],
+          "patterns_from": [
+            "local_cli/tools/base.py",
+            "local_cli/tools/bash_tool.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.tools.agent_tool import AgentTool; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "pending",
+          "notes": "Critical: execute() must create a FRESH provider instance for each sub-agent (thread safety). For Ollama, create new OllamaProvider(base_url=...). For Claude, create new ClaudeProvider(). Use provider.name to determine which to create, then call providers.get_provider(). The provider passed to constructor is used as a template (to get its name and config), not shared with sub-agents. Validate prompt is non-empty. Format result as readable string with metadata (status, duration, tool_calls_count)."
+        },
+        {
+          "id": "subtask-3-2",
+          "description": "Add get_sub_agent_tools() function to local_cli/tools/__init__.py. Returns get_default_tools() minus AskUserTool (sub-agents are non-interactive and would block on stdin). AgentTool is NOT included here either (prevents recursive spawning). This function is used when creating sub-agent tool lists.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/tools/__init__.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/tools/__init__.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.tools import get_sub_agent_tools; tools = get_sub_agent_tools(); names = [t.name for t in tools]; assert 'ask_user' not in names; assert 'bash' in names; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "pending",
+          "notes": "Implementation: filter get_default_tools() to exclude AskUserTool. Can use isinstance check or name check. Keep it simple."
+        },
+        {
+          "id": "subtask-3-3",
+          "description": "Write unit tests for AgentTool in tests/test_tools/test_agent_tool.py. Test name returns 'agent'. Test parameters schema is valid JSON Schema with required fields. Test execute() foreground: spawns sub-agent, blocks, returns result string. Test execute() background: returns agent_id immediately. Test that sub-agent's tool list does NOT include AgentTool or AskUserTool. Test empty/invalid prompt returns error string. Test to_ollama_tool() and to_claude_tool() produce valid format. Also test get_sub_agent_tools() excludes AskUserTool.",
+          "service": "local-cli",
+          "files_to_modify": [],
+          "files_to_create": [
+            "tests/test_tools/test_agent_tool.py"
+          ],
+          "patterns_from": [
+            "tests/test_tools/test_bash_tool.py",
+            "tests/test_agent.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -m pytest tests/test_tools/test_agent_tool.py -v --tb=short -q",
+            "expected": "All tests pass"
+          },
+          "status": "pending",
+          "notes": "Follow test_bash_tool.py pattern for metadata tests. Use MagicMock for runner and provider. Verify execute() creates SubAgent with correct parameters. Verify result string contains status and content."
+        }
+      ]
+    },
+    {
+      "id": "phase-4-orchestrator-cli",
+      "name": "Orchestrator & CLI Integration",
+      "type": "implementation",
+      "description": "Wire SubAgentRunner into Orchestrator, create AgentTool with constructor injection in CLI, and add the tool to the main agent's tool list. This phase connects all the pieces.",
+      "depends_on": [
+        "phase-3-agent-tool"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-4-1",
+          "description": "Add sub-agent support to Orchestrator in local_cli/orchestrator.py. Add _sub_agent_runner attribute (SubAgentRunner, lazily created). Add spawn_agent(prompt, description, model=None, run_in_background=False) convenience method that creates a SubAgent using the active provider and model, submits to runner. Add get_background_result(agent_id) delegation. Add create_fresh_provider() method that creates a NEW provider instance (not cached) for sub-agent thread safety. Add shutdown_agents() for cleanup.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/orchestrator.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/orchestrator.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.orchestrator import Orchestrator; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "pending",
+          "notes": "create_fresh_provider() is key: unlike get_provider() which caches, this creates a new instance every time. It uses _create_provider() internally but does NOT add to the cache. This ensures each sub-agent thread gets its own OllamaClient/provider instance. spawn_agent() uses get_sub_agent_tools() for sub-agent tools."
+        },
+        {
+          "id": "subtask-4-2",
+          "description": "Wire SubAgentRunner and AgentTool creation in local_cli/cli.py and local_cli/__main__.py. In __main__.py: after creating orchestrator, create SubAgentRunner and AgentTool with constructor injection (runner, provider from orchestrator, model from config, sub_agent_tools from get_sub_agent_tools()). Append AgentTool to the tools list before passing to run_repl(). Add /agents slash command to _SLASH_COMMANDS and _handle_slash_command for listing background agent status.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/cli.py",
+            "local_cli/__main__.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/cli.py",
+            "local_cli/__main__.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.cli import _SLASH_COMMANDS; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "pending",
+          "notes": "AgentTool is created in __main__.py (not in tools/__init__.py) because it requires runtime dependencies. The tool is appended to the tools list after get_default_tools(). The /agents command shows background agent status from SubAgentRunner.list_background_agents(). Keep __main__.py changes minimal — create runner/tool, append to list."
+        },
+        {
+          "id": "subtask-4-3",
+          "description": "Write integration tests verifying the full wiring. Test Orchestrator.spawn_agent() end-to-end with mock provider. Test that create_fresh_provider() returns a new instance each time. Test agent_loop with AgentTool (mock LLM calls agent tool, sub-agent executes, result flows back). Test multiple parallel agents via Orchestrator (3 agents run concurrently, all results collected).",
+          "service": "local-cli",
+          "files_to_modify": [
+            "tests/test_sub_agent.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "tests/test_orchestrator.py",
+            "tests/test_agent.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -m pytest tests/test_sub_agent.py tests/test_tools/test_agent_tool.py -v --tb=short -q",
+            "expected": "All tests pass"
+          },
+          "status": "pending",
+          "notes": "Integration tests go in test_sub_agent.py in a separate TestOrchestratorIntegration class. Use _make_config() pattern from test_orchestrator.py. Mock the provider to return predictable responses. Verify result aggregation works correctly."
+        }
+      ]
+    },
+    {
+      "id": "phase-5-hardening",
+      "name": "Worktree Isolation & Hardening",
+      "type": "implementation",
+      "description": "Add optional git worktree isolation per sub-agent, Ollama 503 retry logic, concurrency limit enforcement, and comprehensive edge case tests.",
+      "depends_on": [
+        "phase-4-orchestrator-cli"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-5-1",
+          "description": "Add optional git worktree isolation to SubAgent. When isolation='worktree' is set, SubAgent.run() creates a temporary git worktree (serialized in main thread via SubAgentRunner), runs the agent loop in that worktree directory, and cleans up after completion. Uses subprocess.run(['git', 'worktree', 'add', ...]) following git_ops.py patterns. Worktree creation MUST be serialized (not concurrent) to avoid races on shared .git directory. Add worktree_path to SubAgentResult for changed worktrees.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/sub_agent.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/git_ops.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.sub_agent import SubAgent; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "pending",
+          "notes": "Worktree lifecycle: (1) SubAgentRunner serializes worktree creation in main thread before submitting to executor, (2) SubAgent.run() changes to worktree directory, (3) After completion, if no changes detected, remove worktree. Use tempfile for worktree directory naming. Handle cleanup failures gracefully (log warning, don't fail)."
+        },
+        {
+          "id": "subtask-5-2",
+          "description": "Add Ollama 503 retry logic and concurrency safeguards. In sub_agent_loop() or SubAgent.run(), catch HTTP 503 errors from provider and retry with exponential backoff (1s, 2s, 4s, max 3 retries). Add warning when spawning more agents than OLLAMA_NUM_PARALLEL. Add KeyboardInterrupt handling in SubAgentRunner — cancel pending futures, return partial results for completed agents.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "local_cli/sub_agent.py",
+            "local_cli/agent.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "local_cli/ollama_client.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -c \"from local_cli.sub_agent import SubAgentRunner; from local_cli.agent import sub_agent_loop; print('OK')\"",
+            "expected": "OK"
+          },
+          "status": "pending",
+          "notes": "503 retry should be in sub_agent_loop (wrapping the provider.chat_stream call). Use time.sleep for backoff. Check OllamaClient for existing HTTP error patterns — OllamaRequestError with status code. The retry logic should be a helper function _retry_on_overload(callable, max_retries=3)."
+        },
+        {
+          "id": "subtask-5-3",
+          "description": "Write comprehensive edge case tests. Test recursive agent spawning blocked (sub-agent tools don't include AgentTool). Test sub-agent timeout returns partial results. Test sub-agent crash (exception) returns error status without crashing main. Test Ollama 503 retry with backoff (mock 503 then success). Test all sub-agents fail (main agent receives error results). Test background agent completion polling. Test KeyboardInterrupt during sub-agent. Test empty/invalid prompt validation. Test git worktree cleanup failure (log warning, don't fail). Test concurrent worktree creation serialized correctly.",
+          "service": "local-cli",
+          "files_to_modify": [
+            "tests/test_sub_agent.py",
+            "tests/test_tools/test_agent_tool.py"
+          ],
+          "files_to_create": [],
+          "patterns_from": [
+            "tests/test_agent.py"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "python -m pytest tests/test_sub_agent.py tests/test_tools/test_agent_tool.py -v --tb=short -q",
+            "expected": "All tests pass"
+          },
+          "status": "pending",
+          "notes": "Focus on edge cases from spec: recursive spawning prevention, timeout handling, crash isolation, 503 retry, KeyboardInterrupt propagation, worktree cleanup. Use unittest.mock for controlled failure scenarios."
+        }
+      ]
+    },
+    {
+      "id": "phase-6-regression",
+      "name": "Regression Verification",
+      "type": "integration",
+      "description": "Verify all existing tests still pass and the new components integrate correctly end-to-end. No regressions in the existing 389+ tests.",
+      "depends_on": [
+        "phase-5-hardening"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-6-1",
+          "description": "Run full test suite to verify no regressions. All 389+ existing tests must still pass. All new tests must pass. Verify no external dependencies introduced (check imports). Verify sub-agents have isolated contexts (verified by test inspection).",
+          "service": "local-cli",
+          "files_to_modify": [],
+          "files_to_create": [],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "python -m pytest tests/ -v --tb=short",
+            "expected": "All tests pass including existing 389+ tests and all new tests"
+          },
+          "status": "pending",
+          "notes": "This is the final verification step. If any existing test fails, the regression must be fixed before the task is considered complete. Check that agent_loop() type annotation change from OllamaClient to LLMProvider does not break any existing test mocking patterns."
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total_phases": 6,
+    "total_subtasks": 15,
+    "services_involved": [
+      "local-cli"
+    ],
+    "parallelism": {
+      "max_parallel_phases": 1,
+      "parallel_groups": [],
+      "recommended_workers": 1,
+      "speedup_estimate": "Sequential — single service with strong inter-phase dependencies"
+    },
+    "startup_command": "source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 007 --parallel 1"
+  },
+  "verification_strategy": {
+    "risk_level": "high",
+    "skip_validation": false,
+    "test_creation_phase": "inline_with_implementation",
+    "test_types_required": [
+      "unit",
+      "integration",
+      "e2e"
+    ],
+    "security_scanning_required": false,
+    "staging_deployment_required": false,
+    "acceptance_criteria": [
+      "All existing 389+ tests pass (no regressions)",
+      "SubAgent can independently execute a task with isolated context",
+      "SubAgentRunner can run multiple sub-agents in parallel via ThreadPoolExecutor",
+      "AgentTool is available as a tool the LLM can call to spawn sub-agents",
+      "Foreground sub-agents block and return results; background agents return immediately with ID",
+      "Sub-agent results are properly formatted and returned to the main agent",
+      "Recursive agent spawning is prevented (no AgentTool or AskUserTool in sub-agents)",
+      "Ollama 503 errors are handled with retry/backoff",
+      "Git worktree isolation works for sub-agents that request it",
+      "No external dependencies added (stdlib only)",
+      "New tests cover all new components"
+    ],
+    "verification_steps": [
+      {
+        "name": "Unit Tests - SubAgent",
+        "command": "python -m pytest tests/test_sub_agent.py -v --tb=short",
+        "expected_outcome": "All SubAgent and SubAgentRunner tests pass",
+        "type": "test",
+        "required": true,
+        "blocking": true
+      },
+      {
+        "name": "Unit Tests - AgentTool",
+        "command": "python -m pytest tests/test_tools/test_agent_tool.py -v --tb=short",
+        "expected_outcome": "All AgentTool tests pass",
+        "type": "test",
+        "required": true,
+        "blocking": true
+      },
+      {
+        "name": "Full Regression Suite",
+        "command": "python -m pytest tests/ -v --tb=short",
+        "expected_outcome": "All 389+ existing tests and all new tests pass",
+        "type": "test",
+        "required": true,
+        "blocking": true
+      },
+      {
+        "name": "Import Check - No External Dependencies",
+        "command": "python -c \"import local_cli.sub_agent; import local_cli.tools.agent_tool; print('OK')\"",
+        "expected_outcome": "Imports succeed with stdlib only",
+        "type": "test",
+        "required": true,
+        "blocking": true
+      }
+    ],
+    "reasoning": "High risk architectural change affecting core agent loop and orchestration layer. Requires comprehensive unit testing for new modules, integration tests for multi-agent coordination, and full regression suite verification."
+  },
+  "qa_acceptance": {
+    "unit_tests": {
+      "required": true,
+      "commands": [
+        "python -m pytest tests/test_sub_agent.py -v",
+        "python -m pytest tests/test_tools/test_agent_tool.py -v"
+      ],
+      "minimum_coverage": null
+    },
+    "integration_tests": {
+      "required": true,
+      "commands": [
+        "python -m pytest tests/test_sub_agent.py -v -k 'integration or Integration'"
+      ],
+      "services_to_test": [
+        "local-cli"
+      ]
+    },
+    "e2e_tests": {
+      "required": true,
+      "commands": [
+        "python -m pytest tests/ -v --tb=short"
+      ],
+      "flows": [
+        "sub-agent-spawn-and-return",
+        "background-agent-polling",
+        "parallel-execution",
+        "worktree-isolation"
+      ]
+    },
+    "browser_verification": {
+      "required": false,
+      "pages": []
+    },
+    "database_verification": {
+      "required": false,
+      "checks": []
+    }
+  },
+  "qa_signoff": null,
+  "status": "in_progress",
+  "planStatus": "in_progress",
+  "xstateState": "coding",
+  "executionPhase": "coding",
+  "updated_at": "2026-03-08T16:45:46.959Z",
+  "lastEvent": {
+    "eventId": "2e59f469-7508-496e-8e84-d9593fc51983",
+    "sequence": 0,
+    "type": "PLANNING_COMPLETE",
+    "timestamp": "2026-03-08T16:31:23.314833+00:00"
+  },
+  "last_updated": "2026-03-08T16:40:43.933341+00:00"
+}
