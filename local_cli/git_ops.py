@@ -290,6 +290,137 @@ class GitOps:
             )
         return msg
 
+    def diff_working_tree(
+        self,
+        color: bool = True,
+        max_lines: int = 500,
+    ) -> str:
+        """Generate a unified diff of all uncommitted changes.
+
+        Collects modified (unstaged + staged) and untracked files, then
+        produces a unified diff using :mod:`local_cli.diff_preview`.
+        Binary files are represented with a placeholder string.
+
+        Args:
+            color: Whether to apply ANSI colour codes to the output.
+            max_lines: Maximum number of output lines before truncation.
+                Set to ``0`` to disable truncation.
+
+        Returns:
+            A formatted diff string, or a message indicating no changes.
+
+        Raises:
+            GitNotInstalledError: If git is not available.
+            GitError: If a git command fails unexpectedly.
+        """
+        from local_cli.diff_preview import (
+            binary_file_placeholder,
+            generate_multi_file_diff,
+            is_binary_content,
+        )
+
+        # Collect unstaged changes.
+        unstaged_result = self._run_git("diff", "--name-only")
+        unstaged_files = [
+            f.strip()
+            for f in unstaged_result.stdout.splitlines()
+            if f.strip()
+        ]
+
+        # Collect staged changes.
+        staged_result = self._run_git("diff", "--name-only", "--cached")
+        staged_files = [
+            f.strip()
+            for f in staged_result.stdout.splitlines()
+            if f.strip()
+        ]
+
+        # Collect untracked files.
+        untracked_result = self._run_git(
+            "ls-files", "--others", "--exclude-standard"
+        )
+        untracked_files = [
+            f.strip()
+            for f in untracked_result.stdout.splitlines()
+            if f.strip()
+        ]
+        untracked_set: set[str] = set(untracked_files)
+
+        # Combine unique changed files (preserving order).
+        seen: set[str] = set()
+        changed_files: list[str] = []
+        for f in unstaged_files + staged_files + untracked_files:
+            if f not in seen:
+                seen.add(f)
+                changed_files.append(f)
+
+        if not changed_files:
+            return "No uncommitted changes."
+
+        # Build file_changes for the diff generator.
+        file_changes: list[tuple[str, list[str], list[str]]] = []
+        binary_parts: list[str] = []
+
+        for file_path in changed_files:
+            # Read current working tree version as raw bytes.
+            try:
+                with open(file_path, "rb") as fh:
+                    current_bytes = fh.read()
+            except (FileNotFoundError, OSError):
+                # File was deleted from the working tree.
+                current_bytes = b""
+
+            # Check if current version is binary.
+            if current_bytes and is_binary_content(current_bytes):
+                binary_parts.append(binary_file_placeholder(file_path))
+                continue
+
+            # Determine HEAD version.
+            if file_path in untracked_set:
+                # New untracked file — no HEAD version.
+                head_lines: list[str] = []
+            else:
+                try:
+                    head_result = self._run_git(
+                        "show", f"HEAD:{file_path}"
+                    )
+                    head_lines = head_result.stdout.splitlines()
+                except GitError:
+                    # File may not exist in HEAD (newly added to index).
+                    head_lines = []
+                except UnicodeDecodeError:
+                    # HEAD version is binary.
+                    binary_parts.append(
+                        binary_file_placeholder(file_path)
+                    )
+                    continue
+
+            # Decode current bytes to text lines.
+            try:
+                current_text = current_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                current_text = current_bytes.decode(
+                    "utf-8", errors="replace"
+                )
+
+            current_lines = current_text.splitlines()
+
+            file_changes.append((file_path, head_lines, current_lines))
+
+        # Generate the combined diff.
+        diff_output = generate_multi_file_diff(
+            file_changes, color=color, max_lines=max_lines
+        )
+
+        # Append binary file placeholders.
+        if binary_parts:
+            diff_output += "".join(binary_parts)
+
+        if not diff_output:
+            return "No uncommitted changes."
+
+        return diff_output
+
     def rollback_to_checkpoint(self, tag: str) -> None:
         """Roll back the repository to a checkpoint tag.
 

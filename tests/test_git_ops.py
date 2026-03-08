@@ -550,5 +550,383 @@ class TestGitOpsIntegration(unittest.TestCase):
                 os.chdir(original_cwd)
 
 
+# ---------------------------------------------------------------------------
+# Tests: diff_working_tree()
+# ---------------------------------------------------------------------------
+
+
+class TestDiffWorkingTree(unittest.TestCase):
+    """Tests for GitOps.diff_working_tree()."""
+
+    def test_diff_no_changes(self) -> None:
+        """diff_working_tree() returns message when there are no changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+                result = ops.diff_working_tree()
+                self.assertEqual(result, "No uncommitted changes.")
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_unstaged_modification(self) -> None:
+        """diff_working_tree() shows unstaged modifications."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Modify the committed README.
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("Modified content\n")
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("README.md", result)
+                self.assertIn("-# Test Repo", result)
+                self.assertIn("+Modified content", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_staged_modification(self) -> None:
+        """diff_working_tree() shows staged modifications."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Modify and stage the README.
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("Staged change\n")
+                subprocess.run(
+                    ["git", "add", "README.md"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("README.md", result)
+                self.assertIn("-# Test Repo", result)
+                self.assertIn("+Staged change", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_untracked_file(self) -> None:
+        """diff_working_tree() shows new untracked files as additions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Create a new untracked file.
+                new_file = os.path.join(tmpdir, "new_file.txt")
+                with open(new_file, "w") as f:
+                    f.write("new content\n")
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("new_file.txt", result)
+                self.assertIn("+new content", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_deleted_file(self) -> None:
+        """diff_working_tree() shows deleted files as all removals."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Delete the README.
+                readme = os.path.join(tmpdir, "README.md")
+                os.remove(readme)
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("README.md", result)
+                self.assertIn("-# Test Repo", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_multiple_files(self) -> None:
+        """diff_working_tree() includes all changed files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Create and commit a second file.
+                file_b = os.path.join(tmpdir, "file_b.txt")
+                with open(file_b, "w") as f:
+                    f.write("original B\n")
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", "add file_b"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                # Modify both files.
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("changed readme\n")
+                with open(file_b, "w") as f:
+                    f.write("changed B\n")
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("README.md", result)
+                self.assertIn("file_b.txt", result)
+                self.assertIn("+changed readme", result)
+                self.assertIn("+changed B", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_binary_file_placeholder(self) -> None:
+        """diff_working_tree() shows placeholder for binary files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Create a binary file (contains null bytes).
+                bin_file = os.path.join(tmpdir, "image.bin")
+                with open(bin_file, "wb") as f:
+                    f.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("[binary file: image.bin]", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_color_disabled(self) -> None:
+        """diff_working_tree(color=False) omits ANSI escape codes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("modified\n")
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertNotIn("\033[", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_color_enabled(self) -> None:
+        """diff_working_tree(color=True) includes ANSI escape codes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("modified\n")
+
+                result = ops.diff_working_tree(color=True)
+
+                self.assertIn("\033[", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_truncation(self) -> None:
+        """diff_working_tree() truncates large diffs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Create a file with many lines.
+                big_file = os.path.join(tmpdir, "big.txt")
+                with open(big_file, "w") as f:
+                    for i in range(200):
+                        f.write(f"line {i}\n")
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", "add big file"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                # Modify every line.
+                with open(big_file, "w") as f:
+                    for i in range(200):
+                        f.write(f"changed {i}\n")
+
+                result = ops.diff_working_tree(color=False, max_lines=10)
+
+                self.assertIn("... truncated", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_outside_git_repo_raises(self) -> None:
+        """diff_working_tree() raises GitError outside a git repository."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+                with self.assertRaises(GitError):
+                    ops.diff_working_tree()
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_mixed_staged_unstaged_and_untracked(self) -> None:
+        """diff_working_tree() handles mix of staged, unstaged, and untracked."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Create and commit a second file.
+                file_b = os.path.join(tmpdir, "file_b.txt")
+                with open(file_b, "w") as f:
+                    f.write("original B\n")
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", "add file_b"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                # Staged change to README.
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("staged readme\n")
+                subprocess.run(
+                    ["git", "add", "README.md"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                # Unstaged change to file_b.
+                with open(file_b, "w") as f:
+                    f.write("unstaged B\n")
+
+                # New untracked file.
+                new_file = os.path.join(tmpdir, "new.txt")
+                with open(new_file, "w") as f:
+                    f.write("brand new\n")
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("README.md", result)
+                self.assertIn("file_b.txt", result)
+                self.assertIn("new.txt", result)
+                self.assertIn("+staged readme", result)
+                self.assertIn("+unstaged B", result)
+                self.assertIn("+brand new", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_newly_staged_file(self) -> None:
+        """diff_working_tree() shows files staged for the first time."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Create a new file and stage it (not committed).
+                new_file = os.path.join(tmpdir, "added.txt")
+                with open(new_file, "w") as f:
+                    f.write("newly added\n")
+                subprocess.run(
+                    ["git", "add", "added.txt"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+
+                result = ops.diff_working_tree(color=False)
+
+                self.assertIn("added.txt", result)
+                self.assertIn("+newly added", result)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_diff_deduplicates_files(self) -> None:
+        """Files appearing in both staged and unstaged are only shown once."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _init_temp_repo(tmpdir)
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                ops = GitOps()
+
+                # Stage a change, then modify again (appears in both lists).
+                readme = os.path.join(tmpdir, "README.md")
+                with open(readme, "w") as f:
+                    f.write("staged version\n")
+                subprocess.run(
+                    ["git", "add", "README.md"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                with open(readme, "w") as f:
+                    f.write("unstaged version\n")
+
+                result = ops.diff_working_tree(color=False)
+
+                # The file header should appear once.
+                # Count occurrences of the file in diff headers.
+                count = result.count("--- a/README.md")
+                self.assertEqual(count, 1)
+            finally:
+                os.chdir(original_cwd)
+
+
 if __name__ == "__main__":
     unittest.main()
