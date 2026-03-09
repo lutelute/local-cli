@@ -28,7 +28,12 @@
 <p align="center">
   <img src="assets/demo-2048-game.gif" alt="2048 game created by Local CLI" width="400"/>
 </p>
-<p align="center"><em>The resulting game — fully playable in the browser</em></p>
+<p align="center"><em>The resulting game — plays until game over</em></p>
+
+<p align="center">
+  <img src="assets/demo-2048-solver.gif" alt="AI creates 2048 solver" width="700"/>
+</p>
+<p align="center"><em>AI writes a solver with 3 strategies: Random → Heuristic (3.7x) → Lookahead (5.3x)</em></p>
 
 ---
 
