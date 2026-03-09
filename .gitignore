@@ -43,3 +43,8 @@ Thumbs.db
 desktop/node_modules/
 desktop/dist/
 desktop/dist-electron/
+
+node_modules/
+.agents/
+package-lock.json
+package.json
