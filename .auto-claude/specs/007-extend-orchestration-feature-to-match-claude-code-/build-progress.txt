@@ -1,0 +1,98 @@
+=== AUTO-BUILD PROGRESS ===
+
+Project: Multi-Agent System (Claude Code Teams Parity)
+Spec: 007-extend-orchestration-feature-to-match-claude-code-
+Started: 2026-03-09
+
+Workflow Type: feature
+Rationale: New capability (sub-agent spawning, parallel execution, result aggregation)
+           added as a layer on top of existing Orchestrator model-routing logic.
+
+Session 1 (Planner):
+- Created implementation_plan.json
+- Phases: 6
+- Total subtasks: 15
+- Created init.sh
+- Updated project_index.json with detailed project info
+- Updated context.json with patterns and constraints
+
+Phase Summary:
+- Phase 1 (Core Sub-Agent Infrastructure): 3 subtasks, no dependencies
+  - subtask-1-1: Create SubAgentResult + SubAgent in sub_agent.py
+  - subtask-1-2: Add sub_agent_loop() + _collect_silent_response() to agent.py
+  - subtask-1-3: Write unit tests for SubAgent/SubAgentResult
+
+- Phase 2 (Parallel Execution Manager): 2 subtasks, depends on Phase 1
+  - subtask-2-1: Create SubAgentRunner with ThreadPoolExecutor
+  - subtask-2-2: Write unit tests for SubAgentRunner
+
+- Phase 3 (AgentTool & Tool Registry): 3 subtasks, depends on Phase 2
+  - subtask-3-1: Create AgentTool in tools/agent_tool.py
+  - subtask-3-2: Add get_sub_agent_tools() to tools/__init__.py
+  - subtask-3-3: Write unit tests for AgentTool
+
+- Phase 4 (Orchestrator & CLI Integration): 3 subtasks, depends on Phase 3
+  - subtask-4-1: Add sub-agent support to Orchestrator
+  - subtask-4-2: Wire SubAgentRunner + AgentTool in cli.py/__main__.py
+  - subtask-4-3: Write integration tests
+
+- Phase 5 (Worktree Isolation & Hardening): 3 subtasks, depends on Phase 4
+  - subtask-5-1: Add git worktree isolation to SubAgent
+  - subtask-5-2: Add Ollama 503 retry logic + concurrency safeguards
+  - subtask-5-3: Write edge case tests
+
+- Phase 6 (Regression Verification): 1 subtask, depends on Phase 5
+  - subtask-6-1: Run full test suite (389+ existing + all new)
+
+Services Involved:
+- local-cli: Python 3.10+ CLI application (stdlib only)
+
+Files to Create:
+- local_cli/sub_agent.py (SubAgent, SubAgentRunner, SubAgentResult)
+- local_cli/tools/agent_tool.py (AgentTool)
+- tests/test_sub_agent.py (unit + integration tests)
+- tests/test_tools/test_agent_tool.py (AgentTool tests)
+
+Files to Modify:
+- local_cli/agent.py (add sub_agent_loop, _collect_silent_response)
+- local_cli/orchestrator.py (add spawn_agent, create_fresh_provider)
+- local_cli/tools/__init__.py (add get_sub_agent_tools)
+- local_cli/cli.py (add /agents command)
+- local_cli/__main__.py (wire SubAgentRunner + AgentTool)
+
+Parallelism Analysis:
+- Max parallel phases: 1 (sequential — single service, strong dependencies)
+- Recommended workers: 1
+- No parallel groups (each phase depends on the previous)
+
+Key Design Decisions:
+- ThreadPoolExecutor (not ProcessPoolExecutor) — I/O-bound, avoids pickling
+- Each sub-agent gets own messages list + own LLMProvider instance
+- Sub-agents exclude AgentTool (no recursion) and AskUserTool (no stdin)
+- AgentTool uses constructor injection (unlike other no-arg tools)
+- Silent agent loop variant (_collect_silent_response) for sub-agents
+- max_workers capped to min(requested, OLLAMA_NUM_PARALLEL or 4)
+
+=== STARTUP COMMAND ===
+
+To continue building this spec, run:
+
+  source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 007 --parallel 1
+
+=== END SESSION 1 ===
+
+=== SESSION: subtask-2-1 (Coder) ===
+
+subtask-2-1: Add SubAgentRunner class to local_cli/sub_agent.py
+- Status: COMPLETED
+- Added SubAgentRunner class with ThreadPoolExecutor
+- Methods: submit() (blocking), submit_background() (returns agent_id),
+  get_background_result(), list_background_agents(), shutdown()
+- Lazy executor creation (_ensure_executor)
+- max_workers capped to min(requested, OLLAMA_NUM_PARALLEL or 4)
+- Static _get_ollama_num_parallel() with fallback for invalid env values
+- All 65 existing sub_agent tests pass (no regressions)
+- Verification: import + basic lifecycle test passes
+- Committed: 84766e1
+
+=== END subtask-2-1 ===
