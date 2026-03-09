@@ -23,7 +23,12 @@
 <p align="center">
   <img src="assets/demo-2048.gif" alt="Building 2048 with Local CLI" width="700"/>
 </p>
-<p align="center"><em>AI agent autonomously creates a 2048 game — write, read, edit tools in action</em></p>
+<p align="center"><em>AI agent autonomously creates a 2048 game — write tool in action</em></p>
+
+<p align="center">
+  <img src="assets/demo-2048-game.gif" alt="2048 game created by Local CLI" width="400"/>
+</p>
+<p align="center"><em>The resulting game — fully playable in the browser</em></p>
 
 ---
 
