@@ -15,6 +15,10 @@ class GrepTool(Tool):
     """Search file contents using regular expressions."""
 
     @property
+    def cacheable(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "grep"
 

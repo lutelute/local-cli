@@ -421,5 +421,271 @@ class TestSessionRoundTrip(unittest.TestCase):
             self.assertIn(sid, sessions)
 
 
+class TestSaveSessionWithTokenUsage(unittest.TestCase):
+    """Tests for SessionManager.save_session() with token_tracker parameter."""
+
+    def _make_tracker(self, records: list[dict]) -> "TokenTracker":
+        """Create a TokenTracker with pre-populated records."""
+        from local_cli.token_tracker import TokenTracker, TokenUsage
+
+        tracker = TokenTracker()
+        for rec in records:
+            usage = TokenUsage(
+                input_tokens=rec.get("input_tokens", 0),
+                output_tokens=rec.get("output_tokens", 0),
+                provider=rec.get("provider", "ollama"),
+            )
+            tracker.record(usage)
+        return tracker
+
+    def test_token_usage_embedded_in_assistant_messages(self) -> None:
+        """Assistant messages get token_usage when tracker is provided."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ]
+            tracker = self._make_tracker([
+                {"input_tokens": 100, "output_tokens": 50, "provider": "ollama"},
+            ])
+            mgr.save_session(messages, session_id="tok-test", token_tracker=tracker)
+
+            loaded = mgr.load_session("tok-test")
+            # The assistant message should have token_usage.
+            assistant_msg = loaded[2]
+            self.assertIn("token_usage", assistant_msg)
+            self.assertEqual(assistant_msg["token_usage"]["input_tokens"], 100)
+            self.assertEqual(assistant_msg["token_usage"]["output_tokens"], 50)
+            self.assertEqual(assistant_msg["token_usage"]["total_tokens"], 150)
+            self.assertEqual(assistant_msg["token_usage"]["provider"], "ollama")
+
+    def test_system_and_user_messages_not_enriched(self) -> None:
+        """Non-assistant messages are not modified by token tracking."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "system", "content": "Sys prompt"},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ]
+            tracker = self._make_tracker([
+                {"input_tokens": 10, "output_tokens": 5},
+            ])
+            mgr.save_session(messages, session_id="no-enrich", token_tracker=tracker)
+
+            loaded = mgr.load_session("no-enrich")
+            self.assertNotIn("token_usage", loaded[0])  # system
+            self.assertNotIn("token_usage", loaded[1])  # user
+
+    def test_multiple_assistant_messages_matched_in_order(self) -> None:
+        """Each assistant message gets the corresponding tracker record."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "user", "content": "Q1"},
+                {"role": "assistant", "content": "A1"},
+                {"role": "user", "content": "Q2"},
+                {"role": "assistant", "content": "A2"},
+            ]
+            tracker = self._make_tracker([
+                {"input_tokens": 10, "output_tokens": 20, "provider": "ollama"},
+                {"input_tokens": 30, "output_tokens": 40, "provider": "claude"},
+            ])
+            mgr.save_session(messages, session_id="multi", token_tracker=tracker)
+
+            loaded = mgr.load_session("multi")
+            self.assertEqual(loaded[1]["token_usage"]["input_tokens"], 10)
+            self.assertEqual(loaded[1]["token_usage"]["provider"], "ollama")
+            self.assertEqual(loaded[3]["token_usage"]["input_tokens"], 30)
+            self.assertEqual(loaded[3]["token_usage"]["provider"], "claude")
+
+    def test_more_assistant_messages_than_records(self) -> None:
+        """Extra assistant messages beyond tracker records have no token_usage."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "user", "content": "Q1"},
+                {"role": "assistant", "content": "A1"},
+                {"role": "user", "content": "Q2"},
+                {"role": "assistant", "content": "A2"},
+            ]
+            tracker = self._make_tracker([
+                {"input_tokens": 5, "output_tokens": 10},
+            ])
+            mgr.save_session(messages, session_id="extra", token_tracker=tracker)
+
+            loaded = mgr.load_session("extra")
+            self.assertIn("token_usage", loaded[1])  # First assistant has it
+            self.assertNotIn("token_usage", loaded[3])  # Second does not
+
+    def test_no_tracker_means_no_token_usage(self) -> None:
+        """Without a tracker, messages are saved without token_usage."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ]
+            mgr.save_session(messages, session_id="no-tracker")
+
+            loaded = mgr.load_session("no-tracker")
+            self.assertNotIn("token_usage", loaded[1])
+
+    def test_caller_messages_not_mutated(self) -> None:
+        """The caller's message list is not modified by save_session."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ]
+            tracker = self._make_tracker([
+                {"input_tokens": 100, "output_tokens": 50},
+            ])
+
+            # Save a copy to verify the original is unchanged.
+            original_assistant = dict(messages[1])
+            mgr.save_session(messages, session_id="no-mutate", token_tracker=tracker)
+
+            # Original message should NOT have token_usage.
+            self.assertEqual(messages[1], original_assistant)
+            self.assertNotIn("token_usage", messages[1])
+
+    def test_backward_compat_old_sessions_load_without_token_usage(self) -> None:
+        """Sessions saved without token_usage load fine (backward compat)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            # Save without tracker.
+            messages = [
+                {"role": "user", "content": "Old format"},
+                {"role": "assistant", "content": "Old response"},
+            ]
+            mgr.save_session(messages, session_id="old-format")
+
+            # Load should work with all fields intact, no errors.
+            loaded = mgr.load_session("old-format")
+            self.assertEqual(len(loaded), 2)
+            self.assertEqual(loaded[1]["content"], "Old response")
+            self.assertNotIn("token_usage", loaded[1])
+
+    def test_token_usage_round_trip_with_tool_messages(self) -> None:
+        """Token usage is correctly embedded even with tool messages present."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "system", "content": "Sys"},
+                {"role": "user", "content": "Read file"},
+                {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read"}}]},
+                {"role": "tool", "tool_name": "read", "content": "data"},
+                {"role": "assistant", "content": "Here is the file."},
+                {"role": "user", "content": "Thanks"},
+                {"role": "assistant", "content": "You're welcome!"},
+            ]
+            tracker = self._make_tracker([
+                {"input_tokens": 50, "output_tokens": 10, "provider": "ollama"},
+                {"input_tokens": 80, "output_tokens": 30, "provider": "ollama"},
+                {"input_tokens": 90, "output_tokens": 15, "provider": "ollama"},
+            ])
+            mgr.save_session(messages, session_id="tool-round", token_tracker=tracker)
+
+            loaded = mgr.load_session("tool-round")
+            # 3 assistant messages, each gets a token_usage.
+            self.assertEqual(loaded[2]["token_usage"]["input_tokens"], 50)
+            self.assertEqual(loaded[4]["token_usage"]["input_tokens"], 80)
+            self.assertEqual(loaded[6]["token_usage"]["input_tokens"], 90)
+
+            # Non-assistant messages should not have token_usage.
+            self.assertNotIn("token_usage", loaded[0])  # system
+            self.assertNotIn("token_usage", loaded[1])  # user
+            self.assertNotIn("token_usage", loaded[3])  # tool
+
+    def test_empty_tracker_no_enrichment(self) -> None:
+        """An empty tracker does not add token_usage to any message."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = SessionManager(tmpdir)
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ]
+            tracker = self._make_tracker([])
+            mgr.save_session(messages, session_id="empty-tracker", token_tracker=tracker)
+
+            loaded = mgr.load_session("empty-tracker")
+            self.assertNotIn("token_usage", loaded[1])
+
+
+class TestReplContextTokenTrackerAndToolCache(unittest.TestCase):
+    """Tests for _ReplContext token_tracker and tool_cache attributes."""
+
+    def test_repl_context_has_token_tracker_slot(self) -> None:
+        """_ReplContext includes token_tracker in __slots__."""
+        from local_cli.cli import _ReplContext
+
+        self.assertIn("token_tracker", _ReplContext.__slots__)
+
+    def test_repl_context_has_tool_cache_slot(self) -> None:
+        """_ReplContext includes tool_cache in __slots__."""
+        from local_cli.cli import _ReplContext
+
+        self.assertIn("tool_cache", _ReplContext.__slots__)
+
+    def test_repl_context_defaults_to_none(self) -> None:
+        """token_tracker and tool_cache default to None."""
+        from unittest.mock import MagicMock
+
+        from local_cli.cli import _ReplContext
+
+        ctx = _ReplContext(
+            config=MagicMock(),
+            client=MagicMock(),
+            tools=[],
+            messages=[],
+            session_manager=MagicMock(),
+            system_prompt="",
+        )
+        self.assertIsNone(ctx.token_tracker)
+        self.assertIsNone(ctx.tool_cache)
+
+    def test_repl_context_accepts_token_tracker(self) -> None:
+        """_ReplContext can be constructed with a token_tracker."""
+        from unittest.mock import MagicMock
+
+        from local_cli.cli import _ReplContext
+        from local_cli.token_tracker import TokenTracker
+
+        tracker = TokenTracker()
+        ctx = _ReplContext(
+            config=MagicMock(),
+            client=MagicMock(),
+            tools=[],
+            messages=[],
+            session_manager=MagicMock(),
+            system_prompt="",
+            token_tracker=tracker,
+        )
+        self.assertIs(ctx.token_tracker, tracker)
+
+    def test_repl_context_accepts_tool_cache(self) -> None:
+        """_ReplContext can be constructed with a tool_cache."""
+        from unittest.mock import MagicMock
+
+        from local_cli.cli import _ReplContext
+        from local_cli.tool_cache import ToolCache
+
+        cache = ToolCache()
+        ctx = _ReplContext(
+            config=MagicMock(),
+            client=MagicMock(),
+            tools=[],
+            messages=[],
+            session_manager=MagicMock(),
+            system_prompt="",
+            tool_cache=cache,
+        )
+        self.assertIs(ctx.tool_cache, cache)
+
+
 if __name__ == "__main__":
     unittest.main()

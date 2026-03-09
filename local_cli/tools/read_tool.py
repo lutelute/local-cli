@@ -14,6 +14,10 @@ class ReadTool(Tool):
     """Read the contents of a file and return it with line numbers."""
 
     @property
+    def cacheable(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "read"
 

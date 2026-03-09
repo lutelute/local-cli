@@ -9,7 +9,18 @@ import readline  # noqa: F401 — imported for side-effect (line editing/history
 import sys
 
 from local_cli import __version__
-from local_cli.agent import agent_loop
+from local_cli.agent import (
+    _COMPACT_MESSAGE_THRESHOLD,
+    _COMPACT_TOKEN_THRESHOLD,
+    _estimate_tokens,
+    _needs_compaction,
+    agent_loop,
+)
+from local_cli.clipboard import (
+    ClipboardError,
+    ClipboardUnavailableError,
+    copy_to_clipboard,
+)
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
@@ -91,6 +102,11 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/brain [model]": "Set or show the orchestrator brain model.",
     "/registry": "Show current model-to-task routing registry.",
     "/update": "Check for updates and pull the latest version.",
+    "/undo": "Undo the most recent file modifications (git checkout).",
+    "/diff": "Show uncommitted changes in the working tree.",
+    "/context": "Show context window usage (messages, tokens, compaction).",
+    "/copy": "Copy last assistant response to clipboard.",
+    "/usage": "Show per-message token usage and session totals.",
 }
 
 
@@ -109,6 +125,8 @@ class _ReplContext:
         git_ops: GitOps instance for checkpoint/rollback commands.
         orchestrator: Optional orchestrator for provider/brain management.
         model_manager: Optional model manager for install/delete operations.
+        token_tracker: Optional token usage tracker for /usage command.
+        tool_cache: Optional tool result cache for read/glob/grep caching.
     """
 
     __slots__ = (
@@ -123,6 +141,8 @@ class _ReplContext:
         "git_ops",
         "orchestrator",
         "model_manager",
+        "token_tracker",
+        "tool_cache",
     )
 
     def __init__(
@@ -137,6 +157,8 @@ class _ReplContext:
         rag_topk: int = 5,
         orchestrator: object | None = None,
         model_manager: object | None = None,
+        token_tracker: object | None = None,
+        tool_cache: object | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -149,6 +171,8 @@ class _ReplContext:
         self.git_ops = GitOps()
         self.orchestrator = orchestrator
         self.model_manager = model_manager
+        self.token_tracker = token_tracker
+        self.tool_cache = tool_cache
 
 
 def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
@@ -296,6 +320,34 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print("git is not installed. Cannot rollback.")
         except GitError as exc:
             print(f"Rollback failed: {exc}")
+        return True
+
+    # -- /undo --------------------------------------------------------------
+    if cmd == "/undo":
+        try:
+            if not ctx.git_ops.is_git_repo():
+                print("Not a git repository. Cannot undo.")
+                return True
+            result = ctx.git_ops.undo_last_change()
+            print(result)
+        except GitNotInstalledError:
+            print("git is not installed. Cannot undo.")
+        except GitError as exc:
+            print(f"Undo failed: {exc}")
+        return True
+
+    # -- /diff --------------------------------------------------------------
+    if cmd == "/diff":
+        try:
+            if not ctx.git_ops.is_git_repo():
+                print("Not a git repository. Cannot show diff.")
+                return True
+            result = ctx.git_ops.diff_working_tree()
+            print(result)
+        except GitNotInstalledError:
+            print("git is not installed. Cannot show diff.")
+        except GitError as exc:
+            print(f"Diff failed: {exc}")
         return True
 
     # -- /install <model> ---------------------------------------------------
@@ -490,6 +542,53 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         print("Updating...")
         success, update_msg = perform_update()
         print(update_msg)
+        return True
+
+    # -- /context -----------------------------------------------------------
+    if cmd == "/context":
+        msg_count = len(ctx.messages)
+        est_tokens = _estimate_tokens(ctx.messages)
+        token_limit = _COMPACT_TOKEN_THRESHOLD
+        compaction_triggered = _needs_compaction(ctx.messages)
+        compaction_status = "triggered" if compaction_triggered else "not triggered"
+        print(
+            f"Messages: {msg_count} | "
+            f"Est. tokens: ~{est_tokens} / {token_limit} | "
+            f"Compaction: {compaction_status}"
+        )
+        return True
+
+    # -- /copy --------------------------------------------------------------
+    if cmd == "/copy":
+        # Find the last assistant message in the conversation history.
+        last_assistant = None
+        for msg in reversed(ctx.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if content:
+                    last_assistant = content
+                    break
+
+        if last_assistant is None:
+            print("Nothing to copy.")
+            return True
+
+        try:
+            copy_to_clipboard(last_assistant)
+            print("Copied to clipboard.")
+        except ClipboardUnavailableError:
+            print("Clipboard not available.")
+        except ClipboardError as exc:
+            print(f"Copy failed: {exc}")
+        return True
+
+    # -- /usage -------------------------------------------------------------
+    if cmd == "/usage":
+        if ctx.token_tracker is None:
+            print("Token tracking not available.")
+            return True
+
+        print(ctx.token_tracker.format_table())
         return True
 
     # -- Unknown command ----------------------------------------------------

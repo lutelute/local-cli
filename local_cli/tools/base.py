@@ -13,6 +13,16 @@ class Tool(ABC):
     """Base class for all built-in tools."""
 
     @property
+    def cacheable(self) -> bool:
+        """Whether this tool's results can be cached.
+
+        Read-only tools (e.g. read, glob, grep) override this to return
+        ``True``.  Tools with side effects (e.g. bash, write, edit)
+        should keep the default of ``False``.
+        """
+        return False
+
+    @property
     @abstractmethod
     def name(self) -> str:
         """Tool name used in function calls (e.g. ``"bash"``)."""

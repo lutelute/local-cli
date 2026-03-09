@@ -13,6 +13,8 @@ from typing import Any, Generator
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
 from local_cli.providers.base import ProviderStreamError
 from local_cli.spinner import Spinner
+from local_cli.token_tracker import TokenTracker
+from local_cli.tool_cache import ToolCache
 from local_cli.tools.base import Tool
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,7 @@ _COMPACT_KEEP_RECENT = 10
 def collect_streaming_response(
     stream: Generator[dict[str, Any], None, None],
     spinner: Spinner | None = None,
+    tracker: TokenTracker | None = None,
 ) -> dict[str, Any]:
     """Accumulate a streaming chat response and print tokens as they arrive.
 
@@ -61,10 +64,17 @@ def collect_streaming_response(
     chunks.  Content tokens are printed to stdout immediately for a
     responsive user experience.
 
+    When a *tracker* is provided, token usage is extracted from the
+    final response and recorded.  For Ollama, ``prompt_eval_count``
+    and ``eval_count`` are read from the final chunk (``done: true``).
+    For Claude, the ``usage`` metadata dict is used instead.
+
     Args:
         stream: A generator yielding parsed NDJSON chunks from the Ollama
             streaming chat API.
         spinner: Optional spinner to stop once the first content arrives.
+        tracker: Optional :class:`TokenTracker` for recording token
+            usage from this response.
 
     Returns:
         A dictionary representing the full response, structured as::
@@ -159,6 +169,15 @@ def collect_streaming_response(
     result: dict[str, Any] = dict(last_chunk)
     result["message"] = assembled_message
 
+    # Record token usage if a tracker is provided.  For Ollama the
+    # final chunk carries ``prompt_eval_count`` / ``eval_count`` at
+    # the top level; for Claude the ``usage`` dict contains the counts.
+    if tracker is not None:
+        if "usage" in result:
+            tracker.record_from_claude(result)
+        else:
+            tracker.record_from_ollama(result)
+
     return result
 
 
@@ -199,6 +218,27 @@ def _execute_tool(
         return tool.execute(**arguments)
     except Exception as exc:
         return f"Error: {type(exc).__name__}: {exc}"
+
+
+def _extract_file_path(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Extract the primary file path from tool arguments for cache tracking.
+
+    For tools that operate on a single file (e.g. ``read``), returns the
+    file path argument so that the cache can track the file's ``mtime``
+    for invalidation.  For tools that operate on directories or multiple
+    files (e.g. ``glob``, ``grep``), returns ``None``.
+
+    Args:
+        tool_name: Name of the tool.
+        arguments: The tool's argument dictionary.
+
+    Returns:
+        The file path string, or ``None`` if no single file path applies.
+    """
+    if tool_name == "read":
+        fp = arguments.get("file_path")
+        return fp if isinstance(fp, str) else None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +404,8 @@ def agent_loop(
     tools: list[Tool],
     messages: list[dict[str, Any]],
     debug: bool = False,
+    cache: ToolCache | None = None,
+    tracker: TokenTracker | None = None,
 ) -> None:
     """Core agent loop: prompt LLM, execute tool calls, repeat.
 
@@ -388,6 +430,16 @@ def agent_loop(
         tools: A list of :class:`Tool` instances available for the LLM.
         messages: The conversation history (mutated in place).
         debug: If True, print extra diagnostic information to stderr.
+        cache: An optional :class:`ToolCache` instance for caching results
+            of cacheable (idempotent) tools.  When provided, the agent
+            checks the cache before executing cacheable tools and stores
+            results after successful execution.  Pass ``None`` to disable
+            caching (the default).
+        tracker: An optional :class:`TokenTracker` instance for recording
+            token usage from each LLM call.  When provided, token counts
+            are extracted from each streaming response and accumulated
+            for the session.  Pass ``None`` to disable tracking (the
+            default).
 
     Raises:
         KeyboardInterrupt: Propagated if the user presses Ctrl+C during
@@ -417,7 +469,7 @@ def agent_loop(
         try:
             stream = client.chat_stream(model, messages, tools=tool_defs)
             full_response = collect_streaming_response(
-                stream, spinner=thinking_spinner,
+                stream, spinner=thinking_spinner, tracker=tracker,
             )
         except ProviderStreamError as exc:
             thinking_spinner.stop()
@@ -479,25 +531,69 @@ def agent_loop(
                 result = f"Error: unknown tool '{tool_name}'"
                 sys.stderr.write(f"  Unknown tool: {tool_name}\n")
             else:
-                tool_spinner = Spinner(f"Running {tool_name}")
-                tool_spinner.start()
+                # Check cache for cacheable tools before execution.
+                cached_result: str | None = None
+                if cache is not None and tool.cacheable:
+                    cached_result = cache.get(tool_name, arguments)
 
-                try:
-                    result = _execute_tool(tool, arguments, debug=debug)
-                    tool_spinner.stop()
-                except KeyboardInterrupt:
-                    tool_spinner.stop()
-                    result = "Error: tool execution interrupted by user."
-                    sys.stderr.write(f"  Tool {tool_name} interrupted.\n")
-                    tool_msg: dict[str, Any] = {
-                        "role": "tool",
-                        "tool_name": tool_name,
-                        "content": result,
-                    }
-                    if tool_call_id is not None:
-                        tool_msg["tool_call_id"] = tool_call_id
-                    messages.append(tool_msg)
-                    raise
+                if cached_result is not None:
+                    # Cache hit — skip execution entirely.
+                    result = cached_result
+                    if debug:
+                        sys.stderr.write(
+                            f"  [debug] cache hit: {tool_name}\n"
+                        )
+                else:
+                    if cache is not None and tool.cacheable and debug:
+                        sys.stderr.write(
+                            f"  [debug] cache miss: {tool_name}\n"
+                        )
+
+                    tool_spinner = Spinner(f"Running {tool_name}")
+                    tool_spinner.start()
+
+                    try:
+                        result = _execute_tool(tool, arguments, debug=debug)
+                        tool_spinner.stop()
+                    except KeyboardInterrupt:
+                        tool_spinner.stop()
+                        result = "Error: tool execution interrupted by user."
+                        sys.stderr.write(
+                            f"  Tool {tool_name} interrupted.\n"
+                        )
+                        tool_msg: dict[str, Any] = {
+                            "role": "tool",
+                            "tool_name": tool_name,
+                            "content": result,
+                        }
+                        if tool_call_id is not None:
+                            tool_msg["tool_call_id"] = tool_call_id
+                        messages.append(tool_msg)
+                        raise
+
+                    # Store successful results in cache for cacheable tools.
+                    if (
+                        cache is not None
+                        and tool.cacheable
+                        and not result.startswith("Error:")
+                    ):
+                        file_path = _extract_file_path(
+                            tool_name, arguments,
+                        )
+                        cache.put(
+                            tool_name, arguments, result,
+                            file_path=file_path,
+                        )
+
+                    # Invalidate cache when a mutating tool modifies a file.
+                    if (
+                        cache is not None
+                        and not tool.cacheable
+                        and not result.startswith("Error:")
+                    ):
+                        fp = arguments.get("file_path")
+                        if isinstance(fp, str):
+                            cache.invalidate_file(fp)
 
                 # Show a truncated preview of the result to the user.
                 preview = _truncate(
