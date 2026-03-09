@@ -11,7 +11,7 @@ import urllib.request
 import urllib.parse
 from typing import Any
 
-_USER_AGENT = "local-cli/0.7.2"
+_USER_AGENT = "local-cli/0.7.3"
 _TIMEOUT = 15
 _BASE_URL = "https://ollama.com/search"
 
