@@ -622,10 +622,13 @@ class JsonLineServer:
 
         # Mark installed status on catalog entries.
         for entry in catalog:
-            entry["installed"] = (
-                entry["name"] in installed_names
-                or entry["name"].split(":")[0] in installed_names
-            )
+            name = entry["name"]
+            if ":" in name:
+                # Exact tag specified — require exact match.
+                entry["installed"] = name in installed_names
+            else:
+                # Bare name (e.g. "qwen3") — match if any tag is installed.
+                entry["installed"] = name in installed_names
 
         # Include locally installed models not in the catalog.
         catalog_names = {e["name"] for e in catalog}
