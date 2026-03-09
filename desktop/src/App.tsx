@@ -508,7 +508,7 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.7.1" />
+                  <Banner version="0.7.2" />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.
