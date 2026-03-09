@@ -16,6 +16,12 @@
 
 ---
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Local CLI in action" width="700"/>
+</p>
+
+---
+
 ## What is this?
 
 Local CLI is an AI coding agent that runs locally using [Ollama](https://ollama.com). It can read, write, and edit files, run shell commands, search code, and fetch web pages — all through natural language.
@@ -31,7 +37,7 @@ Think of it as a local, offline-capable alternative to cloud-based AI coding ass
 ### Agent Loop
 The LLM autonomously calls tools to complete tasks. It reads files, writes code, runs commands, and iterates until the task is done — no manual step-by-step prompting required.
 
-### 8 Built-in Tools
+### 9 Built-in Tools
 
 | Tool | Description |
 |------|-------------|
@@ -43,6 +49,7 @@ The LLM autonomously calls tools to complete tasks. It reads files, writes code,
 | `grep` | Search file contents with regex |
 | `web_fetch` | Fetch and parse web pages |
 | `ask_user` | Ask the user a question |
+| `agent` | Spawn sub-agents for parallel task execution |
 
 ### Multi-Provider
 - **Ollama** — Local inference, no API key, full privacy
@@ -160,8 +167,31 @@ local-cli --provider claude
 | `/brain [model]` | Set orchestrator brain model |
 | `/registry` | Show task-to-model routing |
 | `/update` | Check for and install updates |
+| `/agents` | List background sub-agent status |
+| `/plan` | Show, create, or manage structured plans |
+| `/ideate` | Enter brainstorming / ideation mode |
+| `/knowledge` | Save, load, or list knowledge items |
+| `/skills` | List or show discovered skills |
 | `/clear` | Clear conversation |
 | `/exit` | Quit |
+
+> See **[docs/prompts.md](docs/prompts.md)** for copy-paste prompt examples.
+
+---
+
+## Skills
+
+Local CLI has a skills system that auto-injects contextual instructions based on trigger keywords. Create `SKILL.md` files in `.agents/skills/` to encode team conventions, framework guides, or domain knowledge.
+
+```
+.agents/skills/
+├── django-api/
+│   └── SKILL.md      # triggers: [django, REST API, DRF]
+└── code-review/
+    └── SKILL.md      # triggers: [review, PR, code quality]
+```
+
+> See **[docs/skills.md](docs/skills.md)** for the full guide.
 
 ---
 
@@ -190,14 +220,15 @@ Terminal-style GUI with streaming chat, model management, and file browsing.
 | `Shift + Enter` | New line in input |
 | `Enter` | Send message |
 
-### Updates
+### Auto-Update
 
-The desktop app has a dual update system:
+The desktop app updates automatically on startup:
 
-- **GUI update** — Checks GitHub Releases for new desktop app versions. Download and reinstall.
-- **Backend update** — Runs `git pull` to update the Python CLI. Requires app restart.
+1. Checks GitHub Releases for new versions
+2. Downloads the update in the background
+3. Closes the app, replaces itself, and relaunches — zero user interaction
 
-Both are accessible from the Settings panel (`Cmd/Ctrl + ,`).
+Manual update is also available from the Settings panel (`Cmd/Ctrl + ,`).
 
 ### Run from Source
 
@@ -286,6 +317,10 @@ local-cli/
 │   ├── session.py               # Session persistence (JSONL)
 │   ├── security.py              # Input validation + sanitization
 │   ├── updater.py               # Self-update (git pull)
+│   ├── sub_agent.py             # Sub-agent runner (thread pool)
+│   ├── plan_manager.py          # Structured plan management
+│   ├── knowledge.py             # Persistent knowledge store
+│   ├── skills.py                # Skill discovery & matching
 │   ├── providers/
 │   │   ├── base.py              # Abstract LLMProvider
 │   │   ├── ollama_provider.py   # Ollama adapter
