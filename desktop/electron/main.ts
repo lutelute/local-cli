@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from 'electron'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, execFile, ChildProcess } from 'child_process'
 import http from 'node:http'
 import https from 'node:https'
 import crypto from 'node:crypto'
@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'path'
 
-const APP_VERSION = '0.7.0'
+const APP_VERSION = '0.7.1'
 const GITHUB_REPO = 'lutelute/local-cli'
 
 // Claude auth credential storage path.
@@ -479,11 +479,13 @@ ipcMain.handle('check-app-update', async () => {
     const latest = (data.tag_name || '').replace(/^v/, '')
     if (latest && latest !== APP_VERSION) {
       const dmg = data.assets?.find((a: any) => a.name.endsWith('.dmg'))
+      const zip = data.assets?.find((a: any) => a.name.endsWith('-mac.zip') || a.name.endsWith('.zip'))
       return {
         available: true,
         version: latest,
         notes: data.body || '',
         downloadUrl: dmg?.browser_download_url || data.html_url,
+        zipUrl: zip?.browser_download_url || '',
         releaseUrl: data.html_url,
       }
     }
@@ -492,6 +494,119 @@ ipcMain.handle('check-app-update', async () => {
     return { available: false, version: APP_VERSION, error: 'Failed to check for updates' }
   }
 })
+
+ipcMain.handle('install-app-update', async (_event, zipUrl: string) => {
+  // Download ZIP, extract, replace current app, restart.
+  // Progress events sent via mainWindow.webContents.send('update-progress', ...)
+  const sendProgress = (stage: string, percent: number) => {
+    mainWindow?.webContents.send('update-progress', { stage, percent })
+  }
+
+  try {
+    // 1. Download ZIP to temp file with progress.
+    sendProgress('downloading', 0)
+    const tmpZip = path.join(os.tmpdir(), `local-cli-update-${Date.now()}.zip`)
+    await downloadFile(zipUrl, tmpZip, (pct) => sendProgress('downloading', pct))
+
+    // 2. Extract ZIP.
+    sendProgress('extracting', 0)
+    const tmpDir = path.join(os.tmpdir(), `local-cli-update-${Date.now()}`)
+    fs.mkdirSync(tmpDir, { recursive: true })
+    await new Promise<void>((resolve, reject) => {
+      execFile('ditto', ['-xk', tmpZip, tmpDir], (err) => {
+        if (err) reject(new Error(`Extract failed: ${err.message}`))
+        else resolve()
+      })
+    })
+    sendProgress('extracting', 100)
+
+    // 3. Find the .app bundle in extracted contents.
+    const entries = fs.readdirSync(tmpDir)
+    const appBundle = entries.find(e => e.endsWith('.app'))
+    if (!appBundle) throw new Error('No .app bundle found in ZIP')
+    const newAppPath = path.join(tmpDir, appBundle)
+
+    // 4. Determine current app path and replace.
+    const currentAppPath = app.isPackaged
+      ? path.resolve(process.resourcesPath!, '..', '..')  // .app/Contents/Resources -> .app
+      : null
+
+    if (!currentAppPath || !currentAppPath.endsWith('.app')) {
+      throw new Error('Cannot determine app path. Dev mode does not support auto-update.')
+    }
+
+    sendProgress('installing', 0)
+
+    // 5. Create a shell script that waits for the app to quit, replaces it, and relaunches.
+    const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
+    const scriptContent = `#!/bin/bash
+# Wait for the app to fully quit
+sleep 1
+while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do
+  sleep 0.5
+done
+# Remove old app and move new one in place
+rm -rf "${currentAppPath}"
+mv "${newAppPath}" "${currentAppPath}"
+# Clean up
+rm -f "${tmpZip}"
+rm -rf "${tmpDir}"
+# Relaunch
+open "${currentAppPath}"
+rm -f "${installScript}"
+`
+    fs.writeFileSync(installScript, scriptContent, { mode: 0o755 })
+
+    sendProgress('installing', 50)
+
+    // 6. Spawn the install script detached and quit.
+    spawn('bash', [installScript], {
+      detached: true,
+      stdio: 'ignore',
+    }).unref()
+
+    sendProgress('installing', 100)
+
+    // 7. Quit the app so the script can replace it.
+    setTimeout(() => {
+      pythonProcess?.kill()
+      app.quit()
+    }, 500)
+
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message || String(err) }
+  }
+})
+
+function downloadFile(url: string, dest: string, onProgress: (pct: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const doRequest = (reqUrl: string, redirects = 0) => {
+      if (redirects > 5) return reject(new Error('Too many redirects'))
+      const mod = reqUrl.startsWith('https') ? https : http
+      mod.get(reqUrl, { headers: { 'User-Agent': `local-cli/${APP_VERSION}` } }, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          const loc = res.headers.location
+          if (loc) return doRequest(loc, redirects + 1)
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`Download failed: HTTP ${res.statusCode}`))
+        }
+        const total = parseInt(res.headers['content-length'] || '0', 10)
+        let received = 0
+        const file = fs.createWriteStream(dest)
+        res.on('data', (chunk: Buffer) => {
+          received += chunk.length
+          file.write(chunk)
+          if (total > 0) onProgress(Math.round((received / total) * 100))
+        })
+        res.on('end', () => { file.end(); resolve() })
+        res.on('error', (e) => { file.close(); reject(e) })
+      }).on('error', reject)
+    }
+    doRequest(url)
+  })
+}
 
 ipcMain.handle('open-external-url', (_event, url: string) => {
   shell.openExternal(url)

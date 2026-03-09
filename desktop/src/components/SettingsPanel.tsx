@@ -9,14 +9,23 @@ type AppUpdateInfo = {
   version: string
   notes?: string
   downloadUrl?: string
+  zipUrl?: string
   releaseUrl?: string
   error?: string
+}
+
+type UpdateProgress = {
+  stage: string
+  percent: number
 }
 
 export function SettingsPanel({ onClose }: Props) {
   const [appVersion, setAppVersion] = useState('')
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null)
   const [checkingApp, setCheckingApp] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [installProgress, setInstallProgress] = useState<UpdateProgress | null>(null)
+  const [installError, setInstallError] = useState('')
 
   const [cliUpdating, setCliUpdating] = useState(false)
   const [cliResult, setCliResult] = useState('')
@@ -27,23 +36,41 @@ export function SettingsPanel({ onClose }: Props) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape' && !installing) onClose()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
+  }, [onClose, installing])
+
+  // Listen for update progress events.
+  useEffect(() => {
+    const cleanup = window.api.onUpdateProgress((progress: UpdateProgress) => {
+      setInstallProgress(progress)
+    })
+    return cleanup
+  }, [])
 
   const handleCheckAppUpdate = useCallback(async () => {
     setCheckingApp(true)
     setAppUpdate(null)
+    setInstallError('')
     const result = await window.api.checkAppUpdate()
     setAppUpdate(result)
     setCheckingApp(false)
   }, [])
 
-  const handleDownloadApp = useCallback((url: string) => {
-    window.api.openExternalUrl(url)
-  }, [])
+  const handleInstallUpdate = useCallback(async () => {
+    if (!appUpdate?.zipUrl) return
+    setInstalling(true)
+    setInstallError('')
+    setInstallProgress({ stage: 'starting', percent: 0 })
+    const result = await window.api.installAppUpdate(appUpdate.zipUrl)
+    if (!result.success) {
+      setInstalling(false)
+      setInstallError(result.error || 'Install failed')
+    }
+    // On success the app will quit and relaunch automatically.
+  }, [appUpdate])
 
   const handleCliUpdate = useCallback(() => {
     setCliUpdating(true)
@@ -82,26 +109,41 @@ export function SettingsPanel({ onClose }: Props) {
             <div className="settings-row">
               <span className="settings-label">Update</span>
               <div className="settings-value">
-                {checkingApp ? (
+                {installing ? (
+                  <div className="settings-update-progress">
+                    <div className="settings-progress-label">
+                      {installProgress?.stage === 'downloading' ? 'Downloading...' :
+                       installProgress?.stage === 'extracting' ? 'Extracting...' :
+                       installProgress?.stage === 'installing' ? 'Installing... (app will restart)' :
+                       'Preparing...'}
+                    </div>
+                    <div className="settings-progress-bar">
+                      <div
+                        className="settings-progress-fill"
+                        style={{ width: `${installProgress?.percent || 0}%` }}
+                      />
+                    </div>
+                    <div className="settings-progress-pct">{installProgress?.percent || 0}%</div>
+                  </div>
+                ) : checkingApp ? (
                   <span className="settings-checking">Checking...</span>
                 ) : appUpdate ? (
                   appUpdate.available ? (
                     <div className="settings-update-info">
                       <span className="settings-update-new">v{appUpdate.version} available</span>
-                      <button
-                        className="settings-update-btn"
-                        onClick={() => handleDownloadApp(appUpdate.downloadUrl || appUpdate.releaseUrl || '')}
-                      >
-                        Download
-                      </button>
-                      {appUpdate.releaseUrl && (
+                      {appUpdate.zipUrl ? (
+                        <button className="settings-update-btn" onClick={handleInstallUpdate}>
+                          Install update
+                        </button>
+                      ) : (
                         <button
-                          className="settings-update-link"
-                          onClick={() => handleDownloadApp(appUpdate.releaseUrl!)}
+                          className="settings-update-btn"
+                          onClick={() => window.api.openExternalUrl(appUpdate.downloadUrl || appUpdate.releaseUrl || '')}
                         >
-                          Release notes
+                          Download
                         </button>
                       )}
+                      {installError && <span className="settings-error">{installError}</span>}
                     </div>
                   ) : (
                     <span className="settings-up-to-date">Up to date</span>

@@ -1574,6 +1574,40 @@ body {
   color: var(--accent);
 }
 
+.settings-update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.settings-progress-label {
+  font-size: 11px;
+  color: var(--accent);
+}
+.settings-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.settings-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+.settings-progress-pct {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+}
+.settings-error {
+  color: var(--red, #f85149);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
 .settings-cli-result {
   color: var(--green);
   font-size: 11px;

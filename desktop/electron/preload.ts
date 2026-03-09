@@ -44,6 +44,12 @@ contextBridge.exposeInMainWorld('api', {
   hasClaudeAccess: () => ipcRenderer.invoke('has-claude-access'),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   checkAppUpdate: () => ipcRenderer.invoke('check-app-update'),
+  installAppUpdate: (zipUrl: string) => ipcRenderer.invoke('install-app-update', zipUrl),
+  onUpdateProgress: (callback: (progress: { stage: string; percent: number }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: { stage: string; percent: number }) => callback(progress)
+    ipcRenderer.on('update-progress', handler)
+    return () => ipcRenderer.removeListener('update-progress', handler)
+  },
   openExternalUrl: (url: string) => ipcRenderer.invoke('open-external-url', url),
   getClaudeAuth: () => ipcRenderer.invoke('get-claude-auth'),
   saveClaudeKey: (key: string) => ipcRenderer.invoke('save-claude-key', key),

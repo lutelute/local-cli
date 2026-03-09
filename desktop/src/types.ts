@@ -77,9 +77,12 @@ declare global {
         version: string
         notes?: string
         downloadUrl?: string
+        zipUrl?: string
         releaseUrl?: string
         error?: string
       }>
+      installAppUpdate: (zipUrl: string) => Promise<{ success: boolean; error?: string }>
+      onUpdateProgress: (cb: (progress: { stage: string; percent: number }) => void) => () => void
       openExternalUrl: (url: string) => Promise<void>
       getClaudeAuth: () => Promise<{
         method: string | null
