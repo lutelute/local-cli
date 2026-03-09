@@ -67,6 +67,10 @@ class OllamaProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool | None = None,
+        format: str | dict[str, Any] | None = None,
+        keep_alive: str | int | None = None,
     ) -> dict[str, Any]:
         """Non-streaming chat completion via Ollama.
 
@@ -80,6 +84,13 @@ class OllamaProvider(LLMProvider):
             tools: Tool definitions in Ollama format, or ``None``.
             max_tokens: Ignored for Ollama (accepted for interface
                 conformance).
+            options: Ollama inference parameters (e.g.
+                ``{"num_ctx": 8192, "temperature": 0.6}``).  Passed
+                through to :meth:`OllamaClient.chat`.
+            think: Enable thinking/reasoning mode (e.g. for Qwen3).
+            format: Response format — ``"json"`` or a JSON schema dict.
+            keep_alive: Duration to keep the model loaded in memory
+                (e.g. ``"5m"`` or ``300``).
 
         Returns:
             Normalized response dict with ``message`` key containing
@@ -89,7 +100,15 @@ class OllamaProvider(LLMProvider):
             ProviderConnectionError: If Ollama is unreachable.
             ProviderRequestError: If Ollama returns an error.
         """
-        return self._client.chat(model=model, messages=messages, tools=tools)
+        return self._client.chat(
+            model=model,
+            messages=messages,
+            tools=tools,
+            options=options,
+            think=think,
+            format=format,
+            keep_alive=keep_alive,
+        )
 
     def chat_stream(
         self,
@@ -97,6 +116,10 @@ class OllamaProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool | None = None,
+        format: str | dict[str, Any] | None = None,
+        keep_alive: str | int | None = None,
     ) -> Generator[dict[str, Any], None, None]:
         """Streaming chat completion via Ollama.
 
@@ -110,6 +133,13 @@ class OllamaProvider(LLMProvider):
             tools: Tool definitions in Ollama format, or ``None``.
             max_tokens: Ignored for Ollama (accepted for interface
                 conformance).
+            options: Ollama inference parameters (e.g.
+                ``{"num_ctx": 8192, "temperature": 0.6}``).  Passed
+                through to :meth:`OllamaClient.chat_stream`.
+            think: Enable thinking/reasoning mode (e.g. for Qwen3).
+            format: Response format — ``"json"`` or a JSON schema dict.
+            keep_alive: Duration to keep the model loaded in memory
+                (e.g. ``"5m"`` or ``300``).
 
         Yields:
             Normalized streaming chunks.
@@ -119,7 +149,13 @@ class OllamaProvider(LLMProvider):
             ProviderStreamError: If an error occurs mid-stream.
         """
         yield from self._client.chat_stream(
-            model=model, messages=messages, tools=tools,
+            model=model,
+            messages=messages,
+            tools=tools,
+            options=options,
+            think=think,
+            format=format,
+            keep_alive=keep_alive,
         )
 
     def list_models(self) -> list[dict[str, Any]]:

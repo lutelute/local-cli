@@ -99,6 +99,12 @@ def collect_streaming_response(
     and ``eval_count`` are read from the final chunk (``done: true``).
     For Claude, the ``usage`` metadata dict is used instead.
 
+    Thinking content (``message.thinking``) from models that support
+    thinking mode (e.g. Qwen3) is accumulated separately and returned
+    as a ``"thinking"`` key in the result dict.  It is **not** included
+    in the assembled ``message.content`` field, keeping the conversation
+    history free of internal reasoning tokens.
+
     Args:
         stream: A generator yielding parsed NDJSON chunks from the Ollama
             streaming chat API.
@@ -115,6 +121,7 @@ def collect_streaming_response(
                     "content": "<accumulated text>",
                     "tool_calls": [...]  # only if present
                 },
+                "thinking": "<accumulated thinking>",  # only if present
                 "done": True,
                 ...  # other fields from the final chunk
             }
@@ -211,8 +218,6 @@ def collect_streaming_response(
         "role": "assistant",
         "content": "".join(content_parts),
     }
-    if thinking_parts:
-        assembled_message["thinking"] = "".join(thinking_parts)
     if tool_calls:
         assembled_message["tool_calls"] = tool_calls
 
@@ -220,6 +225,12 @@ def collect_streaming_response(
     # with our assembled message.
     result: dict[str, Any] = dict(last_chunk)
     result["message"] = assembled_message
+
+    # Include accumulated thinking content as a separate top-level key
+    # for debug display.  This is intentionally NOT part of the message
+    # dict so it does not pollute the conversation history.
+    if thinking_parts:
+        result["thinking"] = "".join(thinking_parts)
 
     # Record token usage if a tracker is provided.  For Ollama the
     # final chunk carries ``prompt_eval_count`` / ``eval_count`` at
@@ -444,7 +455,10 @@ def _compact_message(message: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
-def _needs_compaction(messages: list[dict[str, Any]]) -> bool:
+def _needs_compaction(
+    messages: list[dict[str, Any]],
+    token_threshold: int | None = None,
+) -> bool:
     """Check whether the message list should be compacted.
 
     Returns ``True`` if either the message count or estimated token
@@ -452,13 +466,17 @@ def _needs_compaction(messages: list[dict[str, Any]]) -> bool:
 
     Args:
         messages: The conversation message list.
+        token_threshold: Optional override for the token threshold.
+            When provided (e.g. derived from ``num_ctx``), this value
+            is used instead of the module-level default.
 
     Returns:
         True if compaction is warranted.
     """
     if len(messages) > _COMPACT_MESSAGE_THRESHOLD:
         return True
-    if _estimate_tokens(messages) > _COMPACT_TOKEN_THRESHOLD:
+    threshold = token_threshold if token_threshold is not None else _COMPACT_TOKEN_THRESHOLD
+    if _estimate_tokens(messages) > threshold:
         return True
     return False
 
@@ -531,6 +549,7 @@ def agent_loop(
     debug: bool = False,
     cache: ToolCache | None = None,
     tracker: TokenTracker | None = None,
+    options: dict[str, Any] | None = None,
 ) -> None:
     """Core agent loop: prompt LLM, execute tool calls, repeat.
 
@@ -566,6 +585,11 @@ def agent_loop(
             are extracted from each streaming response and accumulated
             for the session.  Pass ``None`` to disable tracking (the
             default).
+        options: Optional inference parameters to pass to the LLM provider.
+            When provided, these are forwarded to ``client.chat_stream()``
+            as the ``options`` keyword argument.  If the dict contains a
+            ``num_ctx`` key, the context compaction threshold is
+            dynamically adjusted to 75% of that value.
 
     Raises:
         KeyboardInterrupt: Propagated if the user presses Ctrl+C during
@@ -574,11 +598,25 @@ def agent_loop(
     tool_map: dict[str, Tool] = {t.name: t for t in tools}
     tool_defs: list[dict[str, Any]] = [t.to_ollama_tool() for t in tools]
 
+    # Compute a dynamic compaction token threshold when the caller
+    # specifies a context window size via options["num_ctx"].  Use 75%
+    # of the context window so compaction kicks in before hitting the
+    # hard limit.
+    compact_token_threshold: int | None = None
+    if options and "num_ctx" in options:
+        compact_token_threshold = int(options["num_ctx"] * 0.75)
+        if debug:
+            sys.stderr.write(
+                f"[debug] Dynamic compaction threshold: "
+                f"{compact_token_threshold} tokens "
+                f"(75% of num_ctx={options['num_ctx']})\n"
+            )
+
     while True:
         # ---------------------------------------------------------------
         # 0. Compact conversation history if thresholds are exceeded.
         # ---------------------------------------------------------------
-        if _needs_compaction(messages):
+        if _needs_compaction(messages, token_threshold=compact_token_threshold):
             compact_messages(messages, debug=debug)
 
         # ---------------------------------------------------------------
@@ -593,7 +631,10 @@ def agent_loop(
         thinking_spinner.start()
 
         try:
-            stream = client.chat_stream(model, messages, tools=tool_defs)
+            chat_kwargs: dict[str, Any] = {"tools": tool_defs}
+            if options is not None:
+                chat_kwargs["options"] = options
+            stream = client.chat_stream(model, messages, **chat_kwargs)
             full_response = collect_streaming_response(
                 stream, spinner=thinking_spinner, tracker=tracker,
             )
@@ -618,9 +659,26 @@ def agent_loop(
 
         # ---------------------------------------------------------------
         # 2. Append the assistant message to the conversation history.
+        #    Thinking content is intentionally excluded — it lives in
+        #    full_response["thinking"] (set by collect_streaming_response)
+        #    and must NOT be part of the message dict appended here, to
+        #    avoid wasting context window space on internal reasoning.
         # ---------------------------------------------------------------
         assistant_message = full_response["message"]
+        # Defensive: strip any "thinking" key that may have leaked into
+        # the message dict (should not happen, but belt-and-suspenders).
+        if "thinking" in assistant_message:
+            assistant_message = {
+                k: v for k, v in assistant_message.items() if k != "thinking"
+            }
         messages.append(assistant_message)
+
+        # Log thinking content in debug mode for diagnostics.
+        thinking_content = full_response.get("thinking", "")
+        if debug and thinking_content:
+            # Show a truncated preview of the thinking content.
+            preview = _truncate(thinking_content, max_len=500)
+            sys.stderr.write(f"[debug] Thinking: {preview}\n")
 
         if debug:
             tc_count = len(assistant_message.get("tool_calls", []))

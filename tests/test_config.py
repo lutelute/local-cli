@@ -692,5 +692,455 @@ class TestAntigravityConfigKeys(unittest.TestCase):
             os.unlink(path)
 
 
+
+class TestConfigNumCtx(unittest.TestCase):
+    """Tests for num_ctx config key."""
+
+    def _save_env(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                saved[env_var] = os.environ.pop(env_var)
+        return saved
+
+    def test_config_num_ctx_default(self) -> None:
+        """Default num_ctx is 8192 when nothing is configured."""
+        saved_env = self._save_env()
+        try:
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertEqual(cfg.num_ctx, 8192)
+        finally:
+            os.environ.update(saved_env)
+
+    def test_config_num_ctx_from_env(self) -> None:
+        """LOCAL_CLI_NUM_CTX env var sets num_ctx."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_NUM_CTX"] = "16384"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertEqual(cfg.num_ctx, 16384)
+        finally:
+            os.environ.pop("LOCAL_CLI_NUM_CTX", None)
+            os.environ.update(saved_env)
+
+    def test_config_num_ctx_from_cli_arg(self) -> None:
+        """CLI arg num_ctx overrides env and default."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_NUM_CTX"] = "16384"
+            cli = SimpleNamespace(num_ctx=32768)
+            cfg = Config(
+                cli_args=cli,
+                config_file="/tmp/nonexistent_local_cli_config",
+            )
+            self.assertEqual(cfg.num_ctx, 32768)
+        finally:
+            os.environ.pop("LOCAL_CLI_NUM_CTX", None)
+            os.environ.update(saved_env)
+
+    def test_config_num_ctx_from_config_file(self) -> None:
+        """Config file num_ctx overrides default."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("num_ctx=4096\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.num_ctx, 4096)
+        finally:
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+    def test_config_num_ctx_is_int(self) -> None:
+        """num_ctx is always an int, even when loaded from string sources."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_NUM_CTX"] = "8192"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertIsInstance(cfg.num_ctx, int)
+        finally:
+            os.environ.pop("LOCAL_CLI_NUM_CTX", None)
+            os.environ.update(saved_env)
+
+
+class TestConfigTemperature(unittest.TestCase):
+    """Tests for temperature config key."""
+
+    def _save_env(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                saved[env_var] = os.environ.pop(env_var)
+        return saved
+
+    def test_config_temperature_none_when_unset(self) -> None:
+        """Temperature is None when not configured."""
+        saved_env = self._save_env()
+        try:
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertIsNone(cfg.temperature)
+        finally:
+            os.environ.update(saved_env)
+
+    def test_config_temperature_float_parsing(self) -> None:
+        """Temperature is parsed as float from env var string."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_TEMPERATURE"] = "0.6"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertAlmostEqual(cfg.temperature, 0.6)
+            self.assertIsInstance(cfg.temperature, float)
+        finally:
+            os.environ.pop("LOCAL_CLI_TEMPERATURE", None)
+            os.environ.update(saved_env)
+
+    def test_config_temperature_from_config_file(self) -> None:
+        """Temperature parsed from config file as float."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("temperature=0.8\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertAlmostEqual(cfg.temperature, 0.8)
+        finally:
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+    def test_config_temperature_from_cli_arg(self) -> None:
+        """CLI arg temperature overrides env."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_TEMPERATURE"] = "0.6"
+            cli = SimpleNamespace(temperature=0.3)
+            cfg = Config(
+                cli_args=cli,
+                config_file="/tmp/nonexistent_local_cli_config",
+            )
+            self.assertAlmostEqual(cfg.temperature, 0.3)
+        finally:
+            os.environ.pop("LOCAL_CLI_TEMPERATURE", None)
+            os.environ.update(saved_env)
+
+    def test_config_temperature_zero(self) -> None:
+        """Temperature=0.0 is a valid explicit value (not treated as None)."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_TEMPERATURE"] = "0.0"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertAlmostEqual(cfg.temperature, 0.0)
+            self.assertIsNotNone(cfg.temperature)
+        finally:
+            os.environ.pop("LOCAL_CLI_TEMPERATURE", None)
+            os.environ.update(saved_env)
+
+
+class TestConfigThinkMode(unittest.TestCase):
+    """Tests for think_mode config key."""
+
+    def _save_env(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                saved[env_var] = os.environ.pop(env_var)
+        return saved
+
+    def test_config_think_mode_default_false(self) -> None:
+        """think_mode defaults to False."""
+        saved_env = self._save_env()
+        try:
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertFalse(cfg.think_mode)
+        finally:
+            os.environ.update(saved_env)
+
+    def test_config_think_mode_bool(self) -> None:
+        """think_mode parsed as bool from env var."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_THINK_MODE"] = "true"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertTrue(cfg.think_mode)
+            self.assertIsInstance(cfg.think_mode, bool)
+        finally:
+            os.environ.pop("LOCAL_CLI_THINK_MODE", None)
+            os.environ.update(saved_env)
+
+    def test_config_think_mode_from_config_file(self) -> None:
+        """think_mode parsed from config file as bool."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("think_mode=1\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertTrue(cfg.think_mode)
+        finally:
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+    def test_config_think_mode_from_cli_arg(self) -> None:
+        """CLI arg think_mode overrides lower layers."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("think_mode=false\n")
+            path = f.name
+
+        try:
+            cli = SimpleNamespace(think_mode=True)
+            cfg = Config(cli_args=cli, config_file=path)
+            self.assertTrue(cfg.think_mode)
+        finally:
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+
+class TestConfigTopPTopK(unittest.TestCase):
+    """Tests for top_p and top_k config keys."""
+
+    def _save_env(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                saved[env_var] = os.environ.pop(env_var)
+        return saved
+
+    def test_config_top_p_none_when_unset(self) -> None:
+        """top_p is None when not configured."""
+        saved_env = self._save_env()
+        try:
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertIsNone(cfg.top_p)
+        finally:
+            os.environ.update(saved_env)
+
+    def test_config_top_p_float_parsing(self) -> None:
+        """top_p is parsed as float from env var."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_TOP_P"] = "0.95"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertAlmostEqual(cfg.top_p, 0.95)
+            self.assertIsInstance(cfg.top_p, float)
+        finally:
+            os.environ.pop("LOCAL_CLI_TOP_P", None)
+            os.environ.update(saved_env)
+
+    def test_config_top_k_none_when_unset(self) -> None:
+        """top_k is None when not configured."""
+        saved_env = self._save_env()
+        try:
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertIsNone(cfg.top_k)
+        finally:
+            os.environ.update(saved_env)
+
+    def test_config_top_k_int_parsing(self) -> None:
+        """top_k is parsed as int from env var."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_TOP_K"] = "20"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertEqual(cfg.top_k, 20)
+            self.assertIsInstance(cfg.top_k, int)
+        finally:
+            os.environ.pop("LOCAL_CLI_TOP_K", None)
+            os.environ.update(saved_env)
+
+
+class TestConfigKeepAlive(unittest.TestCase):
+    """Tests for keep_alive config key."""
+
+    def _save_env(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                saved[env_var] = os.environ.pop(env_var)
+        return saved
+
+    def test_config_keep_alive_none_when_unset(self) -> None:
+        """keep_alive is None when not configured."""
+        saved_env = self._save_env()
+        try:
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertIsNone(cfg.keep_alive)
+        finally:
+            os.environ.update(saved_env)
+
+    def test_config_keep_alive_from_env(self) -> None:
+        """keep_alive set from env var."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_KEEP_ALIVE"] = "5m"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertEqual(cfg.keep_alive, "5m")
+        finally:
+            os.environ.pop("LOCAL_CLI_KEEP_ALIVE", None)
+            os.environ.update(saved_env)
+
+    def test_config_keep_alive_from_config_file(self) -> None:
+        """keep_alive set from config file."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("keep_alive=10m\n")
+            path = f.name
+
+        try:
+            cfg = Config(config_file=path)
+            self.assertEqual(cfg.keep_alive, "10m")
+        finally:
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+
+class TestConfigNewKeysPriorityChain(unittest.TestCase):
+    """Integration test: priority chain for new inference config keys."""
+
+    def _save_env(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for env_var in ENV_VAR_MAP:
+            if env_var in os.environ:
+                saved[env_var] = os.environ.pop(env_var)
+        return saved
+
+    def test_config_priority_chain_num_ctx(self) -> None:
+        """Verify full priority chain for num_ctx: CLI > env > file > defaults."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("num_ctx=4096\n")
+            f.write("temperature=0.5\n")
+            f.write("think_mode=true\n")
+            path = f.name
+
+        try:
+            # File overrides default.
+            cfg_file_only = Config(config_file=path)
+            self.assertEqual(cfg_file_only.num_ctx, 4096)
+
+            # Env overrides file.
+            os.environ["LOCAL_CLI_NUM_CTX"] = "16384"
+            cfg_env = Config(config_file=path)
+            self.assertEqual(cfg_env.num_ctx, 16384)
+
+            # CLI overrides env.
+            cli = SimpleNamespace(num_ctx=32768)
+            cfg_cli = Config(cli_args=cli, config_file=path)
+            self.assertEqual(cfg_cli.num_ctx, 32768)
+        finally:
+            os.environ.pop("LOCAL_CLI_NUM_CTX", None)
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+    def test_config_priority_chain_temperature(self) -> None:
+        """Verify full priority chain for temperature."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("temperature=0.5\n")
+            path = f.name
+
+        try:
+            # Default: None (no file, no env, no CLI).
+            cfg_default = Config(
+                config_file="/tmp/nonexistent_local_cli_config"
+            )
+            self.assertIsNone(cfg_default.temperature)
+
+            # File overrides default.
+            cfg_file = Config(config_file=path)
+            self.assertAlmostEqual(cfg_file.temperature, 0.5)
+
+            # Env overrides file.
+            os.environ["LOCAL_CLI_TEMPERATURE"] = "0.8"
+            cfg_env = Config(config_file=path)
+            self.assertAlmostEqual(cfg_env.temperature, 0.8)
+
+            # CLI overrides env.
+            cli = SimpleNamespace(temperature=0.2)
+            cfg_cli = Config(cli_args=cli, config_file=path)
+            self.assertAlmostEqual(cfg_cli.temperature, 0.2)
+        finally:
+            os.environ.pop("LOCAL_CLI_TEMPERATURE", None)
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+    def test_config_priority_chain_think_mode(self) -> None:
+        """Verify full priority chain for think_mode."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("think_mode=true\n")
+            path = f.name
+
+        try:
+            # Default: False.
+            cfg_default = Config(
+                config_file="/tmp/nonexistent_local_cli_config"
+            )
+            self.assertFalse(cfg_default.think_mode)
+
+            # File sets to True.
+            cfg_file = Config(config_file=path)
+            self.assertTrue(cfg_file.think_mode)
+
+            # Env overrides file.
+            os.environ["LOCAL_CLI_THINK_MODE"] = "false"
+            cfg_env = Config(config_file=path)
+            self.assertFalse(cfg_env.think_mode)
+
+            # CLI overrides env.
+            cli = SimpleNamespace(think_mode=True)
+            cfg_cli = Config(cli_args=cli, config_file=path)
+            self.assertTrue(cfg_cli.think_mode)
+        finally:
+            os.environ.pop("LOCAL_CLI_THINK_MODE", None)
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+    def test_config_all_new_keys_from_mixed_sources(self) -> None:
+        """Different new keys from different layers coexist correctly."""
+        saved_env = self._save_env()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".conf", delete=False
+        ) as f:
+            f.write("num_ctx=4096\n")
+            f.write("temperature=0.5\n")
+            path = f.name
+
+        try:
+            # num_ctx from env, temperature from file, think_mode from CLI.
+            os.environ["LOCAL_CLI_NUM_CTX"] = "16384"
+            cli = SimpleNamespace(think_mode=True)
+            cfg = Config(cli_args=cli, config_file=path)
+
+            self.assertEqual(cfg.num_ctx, 16384)  # env overrides file
+            self.assertAlmostEqual(cfg.temperature, 0.5)  # file (no env/CLI)
+            self.assertTrue(cfg.think_mode)  # CLI
+            self.assertIsNone(cfg.top_p)  # default (not set anywhere)
+            self.assertIsNone(cfg.top_k)  # default (not set anywhere)
+        finally:
+            os.environ.pop("LOCAL_CLI_NUM_CTX", None)
+            os.unlink(path)
+            os.environ.update(saved_env)
+
+
+
 if __name__ == "__main__":
     unittest.main()

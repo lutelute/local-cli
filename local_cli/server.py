@@ -43,6 +43,7 @@ from local_cli.clipboard import (
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.model_catalog import get_merged_catalog, update_catalog
+from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
@@ -69,6 +70,7 @@ def _send(obj: dict[str, Any]) -> None:
 def _build_system_prompt(tools: list[Tool]) -> str:
     tool_lines = [f"- {t.name}: {t.description}" for t in tools]
     cwd = os.getcwd()
+    tool_section = "\n".join(tool_lines)
     return (
         "You are a coding agent — an autonomous AI assistant that completes tasks by "
         "using tools. You operate in an agent loop: think about what to do, use a tool, "
@@ -77,8 +79,31 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "All file paths should be relative to or within this directory unless the user "
         "specifies an absolute path.\n\n"
         "AVAILABLE TOOLS:\n"
-        + "\n".join(tool_lines)
-        + "\n\nRULES:\n"
+        f"{tool_section}\n\n"
+        "THINKING PROCESS:\n"
+        "Before taking action, think through these steps:\n"
+        "1. What is the goal? Restate the task in your own words.\n"
+        "2. What information do I need? Identify files, context, or state to gather.\n"
+        "3. What tool should I use? Pick the most appropriate tool for this step.\n"
+        "4. What could go wrong? Anticipate errors and plan fallbacks.\n"
+        "Work step by step. Do not try to do everything in one tool call.\n\n"
+        "TOOL USAGE PATTERNS:\n"
+        "- Find then read: Use glob to locate files, then read the matches.\n"
+        "- Read then edit: Always read a file before editing it.\n"
+        "- Search then act: Use grep to find relevant code, then read surrounding context.\n"
+        "- Edit then verify: After editing, read the file back or run tests with bash.\n"
+        "- Write then test: After writing new code, run it with bash to check for errors.\n\n"
+        "ERROR RECOVERY:\n"
+        "If a tool returns an error, do NOT give up. Instead:\n"
+        "1. Read the error message carefully — it usually tells you what went wrong.\n"
+        "2. Adjust your approach (fix the path, correct the syntax, try a different tool).\n"
+        "3. Retry. If it fails again, try an alternative strategy.\n\n"
+        "OUTPUT FORMAT:\n"
+        "- Be concise. Show what you did and the result.\n"
+        "- Don't repeat file contents unless the user asks.\n"
+        "- Let tool outputs speak for themselves.\n"
+        "- Summarize changes at the end of multi-step tasks.\n\n"
+        "RULES:\n"
         "1. ALWAYS use tools to interact with the filesystem. Never guess file contents.\n"
         "2. Before editing a file, ALWAYS read it first to understand its current state.\n"
         "3. Use glob/grep to find files before reading them.\n"
@@ -87,9 +112,8 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "5. After making changes, verify them (read the file back, run tests if applicable).\n"
         "6. Use bash to run commands (tests, builds, git, etc.) when needed.\n"
         "7. If a task requires multiple steps, execute them one by one. Do not stop halfway.\n"
-        "8. Be concise in your explanations. Let tool outputs speak for themselves.\n"
-        "9. If you encounter an error, try to fix it rather than just reporting it.\n"
-        "10. When creating new files, use the write tool. When modifying existing files, "
+        "8. If you encounter an error, try to fix it rather than just reporting it.\n"
+        "9. When creating new files, use the write tool. When modifying existing files, "
         "prefer the edit tool for precise changes.\n"
     )
 
@@ -245,6 +269,38 @@ class JsonLineServer:
         self._stop_flag.clear()
         self._messages.append({"role": "user", "content": content})
 
+        # Build merged inference options: defaults < presets < user config.
+        default_options: dict[str, Any] = {"num_ctx": 8192}
+        preset_options = get_model_preset(self._config.model)
+        user_options: dict[str, Any] = {"num_ctx": self._config.num_ctx}
+        if self._config.temperature is not None:
+            user_options["temperature"] = self._config.temperature
+        if self._config.top_p is not None:
+            user_options["top_p"] = self._config.top_p
+        if self._config.top_k is not None:
+            user_options["top_k"] = self._config.top_k
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        # Determine think mode (only for models that support it).
+        family = get_model_family(self._config.model)
+        think = True if self._config.think_mode and family in SUPPORTS_THINKING else None
+
+        # Build keep_alive from config.
+        keep_alive = self._config.keep_alive
+
+        # Build extra kwargs for providers that support them (Ollama).
+        chat_kwargs: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": self._messages,
+            "tools": self._tool_defs,
+        }
+        if hasattr(self._provider, "chat_stream") and self._provider.name == "ollama":
+            chat_kwargs["options"] = inference_options
+            if think is not None:
+                chat_kwargs["think"] = think
+            if keep_alive is not None:
+                chat_kwargs["keep_alive"] = keep_alive
+
         max_iterations = 15
         for _ in range(max_iterations):
             if self._stop_flag.is_set():
@@ -256,11 +312,7 @@ class JsonLineServer:
             tool_calls = []
 
             try:
-                for chunk in self._provider.chat_stream(
-                    model=self._config.model,
-                    messages=self._messages,
-                    tools=self._tool_defs,
-                ):
+                for chunk in self._provider.chat_stream(**chat_kwargs):
                     if self._stop_flag.is_set():
                         break
 

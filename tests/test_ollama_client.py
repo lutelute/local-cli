@@ -1961,5 +1961,255 @@ class TestOllamaClientRequestNoContent(unittest.TestCase):
         self.assertIsNone(req.data)
 
 
+class TestOllamaClientParameterPassthrough(unittest.TestCase):
+    """Tests for chat/chat_stream parameter passthrough to payloads."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+        self.messages = [{"role": "user", "content": "Hi"}]
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_options_in_payload(
+        self, mock_stream: MagicMock
+    ) -> None:
+        """chat_stream passes options dict into the payload."""
+        mock_stream.return_value = iter([])
+        opts = {"num_ctx": 16384, "temperature": 0.5}
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, options=opts))
+
+        call_args = mock_stream.call_args
+        payload = call_args[0][1]  # second positional arg is data dict
+        self.assertEqual(payload["options"], opts)
+
+    @patch.object(OllamaClient, "_request")
+    def test_chat_options_in_payload(self, mock_req: MagicMock) -> None:
+        """chat passes options dict into the payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }
+        opts = {"num_ctx": 4096, "top_p": 0.9}
+
+        self.client.chat("qwen3:8b", self.messages, options=opts)
+
+        call_kwargs = mock_req.call_args
+        payload = call_kwargs[1]["data"]  # keyword arg 'data'
+        self.assertEqual(payload["options"], opts)
+
+    @patch.object(OllamaClient, "_request")
+    def test_default_num_ctx(self, mock_req: MagicMock) -> None:
+        """When no options are passed, payload has options.num_ctx=8192."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertIn("options", payload)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_default_num_ctx_stream(self, mock_stream: MagicMock) -> None:
+        """When no options are passed to chat_stream, default num_ctx=8192."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertIn("options", payload)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    @patch.object(OllamaClient, "_request")
+    def test_think_top_level(self, mock_req: MagicMock) -> None:
+        """think=True is sent as a top-level key, not inside options."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, think=True)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertTrue(payload["think"])
+        # Must not be nested inside options.
+        self.assertNotIn("think", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_request")
+    def test_format_top_level(self, mock_req: MagicMock) -> None:
+        """format is sent as a top-level key in the payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "{}"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, format="json")
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["format"], "json")
+        self.assertNotIn("format", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_request")
+    def test_format_json_schema(self, mock_req: MagicMock) -> None:
+        """format accepts a JSON schema dict as well as a string."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "{}"},
+            "done": True,
+        }
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+        self.client.chat("qwen3:8b", self.messages, format=schema)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["format"], schema)
+
+    @patch.object(OllamaClient, "_request")
+    def test_keep_alive_top_level(self, mock_req: MagicMock) -> None:
+        """keep_alive is sent as a top-level key in the payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, keep_alive="5m")
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["keep_alive"], "5m")
+        self.assertNotIn("keep_alive", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_request")
+    def test_keep_alive_integer(self, mock_req: MagicMock) -> None:
+        """keep_alive accepts integer seconds."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, keep_alive=300)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["keep_alive"], 300)
+
+    @patch.object(OllamaClient, "_request")
+    def test_options_merge(self, mock_req: MagicMock) -> None:
+        """User-provided options dict replaces defaults entirely."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+        user_opts = {"num_ctx": 32768, "temperature": 0.3, "top_k": 40}
+
+        self.client.chat("qwen3:8b", self.messages, options=user_opts)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["options"], user_opts)
+        # User-supplied options override the default num_ctx.
+        self.assertEqual(payload["options"]["num_ctx"], 32768)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_backward_compat_no_options(self, mock_urlopen: MagicMock) -> None:
+        """Calling chat without new params still works (backward compat)."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        # Old-style call: only model, messages, and tools.
+        result = self.client.chat(
+            "qwen3:8b", self.messages, tools=None,
+        )
+
+        self.assertEqual(result["message"]["content"], "Hello")
+        # Payload should still be well-formed.
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "qwen3:8b")
+        self.assertFalse(body["stream"])
+        self.assertNotIn("tools", body)
+        self.assertNotIn("think", body)
+        self.assertNotIn("format", body)
+        self.assertNotIn("keep_alive", body)
+        # Default options should still be present.
+        self.assertIn("options", body)
+        self.assertEqual(body["options"]["num_ctx"], 8192)
+
+    @patch.object(OllamaClient, "_request")
+    def test_options_none_omitted(self, mock_req: MagicMock) -> None:
+        """None values for think, format, keep_alive are not sent in payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat(
+            "qwen3:8b",
+            self.messages,
+            think=None,
+            format=None,
+            keep_alive=None,
+        )
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertNotIn("think", payload)
+        self.assertNotIn("format", payload)
+        self.assertNotIn("keep_alive", payload)
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_think_top_level(self, mock_stream: MagicMock) -> None:
+        """chat_stream also sends think as a top-level key."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, think=True))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertTrue(payload["think"])
+        self.assertNotIn("think", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_format_top_level(self, mock_stream: MagicMock) -> None:
+        """chat_stream sends format as a top-level key."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, format="json"))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertEqual(payload["format"], "json")
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_keep_alive_top_level(self, mock_stream: MagicMock) -> None:
+        """chat_stream sends keep_alive as a top-level key."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, keep_alive="10m"))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertEqual(payload["keep_alive"], "10m")
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_options_none_omitted(self, mock_stream: MagicMock) -> None:
+        """chat_stream omits None values for think, format, keep_alive."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            self.messages,
+            think=None,
+            format=None,
+            keep_alive=None,
+        ))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertNotIn("think", payload)
+        self.assertNotIn("format", payload)
+        self.assertNotIn("keep_alive", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

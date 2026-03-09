@@ -28,6 +28,7 @@ from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.ideation import IdeationEngine
 from local_cli.knowledge import KnowledgeError, KnowledgeNotFoundError, KnowledgeStore
+from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.session import SessionManager
@@ -70,6 +71,29 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "specifies an absolute path.\n\n"
         "AVAILABLE TOOLS:\n"
         f"{tool_section}\n\n"
+        "THINKING PROCESS:\n"
+        "Before taking action, think through these steps:\n"
+        "1. What is the goal? Restate the task in your own words.\n"
+        "2. What information do I need? Identify files, context, or state to gather.\n"
+        "3. What tool should I use? Pick the most appropriate tool for this step.\n"
+        "4. What could go wrong? Anticipate errors and plan fallbacks.\n"
+        "Work step by step. Do not try to do everything in one tool call.\n\n"
+        "TOOL USAGE PATTERNS:\n"
+        "- Find then read: Use glob to locate files, then read the matches.\n"
+        "- Read then edit: Always read a file before editing it.\n"
+        "- Search then act: Use grep to find relevant code, then read surrounding context.\n"
+        "- Edit then verify: After editing, read the file back or run tests with bash.\n"
+        "- Write then test: After writing new code, run it with bash to check for errors.\n\n"
+        "ERROR RECOVERY:\n"
+        "If a tool returns an error, do NOT give up. Instead:\n"
+        "1. Read the error message carefully — it usually tells you what went wrong.\n"
+        "2. Adjust your approach (fix the path, correct the syntax, try a different tool).\n"
+        "3. Retry. If it fails again, try an alternative strategy.\n\n"
+        "OUTPUT FORMAT:\n"
+        "- Be concise. Show what you did and the result.\n"
+        "- Don't repeat file contents unless the user asks.\n"
+        "- Let tool outputs speak for themselves.\n"
+        "- Summarize changes at the end of multi-step tasks.\n\n"
         "RULES:\n"
         "1. ALWAYS use tools to interact with the filesystem. Never guess file contents.\n"
         "2. Before editing a file, ALWAYS read it first to understand its current state.\n"
@@ -79,9 +103,8 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "5. After making changes, verify them (read the file back, run tests if applicable).\n"
         "6. Use bash to run commands (tests, builds, git, etc.) when needed.\n"
         "7. If a task requires multiple steps, execute them one by one. Do not stop halfway.\n"
-        "8. Be concise in your explanations. Let tool outputs speak for themselves.\n"
-        "9. If you encounter an error, try to fix it rather than just reporting it.\n"
-        "10. When creating new files, use the write tool. When modifying existing files, "
+        "8. If you encounter an error, try to fix it rather than just reporting it.\n"
+        "9. When creating new files, use the write tool. When modifying existing files, "
         "prefer the edit tool for precise changes.\n"
     )
 
@@ -1254,6 +1277,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to model registry JSON file.",
     )
     parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=None,
+        help="Context window size in tokens (default: model-specific).",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature (default: model-specific).",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p (nucleus) sampling threshold (default: model-specific).",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling limit (default: model-specific).",
+    )
+    parser.add_argument(
+        "--think-mode",
+        action="store_true",
+        default=None,
+        help="Enable extended thinking mode for supported models.",
+    )
+    parser.add_argument(
         "--server",
         action="store_true",
         default=False,
@@ -1467,6 +1520,18 @@ def run_repl(
         # Build user message and add to history.
         messages.append({"role": "user", "content": prompt_content})
 
+        # Build merged inference options: defaults < presets < user config.
+        default_options: dict = {"num_ctx": 8192}
+        preset_options = get_model_preset(config.model)
+        user_options: dict = {"num_ctx": config.num_ctx}
+        if config.temperature is not None:
+            user_options["temperature"] = config.temperature
+        if config.top_p is not None:
+            user_options["top_p"] = config.top_p
+        if config.top_k is not None:
+            user_options["top_k"] = config.top_k
+        inference_options = {**default_options, **preset_options, **user_options}
+
         # Run the agent loop (streams response to stdout).
         try:
             agent_loop(
@@ -1475,6 +1540,7 @@ def run_repl(
                 tools=tools,
                 messages=messages,
                 debug=config.debug,
+                options=inference_options,
             )
         except KeyboardInterrupt:
             print("\nInterrupted.")

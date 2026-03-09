@@ -300,7 +300,9 @@ class OllamaClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
         think: bool | None = None,
+        format: str | dict[str, Any] | None = None,
         keep_alive: str | int | None = None,
     ) -> Generator[dict[str, Any], None, None]:
         """Stream a chat completion from Ollama.
@@ -315,13 +317,16 @@ class OllamaClient:
             model: Ollama model name (e.g. ``qwen3:8b``).
             messages: Conversation messages list.
             tools: Optional list of tool definitions in Ollama format.
-            think: Optional flag to enable chain-of-thought reasoning.
-                When ``True``, the model may include a ``thinking`` field
-                in response chunks.  Only included in the payload when
-                not ``None``.
-            keep_alive: Optional duration to keep the model loaded in
-                memory (e.g. ``"5m"``, ``300``).  Only included in the
-                payload when not ``None``.
+            options: Optional dict of inference parameters (e.g.
+                ``{"num_ctx": 8192, "temperature": 0.6}``).  Passed as
+                the nested ``options`` key in the Ollama request body.
+                When *None*, a default of ``{"num_ctx": 8192}`` is used.
+            think: Optional flag to enable thinking mode (e.g. for Qwen3).
+                Sent as a top-level ``think`` key in the request body.
+            format: Optional response format specification (e.g. ``"json"``
+                or a JSON schema dict).  Sent as a top-level ``format`` key.
+            keep_alive: Optional duration to keep the model loaded (e.g.
+                ``"5m"`` or ``300``).  Sent as a top-level ``keep_alive`` key.
 
         Yields:
             Parsed JSON chunks from the streaming response.
@@ -339,8 +344,12 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = tools
+        # Inference options: use caller-provided options or sensible defaults.
+        payload["options"] = options if options is not None else {"num_ctx": 8192}
         if think is not None:
             payload["think"] = think
+        if format is not None:
+            payload["format"] = format
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
 
@@ -353,7 +362,9 @@ class OllamaClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
         think: bool | None = None,
+        format: str | dict[str, Any] | None = None,
         keep_alive: str | int | None = None,
     ) -> dict[str, Any]:
         """Send a non-streaming chat completion request.
@@ -362,13 +373,16 @@ class OllamaClient:
             model: Ollama model name.
             messages: Conversation messages list.
             tools: Optional list of tool definitions in Ollama format.
-            think: Optional flag to enable chain-of-thought reasoning.
-                When ``True``, the model may include a ``thinking`` field
-                in the response.  Only included in the payload when not
-                ``None``.
-            keep_alive: Optional duration to keep the model loaded in
-                memory (e.g. ``"5m"``, ``300``).  Only included in the
-                payload when not ``None``.
+            options: Optional dict of inference parameters (e.g.
+                ``{"num_ctx": 8192, "temperature": 0.6}``).  Passed as
+                the nested ``options`` key in the Ollama request body.
+                When *None*, a default of ``{"num_ctx": 8192}`` is used.
+            think: Optional flag to enable thinking mode (e.g. for Qwen3).
+                Sent as a top-level ``think`` key in the request body.
+            format: Optional response format specification (e.g. ``"json"``
+                or a JSON schema dict).  Sent as a top-level ``format`` key.
+            keep_alive: Optional duration to keep the model loaded (e.g.
+                ``"5m"`` or ``300``).  Sent as a top-level ``keep_alive`` key.
 
         Returns:
             The full response dict from Ollama.
@@ -386,8 +400,12 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = tools
+        # Inference options: use caller-provided options or sensible defaults.
+        payload["options"] = options if options is not None else {"num_ctx": 8192}
         if think is not None:
             payload["think"] = think
+        if format is not None:
+            payload["format"] = format
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
 
