@@ -26,6 +26,11 @@
 <p align="center"><em>AI agent autonomously creates a 2048 game — write tool in action</em></p>
 
 <p align="center">
+  <img src="assets/demo-2048-solver.gif" alt="AI creating a 2048 solver" width="700"/>
+</p>
+<p align="center"><em>AI builds a 2048 solver with 3 strategies and benchmarks them</em></p>
+
+<p align="center">
   <img src="assets/demo-2048-compare.gif" alt="3 AI strategies playing 2048 side by side" width="700"/>
 </p>
 <p align="center"><em>3 AI strategies compared: Random vs Heuristic vs Lookahead — game over side by side</em></p>
