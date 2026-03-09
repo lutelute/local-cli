@@ -82,7 +82,8 @@ declare global {
         error?: string
       }>
       installAppUpdate: (zipUrl: string) => Promise<{ success: boolean; error?: string }>
-      onUpdateProgress: (cb: (progress: { stage: string; percent: number }) => void) => () => void
+      onUpdateProgress: (cb: (progress: { stage: string; percent: number; version?: string }) => void) => () => void
+      onAutoUpdateStart: (cb: (info: { version: string }) => void) => () => void
       openExternalUrl: (url: string) => Promise<void>
       getClaudeAuth: () => Promise<{
         method: string | null

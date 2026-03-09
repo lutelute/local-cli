@@ -632,10 +632,75 @@ function fetchJson(url: string): Promise<any> {
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   initClaudeAuth()
   startPythonServer()
   createWindow()
+
+  // Auto-update: check on startup, download+install automatically if available.
+  try {
+    const data = await fetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
+    const latest = (data.tag_name || '').replace(/^v/, '')
+    if (latest && latest !== APP_VERSION) {
+      const zip = data.assets?.find((a: any) =>
+        a.name.endsWith('-mac.zip') || a.name.endsWith('.zip')
+      )
+      if (zip?.browser_download_url && app.isPackaged) {
+        console.log(`Auto-update: ${APP_VERSION} → ${latest}`)
+        // Notify renderer that auto-update is starting.
+        const sendProgress = (stage: string, percent: number) => {
+          mainWindow?.webContents.send('update-progress', { stage, percent, version: latest })
+        }
+        mainWindow?.webContents.send('auto-update-start', { version: latest })
+
+        // Download.
+        sendProgress('downloading', 0)
+        const tmpZip = path.join(os.tmpdir(), `local-cli-update-${Date.now()}.zip`)
+        await downloadFile(zip.browser_download_url, tmpZip, (pct) => sendProgress('downloading', pct))
+
+        // Extract.
+        sendProgress('extracting', 0)
+        const tmpDir = path.join(os.tmpdir(), `local-cli-update-${Date.now()}`)
+        fs.mkdirSync(tmpDir, { recursive: true })
+        await new Promise<void>((resolve, reject) => {
+          execFile('ditto', ['-xk', tmpZip, tmpDir], (err) => {
+            err ? reject(err) : resolve()
+          })
+        })
+        sendProgress('extracting', 100)
+
+        // Find .app and replace.
+        const entries = fs.readdirSync(tmpDir)
+        const appBundle = entries.find(e => e.endsWith('.app'))
+        if (appBundle) {
+          const newAppPath = path.join(tmpDir, appBundle)
+          const currentAppPath = path.resolve(process.resourcesPath!, '..', '..')
+
+          if (currentAppPath.endsWith('.app')) {
+            sendProgress('installing', 50)
+            const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
+            fs.writeFileSync(installScript, `#!/bin/bash
+sleep 1
+while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do sleep 0.5; done
+rm -rf "${currentAppPath}"
+mv "${newAppPath}" "${currentAppPath}"
+rm -f "${tmpZip}"
+rm -rf "${tmpDir}"
+open "${currentAppPath}"
+rm -f "${installScript}"
+`, { mode: 0o755 })
+
+            spawn('bash', [installScript], { detached: true, stdio: 'ignore' }).unref()
+            sendProgress('installing', 100)
+
+            setTimeout(() => { pythonProcess?.kill(); app.quit() }, 500)
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('Auto-update check failed (non-fatal):', e)
+  }
 })
 
 app.on('window-all-closed', () => {

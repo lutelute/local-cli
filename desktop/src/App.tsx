@@ -34,6 +34,7 @@ export default function App() {
   const [updateMessage, setUpdateMessage] = useState('')
   const [appUpdating, setAppUpdating] = useState(false)
   const [appUpdateResult, setAppUpdateResult] = useState('')
+  const [autoUpdateProgress, setAutoUpdateProgress] = useState<{ stage: string; percent: number; version?: string } | null>(null)
   const [explorerOpen, setExplorerOpen] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showClaudeLogin, setShowClaudeLogin] = useState(false)
@@ -66,6 +67,18 @@ export default function App() {
         setClaudeAuthMethod(auth.method)
       }
     })
+  }, [])
+
+  // Listen for auto-update events from main process.
+  useEffect(() => {
+    if (!window.api) return
+    const cleanupStart = window.api.onAutoUpdateStart((info) => {
+      setAutoUpdateProgress({ stage: 'starting', percent: 0, version: info.version })
+    })
+    const cleanupProgress = window.api.onUpdateProgress((progress) => {
+      setAutoUpdateProgress(progress)
+    })
+    return () => { cleanupStart(); cleanupProgress() }
   }, [])
 
   // Cmd/Ctrl+, keyboard shortcut for settings.
@@ -472,7 +485,24 @@ export default function App() {
         )}
       </div>
 
-      {(updateAvailable || appUpdateResult) && (
+      {autoUpdateProgress && (
+        <div className="update-bar">
+          <span className="update-bar-text">
+            {autoUpdateProgress.stage === 'downloading'
+              ? `Downloading v${autoUpdateProgress.version || '?'}... ${autoUpdateProgress.percent}%`
+              : autoUpdateProgress.stage === 'extracting'
+              ? 'Extracting...'
+              : autoUpdateProgress.stage === 'installing'
+              ? 'Installing... app will restart'
+              : `Updating to v${autoUpdateProgress.version || '?'}...`}
+          </span>
+          <div className="update-bar-progress">
+            <div className="update-bar-fill" style={{ width: `${autoUpdateProgress.percent}%` }} />
+          </div>
+        </div>
+      )}
+
+      {!autoUpdateProgress && (updateAvailable || appUpdateResult) && (
         <div className="update-bar">
           {appUpdating ? (
             <span className="update-bar-text">Updating...</span>

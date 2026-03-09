@@ -229,6 +229,21 @@ body {
   border-color: var(--text-dim);
 }
 
+.update-bar-progress {
+  flex: 1;
+  height: 4px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-left: 8px;
+}
+.update-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
 /* Terminal output */
 .terminal {
   flex: 1;
