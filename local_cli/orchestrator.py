@@ -7,14 +7,24 @@ worker models handle specific tasks.
 
 The orchestrator caches provider instances so that switching back to a
 previously used provider does not incur re-initialization costs.
+
+Sub-agent support: the orchestrator can spawn independent sub-agents
+that run in parallel via :class:`~local_cli.sub_agent.SubAgentRunner`.
+Each sub-agent gets a fresh :class:`~local_cli.providers.base.LLMProvider`
+instance for thread safety.
 """
 
+from __future__ import annotations
+
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_cli.config import Config
 from local_cli.model_registry import ModelRegistry, TaskType
 from local_cli.providers.base import LLMProvider
+
+if TYPE_CHECKING:
+    from local_cli.sub_agent import SubAgentResult, SubAgentRunner
 
 
 class Orchestrator:
@@ -45,6 +55,9 @@ class Orchestrator:
         self._providers: dict[str, LLMProvider] = {}
         self._active_provider_name: str = config.provider
         self._brain_model: str = config.orchestrator_model or config.model
+
+        # Sub-agent runner is lazily created on first use.
+        self._sub_agent_runner: SubAgentRunner | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -278,3 +291,136 @@ class Orchestrator:
                 clear the registry and fall back to config defaults.
         """
         self._registry = value
+
+    # ------------------------------------------------------------------
+    # Sub-agent support
+    # ------------------------------------------------------------------
+
+    def create_fresh_provider(
+        self,
+        name: str | None = None,
+    ) -> LLMProvider:
+        """Create a new, uncached provider instance for sub-agent use.
+
+        Unlike :meth:`get_provider` (which caches instances by name),
+        this method always creates a **new** provider instance.  This
+        ensures that each sub-agent thread gets its own
+        :class:`LLMProvider` with its own underlying HTTP client, which
+        is necessary for thread safety.
+
+        Args:
+            name: Provider name to create.  If ``None``, uses the
+                active provider name.
+
+        Returns:
+            A new :class:`LLMProvider` instance (not added to the cache).
+
+        Raises:
+            ValueError: If the provider name is unknown or the provider
+                cannot be initialized.
+        """
+        if name is None:
+            name = self._active_provider_name
+        return self._create_provider(name)
+
+    def _ensure_sub_agent_runner(self) -> SubAgentRunner:
+        """Return the sub-agent runner, creating it lazily if needed.
+
+        Returns:
+            The :class:`SubAgentRunner` instance.
+        """
+        if self._sub_agent_runner is None:
+            from local_cli.sub_agent import SubAgentRunner
+
+            self._sub_agent_runner = SubAgentRunner()
+        return self._sub_agent_runner
+
+    def spawn_agent(
+        self,
+        prompt: str,
+        description: str = "",
+        model: str | None = None,
+        run_in_background: bool = False,
+    ) -> SubAgentResult | str:
+        """Spawn a sub-agent to execute a task.
+
+        Convenience method that creates a :class:`SubAgent` using the
+        active provider configuration and model, then submits it to the
+        :class:`SubAgentRunner`.
+
+        A **fresh** provider instance is created for thread safety (via
+        :meth:`create_fresh_provider`).  The sub-agent gets the default
+        sub-agent tools (no ``AgentTool``, no ``AskUserTool``).
+
+        Args:
+            prompt: Detailed task prompt for the sub-agent.
+            description: Short description of the task (3-5 words).
+                Defaults to ``"sub-agent task"`` if empty.
+            model: Model name to use.  If ``None``, uses the config
+                model (``self._config.model``).
+            run_in_background: If ``True``, returns immediately with
+                the agent ID string.  If ``False`` (default), blocks
+                until the sub-agent completes and returns the result.
+
+        Returns:
+            A :class:`SubAgentResult` when ``run_in_background`` is
+            ``False``, or the agent ID string when ``True``.
+
+        Raises:
+            ValueError: If *prompt* is empty.
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("Sub-agent prompt cannot be empty")
+
+        from local_cli.sub_agent import SubAgent
+        from local_cli.tools import get_sub_agent_tools
+
+        runner = self._ensure_sub_agent_runner()
+        fresh_provider = self.create_fresh_provider()
+        agent_model = model or self._config.model
+        sub_agent_tools = get_sub_agent_tools()
+
+        sub_agent = SubAgent(
+            provider=fresh_provider,
+            model=agent_model,
+            tools=sub_agent_tools,
+            prompt=prompt.strip(),
+            description=description or "sub-agent task",
+        )
+
+        if run_in_background:
+            return runner.submit_background(sub_agent)
+
+        return runner.submit(sub_agent)
+
+    def get_background_result(
+        self,
+        agent_id: str,
+    ) -> SubAgentResult | None:
+        """Retrieve the result of a background sub-agent.
+
+        Delegates to :meth:`SubAgentRunner.get_background_result`.
+        Returns ``None`` if the runner has not been created, the agent
+        ID is not recognized, or the agent is still running.
+
+        Args:
+            agent_id: The agent ID returned by :meth:`spawn_agent`
+                with ``run_in_background=True``.
+
+        Returns:
+            The sub-agent result if completed, or ``None``.
+        """
+        if self._sub_agent_runner is None:
+            return None
+        return self._sub_agent_runner.get_background_result(agent_id)
+
+    def shutdown_agents(self) -> None:
+        """Shut down the sub-agent runner and its thread pool.
+
+        Cancels pending futures and waits for running threads to
+        complete.  Safe to call multiple times or when no runner
+        has been created.
+        """
+        if self._sub_agent_runner is not None:
+            self._sub_agent_runner.shutdown()
+            self._sub_agent_runner = None

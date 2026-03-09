@@ -1209,6 +1209,672 @@ class TestOllamaClientCreateModel(unittest.TestCase):
         mock_resp.close.assert_called_once()
 
 
+class TestOllamaClientThinkParam(unittest.TestCase):
+    """Tests for the think parameter in chat() and chat_stream()."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    def _make_stream_response(self, lines: list[bytes]) -> MagicMock:
+        """Create a mock response that iterates over NDJSON lines."""
+        mock_resp = MagicMock()
+        mock_resp.__iter__ = MagicMock(return_value=iter(lines))
+        mock_resp.close = MagicMock()
+        return mock_resp
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_think_true_included_in_payload(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with think=True includes think in the request payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            think=True,
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["think"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_think_false_included_in_payload(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with think=False includes think=False in the payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            think=False,
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertFalse(body["think"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_think_none_excluded_from_payload(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with think=None (default) omits think from the payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat("qwen3:8b", [{"role": "user", "content": "Hi"}])
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("think", body)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_think_true_included_in_payload(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with think=True includes think in the payload."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            think=True,
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["think"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_think_false_included_in_payload(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with think=False includes think=False in the payload."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            think=False,
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertFalse(body["think"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_think_none_excluded_from_payload(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with think=None (default) omits think from the payload."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("think", body)
+
+
+class TestOllamaClientKeepAliveParam(unittest.TestCase):
+    """Tests for the keep_alive parameter in chat() and chat_stream()."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    def _make_stream_response(self, lines: list[bytes]) -> MagicMock:
+        """Create a mock response that iterates over NDJSON lines."""
+        mock_resp = MagicMock()
+        mock_resp.__iter__ = MagicMock(return_value=iter(lines))
+        mock_resp.close = MagicMock()
+        return mock_resp
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_keep_alive_string_included(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with keep_alive='5m' includes keep_alive in the payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            keep_alive="5m",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["keep_alive"], "5m")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_keep_alive_int_included(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with keep_alive=300 (seconds) includes keep_alive in the payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            keep_alive=300,
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["keep_alive"], 300)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_keep_alive_none_excluded(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with keep_alive=None (default) omits keep_alive from the payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat("qwen3:8b", [{"role": "user", "content": "Hi"}])
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("keep_alive", body)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_keep_alive_string_included(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with keep_alive='10m' includes keep_alive in the payload."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            keep_alive="10m",
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["keep_alive"], "10m")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_keep_alive_int_included(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with keep_alive=600 includes keep_alive in the payload."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            keep_alive=600,
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["keep_alive"], 600)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_keep_alive_none_excluded(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with keep_alive=None (default) omits keep_alive."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("keep_alive", body)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_think_and_keep_alive_combined(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat() with both think and keep_alive includes both in the payload."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        self.client.chat(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            think=True,
+            keep_alive="5m",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["think"])
+        self.assertEqual(body["keep_alive"], "5m")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_chat_stream_think_and_keep_alive_combined(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """chat_stream() with both think and keep_alive includes both."""
+        lines = [
+            json.dumps({"message": {"content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+            think=True,
+            keep_alive="10m",
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["think"])
+        self.assertEqual(body["keep_alive"], "10m")
+
+
+class TestOllamaClientGenerateStream(unittest.TestCase):
+    """Tests for the generate_stream() method."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    def _make_stream_response(self, lines: list[bytes]) -> MagicMock:
+        """Create a mock response that iterates over NDJSON lines."""
+        mock_resp = MagicMock()
+        mock_resp.__iter__ = MagicMock(return_value=iter(lines))
+        mock_resp.close = MagicMock()
+        return mock_resp
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_request_format(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream sends POST to /api/generate with stream=true."""
+        lines = [
+            json.dumps({"response": "Hello", "done": False}).encode() + b"\n",
+            json.dumps({"response": "", "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.generate_stream("qwen3:8b", "Say hello"))
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:11434/api/generate")
+        self.assertEqual(req.method, "POST")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "qwen3:8b")
+        self.assertEqual(body["prompt"], "Say hello")
+        self.assertTrue(body["stream"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_yields_chunks(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream yields parsed chunks from the NDJSON stream."""
+        lines = [
+            json.dumps({"response": "Hello", "done": False}).encode() + b"\n",
+            json.dumps({"response": " world", "done": False}).encode() + b"\n",
+            json.dumps({"response": "", "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        chunks = list(self.client.generate_stream("qwen3:8b", "Say hello"))
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual(chunks[0]["response"], "Hello")
+        self.assertEqual(chunks[1]["response"], " world")
+        self.assertTrue(chunks[2]["done"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_with_kwargs(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream forwards extra kwargs to the payload."""
+        lines = [
+            json.dumps({"response": "", "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.generate_stream(
+            "qwen3:8b",
+            "Think deeply",
+            think=True,
+            keep_alive="5m",
+        ))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["think"])
+        self.assertEqual(body["keep_alive"], "5m")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_without_kwargs_excludes_extra_keys(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream without kwargs only includes model, prompt, stream."""
+        lines = [
+            json.dumps({"response": "", "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.generate_stream("qwen3:8b", "Hello"))
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(set(body.keys()), {"model", "prompt", "stream"})
+
+    def test_generate_stream_validates_model_name(self) -> None:
+        """generate_stream rejects invalid model names."""
+        with self.assertRaises(ValueError):
+            list(self.client.generate_stream("../../../etc/passwd", "test"))
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_connection_error(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream raises OllamaConnectionError on connection failure."""
+        mock_urlopen.side_effect = urllib.error.URLError(
+            ConnectionRefusedError("Connection refused")
+        )
+
+        with self.assertRaises(OllamaConnectionError):
+            list(self.client.generate_stream("qwen3:8b", "test"))
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_timeout(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream raises OllamaConnectionError on timeout."""
+        mock_urlopen.side_effect = socket.timeout("timed out")
+
+        with self.assertRaises(OllamaConnectionError):
+            list(self.client.generate_stream("qwen3:8b", "test"))
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_mid_stream_error(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream raises OllamaStreamError on mid-stream error."""
+        lines = [
+            json.dumps({"response": "Hello", "done": False}).encode() + b"\n",
+            json.dumps({"error": "out of memory"}).encode() + b"\n",
+        ]
+        mock_resp = self._make_stream_response(lines)
+        mock_urlopen.return_value = mock_resp
+
+        chunks = []
+        with self.assertRaises(OllamaStreamError) as ctx:
+            for chunk in self.client.generate_stream("qwen3:8b", "test"):
+                chunks.append(chunk)
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["response"], "Hello")
+        self.assertIn("out of memory", str(ctx.exception))
+        mock_resp.close.assert_called_once()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_uses_stream_timeout(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream uses _STREAM_TIMEOUT for the request."""
+        lines = [
+            json.dumps({"response": "", "done": True}).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        list(self.client.generate_stream("qwen3:8b", "test"))
+
+        call_kwargs = mock_urlopen.call_args
+        self.assertEqual(call_kwargs[1]["timeout"], _STREAM_TIMEOUT)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_response_closed_after_iteration(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """Response object is closed after generate_stream is consumed."""
+        lines = [
+            json.dumps({"response": "done", "done": True}).encode() + b"\n",
+        ]
+        mock_resp = self._make_stream_response(lines)
+        mock_urlopen.return_value = mock_resp
+
+        list(self.client.generate_stream("qwen3:8b", "test"))
+        mock_resp.close.assert_called_once()
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_generate_stream_http_error(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """generate_stream raises OllamaRequestError on HTTP error."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "http://localhost:11434/api/generate",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+
+        with self.assertRaises(OllamaRequestError):
+            list(self.client.generate_stream("qwen3:8b", "test"))
+
+
+class TestOllamaClientThinkingFieldHandling(unittest.TestCase):
+    """Tests for handling the 'thinking' field in streaming response chunks."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+
+    def _make_stream_response(self, lines: list[bytes]) -> MagicMock:
+        """Create a mock response that iterates over NDJSON lines."""
+        mock_resp = MagicMock()
+        mock_resp.__iter__ = MagicMock(return_value=iter(lines))
+        mock_resp.close = MagicMock()
+        return mock_resp
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_thinking_field_in_stream_chunks(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """Streaming chunks with 'thinking' field are yielded correctly."""
+        lines = [
+            json.dumps({
+                "message": {"role": "assistant", "content": "", "thinking": "Let me think..."},
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"role": "assistant", "content": "", "thinking": "I need to consider..."},
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"role": "assistant", "content": "Here is my answer."},
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+            }).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        chunks = list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Think about this"}],
+            think=True,
+        ))
+
+        self.assertEqual(len(chunks), 4)
+        # Thinking chunks have the thinking field.
+        self.assertEqual(chunks[0]["message"]["thinking"], "Let me think...")
+        self.assertEqual(chunks[1]["message"]["thinking"], "I need to consider...")
+        # Content chunks have normal content.
+        self.assertEqual(chunks[2]["message"]["content"], "Here is my answer.")
+        # Final done chunk.
+        self.assertTrue(chunks[3]["done"])
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_thinking_field_absent_when_think_not_set(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """Chunks without thinking field work normally (think not enabled)."""
+        lines = [
+            json.dumps({
+                "message": {"role": "assistant", "content": "Hello"},
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+            }).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        chunks = list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Hi"}],
+        ))
+
+        self.assertEqual(len(chunks), 2)
+        self.assertNotIn("thinking", chunks[0]["message"])
+        self.assertEqual(chunks[0]["message"]["content"], "Hello")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_thinking_field_mixed_with_content(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """Chunks can have both thinking and content fields simultaneously."""
+        lines = [
+            json.dumps({
+                "message": {
+                    "role": "assistant",
+                    "content": "partial",
+                    "thinking": "reasoning step",
+                },
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"role": "assistant", "content": " answer"},
+                "done": True,
+            }).encode() + b"\n",
+        ]
+        mock_urlopen.return_value = self._make_stream_response(lines)
+
+        chunks = list(self.client.chat_stream(
+            "qwen3:8b",
+            [{"role": "user", "content": "Think"}],
+            think=True,
+        ))
+
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0]["message"]["thinking"], "reasoning step")
+        self.assertEqual(chunks[0]["message"]["content"], "partial")
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_non_streaming_chat_with_thinking_response(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        """Non-streaming chat() returns thinking field when present."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "thinking": "Let me calculate step by step...",
+            },
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.chat(
+            "qwen3:8b",
+            [{"role": "user", "content": "What is 6*7?"}],
+            think=True,
+        )
+
+        self.assertEqual(result["message"]["content"], "The answer is 42.")
+        self.assertEqual(
+            result["message"]["thinking"],
+            "Let me calculate step by step...",
+        )
+
+
 class TestOllamaClientRequestNoContent(unittest.TestCase):
     """Tests for the _request_no_content() helper."""
 
@@ -1293,6 +1959,256 @@ class TestOllamaClientRequestNoContent(unittest.TestCase):
 
         req = mock_urlopen.call_args[0][0]
         self.assertIsNone(req.data)
+
+
+class TestOllamaClientParameterPassthrough(unittest.TestCase):
+    """Tests for chat/chat_stream parameter passthrough to payloads."""
+
+    def setUp(self) -> None:
+        self.client = OllamaClient()
+        self.messages = [{"role": "user", "content": "Hi"}]
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_options_in_payload(
+        self, mock_stream: MagicMock
+    ) -> None:
+        """chat_stream passes options dict into the payload."""
+        mock_stream.return_value = iter([])
+        opts = {"num_ctx": 16384, "temperature": 0.5}
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, options=opts))
+
+        call_args = mock_stream.call_args
+        payload = call_args[0][1]  # second positional arg is data dict
+        self.assertEqual(payload["options"], opts)
+
+    @patch.object(OllamaClient, "_request")
+    def test_chat_options_in_payload(self, mock_req: MagicMock) -> None:
+        """chat passes options dict into the payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }
+        opts = {"num_ctx": 4096, "top_p": 0.9}
+
+        self.client.chat("qwen3:8b", self.messages, options=opts)
+
+        call_kwargs = mock_req.call_args
+        payload = call_kwargs[1]["data"]  # keyword arg 'data'
+        self.assertEqual(payload["options"], opts)
+
+    @patch.object(OllamaClient, "_request")
+    def test_default_num_ctx(self, mock_req: MagicMock) -> None:
+        """When no options are passed, payload has options.num_ctx=8192."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertIn("options", payload)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_default_num_ctx_stream(self, mock_stream: MagicMock) -> None:
+        """When no options are passed to chat_stream, default num_ctx=8192."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertIn("options", payload)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    @patch.object(OllamaClient, "_request")
+    def test_think_top_level(self, mock_req: MagicMock) -> None:
+        """think=True is sent as a top-level key, not inside options."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, think=True)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertTrue(payload["think"])
+        # Must not be nested inside options.
+        self.assertNotIn("think", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_request")
+    def test_format_top_level(self, mock_req: MagicMock) -> None:
+        """format is sent as a top-level key in the payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "{}"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, format="json")
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["format"], "json")
+        self.assertNotIn("format", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_request")
+    def test_format_json_schema(self, mock_req: MagicMock) -> None:
+        """format accepts a JSON schema dict as well as a string."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "{}"},
+            "done": True,
+        }
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+        self.client.chat("qwen3:8b", self.messages, format=schema)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["format"], schema)
+
+    @patch.object(OllamaClient, "_request")
+    def test_keep_alive_top_level(self, mock_req: MagicMock) -> None:
+        """keep_alive is sent as a top-level key in the payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, keep_alive="5m")
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["keep_alive"], "5m")
+        self.assertNotIn("keep_alive", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_request")
+    def test_keep_alive_integer(self, mock_req: MagicMock) -> None:
+        """keep_alive accepts integer seconds."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat("qwen3:8b", self.messages, keep_alive=300)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["keep_alive"], 300)
+
+    @patch.object(OllamaClient, "_request")
+    def test_options_merge(self, mock_req: MagicMock) -> None:
+        """User-provided options dict replaces defaults entirely."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+        user_opts = {"num_ctx": 32768, "temperature": 0.3, "top_k": 40}
+
+        self.client.chat("qwen3:8b", self.messages, options=user_opts)
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertEqual(payload["options"], user_opts)
+        # User-supplied options override the default num_ctx.
+        self.assertEqual(payload["options"]["num_ctx"], 32768)
+
+    @patch("local_cli.ollama_client.urllib.request.urlopen")
+    def test_backward_compat_no_options(self, mock_urlopen: MagicMock) -> None:
+        """Calling chat without new params still works (backward compat)."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "model": "qwen3:8b",
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": True,
+        }).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        # Old-style call: only model, messages, and tools.
+        result = self.client.chat(
+            "qwen3:8b", self.messages, tools=None,
+        )
+
+        self.assertEqual(result["message"]["content"], "Hello")
+        # Payload should still be well-formed.
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "qwen3:8b")
+        self.assertFalse(body["stream"])
+        self.assertNotIn("tools", body)
+        self.assertNotIn("think", body)
+        self.assertNotIn("format", body)
+        self.assertNotIn("keep_alive", body)
+        # Default options should still be present.
+        self.assertIn("options", body)
+        self.assertEqual(body["options"]["num_ctx"], 8192)
+
+    @patch.object(OllamaClient, "_request")
+    def test_options_none_omitted(self, mock_req: MagicMock) -> None:
+        """None values for think, format, keep_alive are not sent in payload."""
+        mock_req.return_value = {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+        }
+
+        self.client.chat(
+            "qwen3:8b",
+            self.messages,
+            think=None,
+            format=None,
+            keep_alive=None,
+        )
+
+        payload = mock_req.call_args[1]["data"]
+        self.assertNotIn("think", payload)
+        self.assertNotIn("format", payload)
+        self.assertNotIn("keep_alive", payload)
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_think_top_level(self, mock_stream: MagicMock) -> None:
+        """chat_stream also sends think as a top-level key."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, think=True))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertTrue(payload["think"])
+        self.assertNotIn("think", payload.get("options", {}))
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_format_top_level(self, mock_stream: MagicMock) -> None:
+        """chat_stream sends format as a top-level key."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, format="json"))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertEqual(payload["format"], "json")
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_keep_alive_top_level(self, mock_stream: MagicMock) -> None:
+        """chat_stream sends keep_alive as a top-level key."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream("qwen3:8b", self.messages, keep_alive="10m"))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertEqual(payload["keep_alive"], "10m")
+
+    @patch.object(OllamaClient, "_stream_request")
+    def test_chat_stream_options_none_omitted(self, mock_stream: MagicMock) -> None:
+        """chat_stream omits None values for think, format, keep_alive."""
+        mock_stream.return_value = iter([])
+
+        list(self.client.chat_stream(
+            "qwen3:8b",
+            self.messages,
+            think=None,
+            format=None,
+            keep_alive=None,
+        ))
+
+        payload = mock_stream.call_args[0][1]
+        self.assertNotIn("think", payload)
+        self.assertNotIn("format", payload)
+        self.assertNotIn("keep_alive", payload)
 
 
 if __name__ == "__main__":

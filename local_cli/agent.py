@@ -8,10 +8,15 @@ tokens arrive.
 
 import json
 import sys
+import time
 from typing import Any, Generator
 
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
-from local_cli.providers.base import ProviderStreamError
+from local_cli.providers.base import (
+    LLMProvider,
+    ProviderRequestError,
+    ProviderStreamError,
+)
 from local_cli.spinner import Spinner
 from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
@@ -46,6 +51,31 @@ _COMPACT_ASSISTANT_MAX = 500
 # Number of recent messages to preserve uncompacted.
 _COMPACT_KEEP_RECENT = 10
 
+# ---------------------------------------------------------------------------
+# Fast-mode heuristic constants
+# ---------------------------------------------------------------------------
+
+# Default word-count threshold for complexity detection.
+_COMPLEX_WORD_THRESHOLD = 50
+
+# Keywords that suggest a request is complex / plan-worthy.
+_COMPLEX_KEYWORDS = frozenset({
+    "refactor",
+    "migrate",
+    "redesign",
+    "architecture",
+    "integrate",
+    "implement",
+    "restructure",
+    "multi-step",
+    "multiple files",
+    "across files",
+    "step by step",
+    "plan",
+    "break down",
+    "phases",
+})
+
 
 # ---------------------------------------------------------------------------
 # Streaming response collector
@@ -69,6 +99,12 @@ def collect_streaming_response(
     and ``eval_count`` are read from the final chunk (``done: true``).
     For Claude, the ``usage`` metadata dict is used instead.
 
+    Thinking content (``message.thinking``) from models that support
+    thinking mode (e.g. Qwen3) is accumulated separately and returned
+    as a ``"thinking"`` key in the result dict.  It is **not** included
+    in the assembled ``message.content`` field, keeping the conversation
+    history free of internal reasoning tokens.
+
     Args:
         stream: A generator yielding parsed NDJSON chunks from the Ollama
             streaming chat API.
@@ -85,6 +121,7 @@ def collect_streaming_response(
                     "content": "<accumulated text>",
                     "tool_calls": [...]  # only if present
                 },
+                "thinking": "<accumulated thinking>",  # only if present
                 "done": True,
                 ...  # other fields from the final chunk
             }
@@ -98,6 +135,7 @@ def collect_streaming_response(
             Partial content accumulated so far is returned.
     """
     content_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     last_chunk: dict[str, Any] = {}
     spinner_stopped = False
@@ -108,6 +146,21 @@ def collect_streaming_response(
 
             message = chunk.get("message", {})
 
+            # Handle thinking field (chain-of-thought reasoning).
+            # When `think: true` is enabled, models may include a
+            # "thinking" field with internal reasoning.  Display it in
+            # a dimmed style (prefixed with "> ") before main content.
+            thinking_delta = message.get("thinking", "")
+            if thinking_delta:
+                if spinner and not spinner_stopped:
+                    spinner.stop()
+                    spinner_stopped = True
+                thinking_parts.append(thinking_delta)
+                # Display thinking text line-by-line with "> " prefix.
+                for line in thinking_delta.splitlines(keepends=True):
+                    sys.stdout.write(f"> {line}")
+                sys.stdout.flush()
+
             # Accumulate content deltas and print to stdout.
             delta = message.get("content", "")
             if delta:
@@ -115,6 +168,10 @@ def collect_streaming_response(
                 if spinner and not spinner_stopped:
                     spinner.stop()
                     spinner_stopped = True
+                # If transitioning from thinking to content, add a
+                # separator newline for readability.
+                if thinking_parts and not content_parts:
+                    sys.stdout.write("\n")
                 content_parts.append(delta)
                 sys.stdout.write(delta)
                 sys.stdout.flush()
@@ -169,6 +226,12 @@ def collect_streaming_response(
     result: dict[str, Any] = dict(last_chunk)
     result["message"] = assembled_message
 
+    # Include accumulated thinking content as a separate top-level key
+    # for debug display.  This is intentionally NOT part of the message
+    # dict so it does not pollute the conversation history.
+    if thinking_parts:
+        result["thinking"] = "".join(thinking_parts)
+
     # Record token usage if a tracker is provided.  For Ollama the
     # final chunk carries ``prompt_eval_count`` / ``eval_count`` at
     # the top level; for Claude the ``usage`` dict contains the counts.
@@ -177,6 +240,79 @@ def collect_streaming_response(
             tracker.record_from_claude(result)
         else:
             tracker.record_from_ollama(result)
+
+    return result
+
+
+def _collect_silent_response(
+    stream: Generator[dict[str, Any], None, None],
+) -> dict[str, Any]:
+    """Accumulate a streaming chat response silently (no I/O).
+
+    Silent variant of :func:`collect_streaming_response` that accumulates
+    content and tool calls without writing to stdout, creating spinners,
+    or printing debug output.  Designed for sub-agent execution in threads
+    where all output must be captured, not printed.
+
+    Args:
+        stream: A generator yielding parsed streaming chunks from the
+            provider (same format as :func:`collect_streaming_response`).
+
+    Returns:
+        A dictionary representing the full response, in the same format
+        as :func:`collect_streaming_response`::
+
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "<accumulated text>",
+                    "tool_calls": [...]  # only if present
+                },
+                "done": True,
+                ...  # other fields from the final chunk
+            }
+
+    Raises:
+        ProviderStreamError: Re-raised if the stream yields an error.
+        KeyboardInterrupt: Re-raised if the stream is interrupted.
+    """
+    content_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    last_chunk: dict[str, Any] = {}
+
+    try:
+        for chunk in stream:
+            last_chunk = chunk
+            message = chunk.get("message", {})
+
+            # Accumulate content deltas silently (no stdout).
+            delta = message.get("content", "")
+            if delta:
+                content_parts.append(delta)
+
+            # Accumulate tool calls.
+            chunk_tool_calls = message.get("tool_calls")
+            if chunk_tool_calls:
+                tool_calls.extend(chunk_tool_calls)
+
+    except KeyboardInterrupt:
+        # Re-raise -- let the caller decide how to handle.
+        raise
+    except ProviderStreamError:
+        # Re-raise -- let the caller decide how to handle.
+        raise
+
+    # Build the assembled response.
+    assembled_message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    if tool_calls:
+        assembled_message["tool_calls"] = tool_calls
+
+    # Merge the final chunk's top-level fields with our assembled message.
+    result: dict[str, Any] = dict(last_chunk)
+    result["message"] = assembled_message
 
     return result
 
@@ -319,7 +455,10 @@ def _compact_message(message: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
-def _needs_compaction(messages: list[dict[str, Any]]) -> bool:
+def _needs_compaction(
+    messages: list[dict[str, Any]],
+    token_threshold: int | None = None,
+) -> bool:
     """Check whether the message list should be compacted.
 
     Returns ``True`` if either the message count or estimated token
@@ -327,13 +466,17 @@ def _needs_compaction(messages: list[dict[str, Any]]) -> bool:
 
     Args:
         messages: The conversation message list.
+        token_threshold: Optional override for the token threshold.
+            When provided (e.g. derived from ``num_ctx``), this value
+            is used instead of the module-level default.
 
     Returns:
         True if compaction is warranted.
     """
     if len(messages) > _COMPACT_MESSAGE_THRESHOLD:
         return True
-    if _estimate_tokens(messages) > _COMPACT_TOKEN_THRESHOLD:
+    threshold = token_threshold if token_threshold is not None else _COMPACT_TOKEN_THRESHOLD
+    if _estimate_tokens(messages) > threshold:
         return True
     return False
 
@@ -399,13 +542,14 @@ def compact_messages(
 
 
 def agent_loop(
-    client: OllamaClient,
+    client: LLMProvider,
     model: str,
     tools: list[Tool],
     messages: list[dict[str, Any]],
     debug: bool = False,
     cache: ToolCache | None = None,
     tracker: TokenTracker | None = None,
+    options: dict[str, Any] | None = None,
 ) -> None:
     """Core agent loop: prompt LLM, execute tool calls, repeat.
 
@@ -423,9 +567,10 @@ def agent_loop(
     ``tool_use_id`` in subsequent tool result messages).
 
     Args:
-        client: An :class:`OllamaClient` or :class:`LLMProvider` instance.
-            Any object with a ``chat_stream(model, messages, tools=...)``
-            method is accepted.
+        client: An :class:`~local_cli.providers.base.LLMProvider` instance
+            (or any object with a compatible ``chat_stream(model, messages,
+            tools=...)`` method -- including :class:`OllamaClient` which
+            is accepted via duck typing for backward compatibility).
         model: The model name to use (e.g. ``"qwen3:8b"``).
         tools: A list of :class:`Tool` instances available for the LLM.
         messages: The conversation history (mutated in place).
@@ -440,6 +585,11 @@ def agent_loop(
             are extracted from each streaming response and accumulated
             for the session.  Pass ``None`` to disable tracking (the
             default).
+        options: Optional inference parameters to pass to the LLM provider.
+            When provided, these are forwarded to ``client.chat_stream()``
+            as the ``options`` keyword argument.  If the dict contains a
+            ``num_ctx`` key, the context compaction threshold is
+            dynamically adjusted to 75% of that value.
 
     Raises:
         KeyboardInterrupt: Propagated if the user presses Ctrl+C during
@@ -448,11 +598,25 @@ def agent_loop(
     tool_map: dict[str, Tool] = {t.name: t for t in tools}
     tool_defs: list[dict[str, Any]] = [t.to_ollama_tool() for t in tools]
 
+    # Compute a dynamic compaction token threshold when the caller
+    # specifies a context window size via options["num_ctx"].  Use 75%
+    # of the context window so compaction kicks in before hitting the
+    # hard limit.
+    compact_token_threshold: int | None = None
+    if options and "num_ctx" in options:
+        compact_token_threshold = int(options["num_ctx"] * 0.75)
+        if debug:
+            sys.stderr.write(
+                f"[debug] Dynamic compaction threshold: "
+                f"{compact_token_threshold} tokens "
+                f"(75% of num_ctx={options['num_ctx']})\n"
+            )
+
     while True:
         # ---------------------------------------------------------------
         # 0. Compact conversation history if thresholds are exceeded.
         # ---------------------------------------------------------------
-        if _needs_compaction(messages):
+        if _needs_compaction(messages, token_threshold=compact_token_threshold):
             compact_messages(messages, debug=debug)
 
         # ---------------------------------------------------------------
@@ -467,7 +631,10 @@ def agent_loop(
         thinking_spinner.start()
 
         try:
-            stream = client.chat_stream(model, messages, tools=tool_defs)
+            chat_kwargs: dict[str, Any] = {"tools": tool_defs}
+            if options is not None:
+                chat_kwargs["options"] = options
+            stream = client.chat_stream(model, messages, **chat_kwargs)
             full_response = collect_streaming_response(
                 stream, spinner=thinking_spinner, tracker=tracker,
             )
@@ -492,9 +659,26 @@ def agent_loop(
 
         # ---------------------------------------------------------------
         # 2. Append the assistant message to the conversation history.
+        #    Thinking content is intentionally excluded — it lives in
+        #    full_response["thinking"] (set by collect_streaming_response)
+        #    and must NOT be part of the message dict appended here, to
+        #    avoid wasting context window space on internal reasoning.
         # ---------------------------------------------------------------
         assistant_message = full_response["message"]
+        # Defensive: strip any "thinking" key that may have leaked into
+        # the message dict (should not happen, but belt-and-suspenders).
+        if "thinking" in assistant_message:
+            assistant_message = {
+                k: v for k, v in assistant_message.items() if k != "thinking"
+            }
         messages.append(assistant_message)
+
+        # Log thinking content in debug mode for diagnostics.
+        thinking_content = full_response.get("thinking", "")
+        if debug and thinking_content:
+            # Show a truncated preview of the thinking content.
+            preview = _truncate(thinking_content, max_len=500)
+            sys.stderr.write(f"[debug] Thinking: {preview}\n")
 
         if debug:
             tc_count = len(assistant_message.get("tool_calls", []))
@@ -616,3 +800,399 @@ def agent_loop(
         # ---------------------------------------------------------------
         # 5. Loop back to send tool results to the LLM.
         # ---------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Silent agent loop (for sub-agents)
+# ---------------------------------------------------------------------------
+
+# Maximum number of retries on provider overload (HTTP 503).
+_RETRY_MAX_ATTEMPTS = 3
+
+# Base delay in seconds for exponential backoff (1s, 2s, 4s).
+_RETRY_BASE_DELAY = 1.0
+
+
+def _is_overloaded_error(exc: Exception) -> bool:
+    """Check if an exception indicates a provider overload (HTTP 503).
+
+    Inspects the exception message for common overload indicators
+    such as HTTP 503 status codes and "Service Unavailable" messages.
+    Used to decide whether to retry a failed provider request in
+    :func:`sub_agent_loop`.
+
+    Args:
+        exc: The exception to check.
+
+    Returns:
+        ``True`` if the error indicates a 503 or overload condition.
+    """
+    msg = str(exc).lower()
+    return "503" in msg or "service unavailable" in msg or "overloaded" in msg
+
+
+def _chat_with_retry_silent(
+    provider: LLMProvider,
+    model: str,
+    messages: list[dict[str, Any]],
+    tool_defs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Call provider.chat_stream with retry on overload (HTTP 503).
+
+    Silent variant (no I/O) suitable for sub-agent execution in
+    threads.  Retries up to ``_RETRY_MAX_ATTEMPTS`` times with
+    exponential backoff (1s, 2s, 4s) when the provider returns an
+    overload error.  Non-overload request errors are raised
+    immediately without retry.
+
+    Args:
+        provider: The LLM provider instance.
+        model: Model name for the chat request.
+        messages: Conversation history.
+        tool_defs: Tool definitions in the provider's format.
+
+    Returns:
+        The assembled response dict from the silent collector.
+
+    Raises:
+        ProviderRequestError: If retries are exhausted or the error
+            is not an overload condition.
+        ProviderStreamError: If a mid-stream error occurs (not
+            retried).
+    """
+    for attempt in range(_RETRY_MAX_ATTEMPTS + 1):
+        if attempt > 0:
+            # Exponential backoff: 1s, 2s, 4s.
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            time.sleep(delay)
+        try:
+            stream = provider.chat_stream(model, messages, tools=tool_defs)
+            return _collect_silent_response(stream)
+        except ProviderRequestError as exc:
+            if not _is_overloaded_error(exc):
+                raise
+            if attempt == _RETRY_MAX_ATTEMPTS:
+                raise
+            # Will retry on next iteration.
+
+    # Unreachable -- the loop always returns or raises.
+    raise ProviderRequestError(  # pragma: no cover
+        "Provider overloaded after retries"
+    )
+
+
+def sub_agent_loop(
+    provider: LLMProvider,
+    model: str,
+    tools: list[Tool],
+    messages: list[dict[str, Any]],
+    debug: bool = False,
+) -> str:
+    """Silent agent loop for sub-agent execution.
+
+    Structurally identical to :func:`agent_loop` but operates silently:
+    no ``sys.stdout`` / ``sys.stderr`` output and no spinners.  Uses
+    :func:`_collect_silent_response` for response accumulation and
+    ``provider.format_tools(tools)`` for tool definitions (provider-
+    agnostic, unlike :func:`agent_loop` which uses ``to_ollama_tool()``).
+
+    The *messages* list is mutated in place -- each assistant response and
+    tool result is appended so the caller retains the full conversation
+    history.
+
+    Returns the final assistant message content string instead of
+    ``None``.
+
+    Args:
+        provider: An :class:`~local_cli.providers.base.LLMProvider`
+            instance.  Must be a **fresh** instance (not shared with
+            other agents) for thread safety.
+        model: The model name to use (e.g. ``"qwen3:8b"``).
+        tools: A list of :class:`Tool` instances available for the LLM.
+        messages: The conversation history (mutated in place).
+        debug: Unused (kept for signature parity with :func:`agent_loop`).
+
+    Returns:
+        The final assistant message content string.  Returns an empty
+        string if the LLM produces no content (e.g. on error).
+    """
+    tool_map: dict[str, Tool] = {t.name: t for t in tools}
+    tool_defs: list[dict[str, Any]] = provider.format_tools(tools)
+
+    final_content = ""
+
+    while True:
+        # ---------------------------------------------------------------
+        # 0. Compact conversation history if thresholds are exceeded.
+        # ---------------------------------------------------------------
+        if _needs_compaction(messages):
+            compact_messages(messages, debug=False)
+
+        # ---------------------------------------------------------------
+        # 1. Send messages to the LLM and collect the response silently.
+        #    Retries on HTTP 503 overload with exponential backoff.
+        # ---------------------------------------------------------------
+        try:
+            full_response = _chat_with_retry_silent(
+                provider, model, messages, tool_defs,
+            )
+        except ProviderStreamError:
+            # Record the error in the message history and stop.
+            messages.append({
+                "role": "assistant",
+                "content": "[Error from provider during streaming]",
+            })
+            break
+        except ProviderRequestError as exc:
+            # Request error (including exhausted 503 retries).
+            messages.append({
+                "role": "assistant",
+                "content": f"[Error from provider: {exc}]",
+            })
+            break
+        except KeyboardInterrupt:
+            break
+
+        # ---------------------------------------------------------------
+        # 2. Append the assistant message to the conversation history.
+        # ---------------------------------------------------------------
+        assistant_message = full_response["message"]
+        messages.append(assistant_message)
+        final_content = assistant_message.get("content", "")
+
+        # ---------------------------------------------------------------
+        # 3. Check for tool calls.  If none, we're done.
+        # ---------------------------------------------------------------
+        tool_calls = assistant_message.get("tool_calls", [])
+        if not tool_calls:
+            break
+
+        # ---------------------------------------------------------------
+        # 4. Execute each tool call and append results.
+        # ---------------------------------------------------------------
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            arguments = func.get("arguments", {})
+            # Ollama sometimes returns arguments as a JSON string.
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (json.JSONDecodeError, ValueError):
+                    arguments = {}
+            tool_call_id = tc.get("id")
+
+            tool = tool_map.get(tool_name)
+            if tool is None:
+                result = f"Error: unknown tool '{tool_name}'"
+            else:
+                try:
+                    result = tool.execute(**arguments)
+                except KeyboardInterrupt:
+                    result = "Error: tool execution interrupted by user."
+                    tool_msg: dict[str, Any] = {
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "content": result,
+                    }
+                    if tool_call_id is not None:
+                        tool_msg["tool_call_id"] = tool_call_id
+                    messages.append(tool_msg)
+                    raise
+                except Exception as exc:
+                    result = f"Error: {type(exc).__name__}: {exc}"
+
+            # Append tool result as a 'tool' role message.
+            tool_msg = {
+                "role": "tool",
+                "tool_name": tool_name,
+                "content": result,
+            }
+            if tool_call_id is not None:
+                tool_msg["tool_call_id"] = tool_call_id
+            messages.append(tool_msg)
+
+        # ---------------------------------------------------------------
+        # 5. Loop back to send tool results to the LLM.
+        # ---------------------------------------------------------------
+
+    return final_content
+
+
+# ---------------------------------------------------------------------------
+# Plan context injection
+# ---------------------------------------------------------------------------
+
+
+def build_plan_context(plan_content: str) -> dict[str, Any]:
+    """Build a system message containing plan context for injection.
+
+    When a plan is active, this message is inserted into the conversation
+    so the LLM is aware of the plan structure and progress.  The content
+    is wrapped with clear delimiters so the model can distinguish plan
+    context from the main system prompt.
+
+    Args:
+        plan_content: The raw markdown content of the active plan.
+
+    Returns:
+        A system-role message dict suitable for insertion into the
+        messages list.
+    """
+    return {
+        "role": "system",
+        "content": (
+            "--- ACTIVE PLAN ---\n"
+            f"{plan_content}\n"
+            "--- END PLAN ---\n\n"
+            "You are working on the plan above. Execute the next "
+            "incomplete step and update the plan as you make progress."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fast-mode heuristic
+# ---------------------------------------------------------------------------
+
+
+def _is_complex_request(
+    prompt: str,
+    threshold: int = _COMPLEX_WORD_THRESHOLD,
+) -> bool:
+    """Determine whether a user prompt represents a complex request.
+
+    Used as a fast-mode heuristic: simple requests (short prompts, quick
+    questions) skip planning overhead and go directly to the agent loop.
+    Complex requests (long prompts, multi-file operations, architectural
+    changes) may benefit from plan mode.
+
+    A request is considered complex if:
+
+    * The word count exceeds *threshold*, **or**
+    * The prompt contains one or more plan-related keywords.
+
+    Args:
+        prompt: The user's input text.
+        threshold: Word-count threshold above which a prompt is
+            considered complex.  Defaults to ``_COMPLEX_WORD_THRESHOLD``.
+
+    Returns:
+        ``True`` if the prompt appears complex; ``False`` otherwise.
+    """
+    # Check word count.
+    words = prompt.split()
+    if len(words) > threshold:
+        return True
+
+    # Check for complexity-indicating keywords (case-insensitive).
+    prompt_lower = prompt.lower()
+    for keyword in _COMPLEX_KEYWORDS:
+        if keyword in prompt_lower:
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Ideation loop (tool-free brainstorming)
+# ---------------------------------------------------------------------------
+
+
+def ideation_loop(
+    client: OllamaClient,
+    model: str,
+    messages: list[dict[str, Any]],
+    think: bool | None = True,
+) -> None:
+    """Tool-free chat loop for brainstorming / ideation mode.
+
+    Similar to :func:`agent_loop` but calls ``chat_stream`` **without**
+    the ``tools`` parameter.  There is no tool execution step — the
+    function sends the messages, streams the response, appends it to
+    the conversation history, and returns.  This is a single-turn
+    interaction; the caller (REPL) manages the multi-turn loop.
+
+    The ``think`` parameter enables chain-of-thought reasoning when the
+    model supports it.  If the model does not support it, the request
+    is retried transparently without ``think``.
+
+    Args:
+        client: An :class:`OllamaClient` or :class:`LLMProvider` instance.
+            Any object with a ``chat_stream(model, messages, ...)`` method
+            is accepted.
+        model: The model name to use (e.g. ``"qwen3:8b"``).
+        messages: The ideation conversation history (mutated in place).
+        think: Enable chain-of-thought reasoning.  Defaults to ``True``.
+            Set to ``None`` to omit the parameter entirely.
+
+    Raises:
+        KeyboardInterrupt: Propagated if the user presses Ctrl+C before
+            streaming starts.
+    """
+    thinking_spinner = Spinner("Thinking")
+    thinking_spinner.start()
+
+    try:
+        kwargs: dict[str, Any] = {}
+        if think is not None:
+            kwargs["think"] = think
+
+        stream = client.chat_stream(model, messages, **kwargs)
+        full_response = collect_streaming_response(
+            stream, spinner=thinking_spinner,
+        )
+    except ProviderStreamError as exc:
+        thinking_spinner.stop()
+        if isinstance(exc, OllamaStreamError):
+            prefix = "Error from Ollama"
+        else:
+            prefix = "Error from provider"
+        sys.stderr.write(f"{prefix}: {exc}\n")
+        messages.append({
+            "role": "assistant",
+            "content": f"[{prefix}: {exc}]",
+        })
+        return
+    except ProviderRequestError:
+        # Model may not support `think` parameter — retry without.
+        thinking_spinner.stop()
+        if think is not None:
+            sys.stderr.write(
+                "Model does not support thinking mode, "
+                "falling back to standard generation\n"
+            )
+            thinking_spinner = Spinner("Thinking")
+            thinking_spinner.start()
+            try:
+                stream = client.chat_stream(model, messages)
+                full_response = collect_streaming_response(
+                    stream, spinner=thinking_spinner,
+                )
+            except ProviderStreamError as exc2:
+                thinking_spinner.stop()
+                if isinstance(exc2, OllamaStreamError):
+                    prefix = "Error from Ollama"
+                else:
+                    prefix = "Error from provider"
+                sys.stderr.write(f"{prefix}: {exc2}\n")
+                messages.append({
+                    "role": "assistant",
+                    "content": f"[{prefix}: {exc2}]",
+                })
+                return
+            except (ProviderRequestError, KeyboardInterrupt):
+                thinking_spinner.stop()
+                sys.stderr.write("\nIdeation request failed.\n")
+                return
+        else:
+            sys.stderr.write("\nIdeation request failed.\n")
+            return
+    except KeyboardInterrupt:
+        thinking_spinner.stop()
+        sys.stderr.write("\nInterrupted.\n")
+        return
+
+    # Append the assistant message to the conversation history.
+    assistant_message = full_response["message"]
+    messages.append(assistant_message)

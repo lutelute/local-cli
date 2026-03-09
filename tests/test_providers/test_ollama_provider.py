@@ -145,6 +145,7 @@ class TestOllamaProviderChat(unittest.TestCase):
 
         self.mock_client.chat.assert_called_once_with(
             model="qwen3:8b", messages=messages, tools=None,
+            options=None, think=None, format=None, keep_alive=None,
         )
         self.assertEqual(result["message"]["content"], "hello")
 
@@ -245,6 +246,7 @@ class TestOllamaProviderChatStream(unittest.TestCase):
 
         self.mock_client.chat_stream.assert_called_once_with(
             model="qwen3:8b", messages=messages, tools=None,
+            options=None, think=None, format=None, keep_alive=None,
         )
         self.assertEqual(len(result), 3)
 
@@ -360,6 +362,159 @@ class TestOllamaProviderChatStream(unittest.TestCase):
                 model="qwen3:8b",
                 messages=[{"role": "user", "content": "hi"}],
             ))
+
+
+# ---------------------------------------------------------------------------
+# Options delegation tests
+# ---------------------------------------------------------------------------
+
+
+class TestOllamaProviderOptionsDelegation(unittest.TestCase):
+    """Tests for options/think/keep_alive passthrough to client."""
+
+    def setUp(self) -> None:
+        self.mock_client = MagicMock(spec=OllamaClient)
+        self.provider = OllamaProvider(client=self.mock_client)
+
+    def test_chat_passes_options(self) -> None:
+        """chat() forwards options dict to client.chat()."""
+        self.mock_client.chat.return_value = {
+            "message": {"role": "assistant", "content": "ok"},
+        }
+        opts = {"num_ctx": 16384, "temperature": 0.5, "top_p": 0.9}
+        self.provider.chat(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            options=opts,
+        )
+        call_kwargs = self.mock_client.chat.call_args[1]
+        self.assertEqual(call_kwargs["options"], opts)
+
+    def test_chat_stream_passes_options(self) -> None:
+        """chat_stream() forwards options dict to client.chat_stream()."""
+        self.mock_client.chat_stream.return_value = iter([
+            {"message": {"content": ""}, "done": True},
+        ])
+        opts = {"num_ctx": 8192, "temperature": 0.6, "top_k": 20}
+        list(self.provider.chat_stream(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            options=opts,
+        ))
+        call_kwargs = self.mock_client.chat_stream.call_args[1]
+        self.assertEqual(call_kwargs["options"], opts)
+
+    def test_no_options_backward_compat(self) -> None:
+        """Calling chat() without options still works (defaults to None)."""
+        self.mock_client.chat.return_value = {
+            "message": {"role": "assistant", "content": "ok"},
+        }
+        self.provider.chat(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        call_kwargs = self.mock_client.chat.call_args[1]
+        self.assertIsNone(call_kwargs["options"])
+
+    def test_no_options_backward_compat_stream(self) -> None:
+        """Calling chat_stream() without options still works."""
+        self.mock_client.chat_stream.return_value = iter([
+            {"message": {"content": ""}, "done": True},
+        ])
+        list(self.provider.chat_stream(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+        ))
+        call_kwargs = self.mock_client.chat_stream.call_args[1]
+        self.assertIsNone(call_kwargs["options"])
+
+    def test_think_forwarded(self) -> None:
+        """chat() forwards think parameter to client.chat()."""
+        self.mock_client.chat.return_value = {
+            "message": {"role": "assistant", "content": "ok"},
+        }
+        self.provider.chat(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            think=True,
+        )
+        call_kwargs = self.mock_client.chat.call_args[1]
+        self.assertTrue(call_kwargs["think"])
+
+    def test_think_forwarded_stream(self) -> None:
+        """chat_stream() forwards think parameter to client.chat_stream()."""
+        self.mock_client.chat_stream.return_value = iter([
+            {"message": {"content": ""}, "done": True},
+        ])
+        list(self.provider.chat_stream(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            think=True,
+        ))
+        call_kwargs = self.mock_client.chat_stream.call_args[1]
+        self.assertTrue(call_kwargs["think"])
+
+    def test_keep_alive_forwarded(self) -> None:
+        """chat() forwards keep_alive parameter to client.chat()."""
+        self.mock_client.chat.return_value = {
+            "message": {"role": "assistant", "content": "ok"},
+        }
+        self.provider.chat(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            keep_alive="10m",
+        )
+        call_kwargs = self.mock_client.chat.call_args[1]
+        self.assertEqual(call_kwargs["keep_alive"], "10m")
+
+    def test_keep_alive_forwarded_stream(self) -> None:
+        """chat_stream() forwards keep_alive to client.chat_stream()."""
+        self.mock_client.chat_stream.return_value = iter([
+            {"message": {"content": ""}, "done": True},
+        ])
+        list(self.provider.chat_stream(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            keep_alive=300,
+        ))
+        call_kwargs = self.mock_client.chat_stream.call_args[1]
+        self.assertEqual(call_kwargs["keep_alive"], 300)
+
+    def test_all_options_forwarded_chat(self) -> None:
+        """chat() forwards all new parameters together."""
+        self.mock_client.chat.return_value = {
+            "message": {"role": "assistant", "content": "ok"},
+        }
+        opts = {"num_ctx": 16384, "temperature": 0.6}
+        self.provider.chat(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            options=opts,
+            think=True,
+            keep_alive="5m",
+        )
+        call_kwargs = self.mock_client.chat.call_args[1]
+        self.assertEqual(call_kwargs["options"], opts)
+        self.assertTrue(call_kwargs["think"])
+        self.assertEqual(call_kwargs["keep_alive"], "5m")
+
+    def test_all_options_forwarded_chat_stream(self) -> None:
+        """chat_stream() forwards all new parameters together."""
+        self.mock_client.chat_stream.return_value = iter([
+            {"message": {"content": ""}, "done": True},
+        ])
+        opts = {"num_ctx": 8192, "temperature": 0.5}
+        list(self.provider.chat_stream(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": "hi"}],
+            options=opts,
+            think=True,
+            keep_alive="10m",
+        ))
+        call_kwargs = self.mock_client.chat_stream.call_args[1]
+        self.assertEqual(call_kwargs["options"], opts)
+        self.assertTrue(call_kwargs["think"])
+        self.assertEqual(call_kwargs["keep_alive"], "10m")
 
 
 # ---------------------------------------------------------------------------

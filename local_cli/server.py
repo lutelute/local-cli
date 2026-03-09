@@ -42,16 +42,22 @@ from local_cli.clipboard import (
 )
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
+from local_cli.knowledge import KnowledgeStore
 from local_cli.model_catalog import get_merged_catalog, update_catalog
+from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.model_search import search_models
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
+from local_cli.plan_manager import PlanManager
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
 from local_cli.providers.claude_provider import ClaudeProvider
 from local_cli.providers.ollama_provider import OllamaProvider
 from local_cli.security import validate_model_name
+from local_cli.skills import SkillsLoader
+from local_cli.sub_agent import SubAgentRunner
 from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
-from local_cli.tools import get_default_tools
+from local_cli.tools import get_default_tools, get_sub_agent_tools
+from local_cli.tools.agent_tool import AgentTool
 from local_cli.tools.base import Tool
 
 
@@ -69,6 +75,7 @@ def _send(obj: dict[str, Any]) -> None:
 def _build_system_prompt(tools: list[Tool]) -> str:
     tool_lines = [f"- {t.name}: {t.description}" for t in tools]
     cwd = os.getcwd()
+    tool_section = "\n".join(tool_lines)
     return (
         "You are a coding agent — an autonomous AI assistant that completes tasks by "
         "using tools. You operate in an agent loop: think about what to do, use a tool, "
@@ -77,8 +84,31 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "All file paths should be relative to or within this directory unless the user "
         "specifies an absolute path.\n\n"
         "AVAILABLE TOOLS:\n"
-        + "\n".join(tool_lines)
-        + "\n\nRULES:\n"
+        f"{tool_section}\n\n"
+        "THINKING PROCESS:\n"
+        "Before taking action, think through these steps:\n"
+        "1. What is the goal? Restate the task in your own words.\n"
+        "2. What information do I need? Identify files, context, or state to gather.\n"
+        "3. What tool should I use? Pick the most appropriate tool for this step.\n"
+        "4. What could go wrong? Anticipate errors and plan fallbacks.\n"
+        "Work step by step. Do not try to do everything in one tool call.\n\n"
+        "TOOL USAGE PATTERNS:\n"
+        "- Find then read: Use glob to locate files, then read the matches.\n"
+        "- Read then edit: Always read a file before editing it.\n"
+        "- Search then act: Use grep to find relevant code, then read surrounding context.\n"
+        "- Edit then verify: After editing, read the file back or run tests with bash.\n"
+        "- Write then test: After writing new code, run it with bash to check for errors.\n\n"
+        "ERROR RECOVERY:\n"
+        "If a tool returns an error, do NOT give up. Instead:\n"
+        "1. Read the error message carefully — it usually tells you what went wrong.\n"
+        "2. Adjust your approach (fix the path, correct the syntax, try a different tool).\n"
+        "3. Retry. If it fails again, try an alternative strategy.\n\n"
+        "OUTPUT FORMAT:\n"
+        "- Be concise. Show what you did and the result.\n"
+        "- Don't repeat file contents unless the user asks.\n"
+        "- Let tool outputs speak for themselves.\n"
+        "- Summarize changes at the end of multi-step tasks.\n\n"
+        "RULES:\n"
         "1. ALWAYS use tools to interact with the filesystem. Never guess file contents.\n"
         "2. Before editing a file, ALWAYS read it first to understand its current state.\n"
         "3. Use glob/grep to find files before reading them.\n"
@@ -87,9 +117,8 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "5. After making changes, verify them (read the file back, run tests if applicable).\n"
         "6. Use bash to run commands (tests, builds, git, etc.) when needed.\n"
         "7. If a task requires multiple steps, execute them one by one. Do not stop halfway.\n"
-        "8. Be concise in your explanations. Let tool outputs speak for themselves.\n"
-        "9. If you encounter an error, try to fix it rather than just reporting it.\n"
-        "10. When creating new files, use the write tool. When modifying existing files, "
+        "8. If you encounter an error, try to fix it rather than just reporting it.\n"
+        "9. When creating new files, use the write tool. When modifying existing files, "
         "prefer the edit tool for precise changes.\n"
     )
 
@@ -109,6 +138,45 @@ class JsonLineServer:
         self._provider: LLMProvider = OllamaProvider(client=self._client)
 
         self._tools = get_default_tools()
+
+        # 007: Sub-agent support — inject AgentTool into tools list.
+        self._sub_agent_runner: SubAgentRunner | None = None
+        try:
+            self._sub_agent_runner = SubAgentRunner()
+            agent_tool = AgentTool(
+                runner=self._sub_agent_runner,
+                provider=self._provider,
+                model=self._config.model,
+                sub_agent_tools=get_sub_agent_tools(),
+            )
+            self._tools.append(agent_tool)
+        except Exception:
+            pass  # Degrade gracefully if sub-agent setup fails.
+
+        # 008: Plan manager, knowledge store, skills loader.
+        self._plan_manager: PlanManager | None = None
+        try:
+            self._plan_manager = PlanManager(plans_dir=self._config.plan_dir)
+        except Exception:
+            pass
+
+        self._knowledge_store: KnowledgeStore | None = None
+        try:
+            self._knowledge_store = KnowledgeStore(
+                knowledge_dir=self._config.knowledge_dir,
+            )
+        except Exception:
+            pass
+
+        self._skills_loader: SkillsLoader | None = None
+        try:
+            self._skills_loader = SkillsLoader(
+                skills_dir=self._config.skills_dir,
+            )
+            self._skills_loader.discover_skills()
+        except Exception:
+            pass
+
         self._system_prompt = _build_system_prompt(self._tools)
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
@@ -119,6 +187,7 @@ class JsonLineServer:
         self._tool_cache = ToolCache()
         self._token_tracker = TokenTracker()
         self._git_ops = GitOps()
+        self._ideation_active = False
 
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
@@ -227,6 +296,14 @@ class JsonLineServer:
                     self._handle_recommend(req_id)
                 elif req_type == "set_cwd":
                     self._handle_set_cwd(req_id, req.get("path", ""))
+                elif req_type == "spawn_agent":
+                    threading.Thread(
+                        target=self._handle_spawn_agent,
+                        args=(req_id, req.get("prompt", ""),
+                              req.get("description", ""),
+                              req.get("run_in_background", False)),
+                        daemon=True,
+                    ).start()
                 else:
                     _send({"id": req_id, "type": "error", "message": f"Unknown type: {req_type}"})
             except Exception as exc:
@@ -245,6 +322,38 @@ class JsonLineServer:
         self._stop_flag.clear()
         self._messages.append({"role": "user", "content": content})
 
+        # Build merged inference options: defaults < presets < user config.
+        default_options: dict[str, Any] = {"num_ctx": 8192}
+        preset_options = get_model_preset(self._config.model)
+        user_options: dict[str, Any] = {"num_ctx": self._config.num_ctx}
+        if self._config.temperature is not None:
+            user_options["temperature"] = self._config.temperature
+        if self._config.top_p is not None:
+            user_options["top_p"] = self._config.top_p
+        if self._config.top_k is not None:
+            user_options["top_k"] = self._config.top_k
+        inference_options = {**default_options, **preset_options, **user_options}
+
+        # Determine think mode (only for models that support it).
+        family = get_model_family(self._config.model)
+        think = True if self._config.think_mode and family in SUPPORTS_THINKING else None
+
+        # Build keep_alive from config.
+        keep_alive = self._config.keep_alive
+
+        # Build extra kwargs for providers that support them (Ollama).
+        chat_kwargs: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": self._messages,
+            "tools": self._tool_defs,
+        }
+        if hasattr(self._provider, "chat_stream") and self._provider.name == "ollama":
+            chat_kwargs["options"] = inference_options
+            if think is not None:
+                chat_kwargs["think"] = think
+            if keep_alive is not None:
+                chat_kwargs["keep_alive"] = keep_alive
+
         max_iterations = 15
         for _ in range(max_iterations):
             if self._stop_flag.is_set():
@@ -256,11 +365,7 @@ class JsonLineServer:
             tool_calls = []
 
             try:
-                for chunk in self._provider.chat_stream(
-                    model=self._config.model,
-                    messages=self._messages,
-                    tools=self._tool_defs,
-                ):
+                for chunk in self._provider.chat_stream(**chat_kwargs):
                     if self._stop_flag.is_set():
                         break
 
@@ -387,6 +492,19 @@ class JsonLineServer:
             self._handle_context(req_id)
         elif cmd == "/copy":
             self._handle_copy(req_id)
+        # --- 007: Sub-agent status ---
+        elif cmd == "/agents":
+            self._handle_agents(req_id)
+        # --- 008: Plan / Ideate / Knowledge / Skills ---
+        elif cmd == "/plan":
+            self._handle_plan(req_id, parts[1].strip() if len(parts) > 1 else "")
+        elif cmd == "/ideate":
+            sub = parts[1].strip() if len(parts) > 1 else ""
+            self._handle_ideate(req_id, sub)
+        elif cmd == "/knowledge":
+            self._handle_knowledge(req_id, parts[1].strip() if len(parts) > 1 else "")
+        elif cmd == "/skills":
+            self._handle_skills(req_id)
         else:
             _send({"id": req_id, "type": "error", "message": f"Unknown command: {command}"})
 
@@ -813,6 +931,222 @@ class JsonLineServer:
         self._tool_cache.clear()
         self._token_tracker.clear()
         _send({"id": req_id, "type": "cleared"})
+
+    # ------------------------------------------------------------------
+    # 007: Sub-agent handlers
+    # ------------------------------------------------------------------
+
+    def _handle_agents(self, req_id: int) -> None:
+        """Return sub-agent runner status and background agent results."""
+        if self._sub_agent_runner is None:
+            _send({"id": req_id, "type": "command_result", "command": "/agents",
+                   "output": "Sub-agent runner not available."})
+            return
+
+        has_agent_tool = any(t.name == "agent" for t in self._tools)
+        bg_agents = self._sub_agent_runner.list_background_agents()
+        output_parts = [
+            f"Sub-agent runner: active",
+            f"AgentTool registered: {has_agent_tool}",
+            f"Max workers: {self._sub_agent_runner._max_workers}",
+            f"Background agents: {len(bg_agents)}",
+        ]
+        for a in bg_agents:
+            output_parts.append(f"  [{a['agent_id']}] {a['status']}")
+        _send({"id": req_id, "type": "command_result", "command": "/agents",
+               "output": "\n".join(output_parts)})
+
+    # ------------------------------------------------------------------
+    # 008: Plan / Knowledge / Skills / Ideation handlers
+    # ------------------------------------------------------------------
+
+    def _handle_plan(self, req_id: int, args: str) -> None:
+        """Manage plans via /plan [list|create|show] subcommands."""
+        if self._plan_manager is None:
+            _send({"id": req_id, "type": "error",
+                   "message": "Plan manager not initialized."})
+            return
+
+        sub_parts = args.split(maxsplit=1) if args else []
+        sub_cmd = sub_parts[0].lower() if sub_parts else "list"
+        sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+        if sub_cmd == "list" or not args:
+            plans = self._plan_manager.list_plans()
+            if not plans:
+                output = "No plans found. Use /plan create <title> to create one."
+            else:
+                lines = [f"{len(plans)} plan(s):"]
+                for p in plans:
+                    lines.append(f"  [{p.plan_id}] {p.title} ({p.status})")
+                output = "\n".join(lines)
+            _send({"id": req_id, "type": "command_result",
+                   "command": "/plan", "output": output})
+
+        elif sub_cmd == "create":
+            if not sub_arg:
+                _send({"id": req_id, "type": "error",
+                       "message": "Usage: /plan create <title>"})
+                return
+            plan = self._plan_manager.create_plan(
+                title=sub_arg, model=self._config.model,
+            )
+            _send({"id": req_id, "type": "command_result",
+                   "command": "/plan create",
+                   "output": f"Plan [{plan.plan_id}] '{plan.title}' created ({plan.status})."})
+
+        elif sub_cmd == "show":
+            plan_id = sub_arg or "001"
+            try:
+                plan = self._plan_manager.get_plan(plan_id)
+                lines = [
+                    f"Plan [{plan.plan_id}]: {plan.title}",
+                    f"Status: {plan.status}  Model: {plan.model}",
+                    f"Created: {plan.created}",
+                ]
+                if plan.steps:
+                    lines.append("Steps:")
+                    for done, text in plan.steps:
+                        mark = "[x]" if done else "[ ]"
+                        lines.append(f"  {mark} {text}")
+                _send({"id": req_id, "type": "command_result",
+                       "command": "/plan show",
+                       "output": "\n".join(lines)})
+            except Exception as exc:
+                _send({"id": req_id, "type": "error", "message": str(exc)})
+        else:
+            _send({"id": req_id, "type": "error",
+                   "message": f"Unknown /plan subcommand: {sub_cmd}"})
+
+    def _handle_ideate(self, req_id: int, args: str) -> None:
+        """Handle ideation mode toggle."""
+        sub = args.lower().strip() if args else ""
+        if sub == "exit":
+            self._ideation_active = False
+            _send({"id": req_id, "type": "command_result",
+                   "command": "/ideate exit",
+                   "output": "Returned to agent mode."})
+        else:
+            self._ideation_active = True
+            _send({"id": req_id, "type": "command_result",
+                   "command": "/ideate",
+                   "output": "Entered ideation mode (tool-free brainstorming). "
+                            "Type /ideate exit to return to agent mode."})
+
+    def _handle_knowledge(self, req_id: int, args: str) -> None:
+        """Manage knowledge items via /knowledge [list|save|show]."""
+        if self._knowledge_store is None:
+            _send({"id": req_id, "type": "error",
+                   "message": "Knowledge store not initialized."})
+            return
+
+        sub_parts = args.split(maxsplit=1) if args else []
+        sub_cmd = sub_parts[0].lower() if sub_parts else "list"
+        sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+        if sub_cmd == "list" or not args:
+            items = self._knowledge_store.list_items()
+            if not items:
+                output = "No knowledge items. Use /knowledge save <name> to add one."
+            else:
+                lines = [f"{len(items)} knowledge item(s):"]
+                for item in items:
+                    lines.append(f"  - {item.get('name', '?')}: "
+                                 f"{item.get('description', '')[:60]}")
+                output = "\n".join(lines)
+            _send({"id": req_id, "type": "command_result",
+                   "command": "/knowledge", "output": output})
+
+        elif sub_cmd == "save":
+            if not sub_arg:
+                _send({"id": req_id, "type": "error",
+                       "message": "Usage: /knowledge save <name>"})
+                return
+            item = self._knowledge_store.save_item(
+                name=sub_arg, description=f"Saved from server session",
+                content=f"Knowledge item '{sub_arg}' created via server.",
+            )
+            _send({"id": req_id, "type": "command_result",
+                   "command": "/knowledge save",
+                   "output": f"Knowledge item '{sub_arg}' saved."})
+        else:
+            _send({"id": req_id, "type": "error",
+                   "message": f"Unknown /knowledge subcommand: {sub_cmd}"})
+
+    def _handle_skills(self, req_id: int) -> None:
+        """List discovered skills."""
+        if self._skills_loader is None:
+            _send({"id": req_id, "type": "error",
+                   "message": "Skills loader not initialized."})
+            return
+
+        skills = self._skills_loader.discover_skills()
+        if not skills:
+            output = ("Skills loader active (scanning: "
+                      f"{self._skills_loader._skills_dir}). "
+                      "No SKILL.md files discovered yet.")
+        else:
+            lines = [f"{len(skills)} skill(s) discovered:"]
+            for s in skills:
+                triggers = ", ".join(s.triggers[:3])
+                lines.append(f"  - {s.name}: {s.description[:50]} "
+                             f"[triggers: {triggers}]")
+            output = "\n".join(lines)
+        _send({"id": req_id, "type": "command_result",
+               "command": "/skills", "output": output})
+
+
+    def _handle_spawn_agent(
+        self, req_id: int, prompt: str, description: str, background: bool,
+    ) -> None:
+        """Spawn a real sub-agent to execute a task."""
+        if self._sub_agent_runner is None:
+            _send({"id": req_id, "type": "error",
+                   "message": "Sub-agent runner not available."})
+            return
+        if not prompt.strip():
+            _send({"id": req_id, "type": "error",
+                   "message": "Prompt is required."})
+            return
+
+        from local_cli.sub_agent import SubAgent
+
+        try:
+            from local_cli.providers import get_provider
+            fresh_provider = get_provider(
+                "ollama", base_url=self._client.base_url,
+            )
+        except Exception as exc:
+            _send({"id": req_id, "type": "error",
+                   "message": f"Failed to create provider: {exc}"})
+            return
+
+        sub_agent = SubAgent(
+            provider=fresh_provider,
+            model=self._config.model,
+            tools=get_sub_agent_tools(),
+            prompt=prompt.strip(),
+            description=description or "sub-agent task",
+        )
+
+        if background:
+            agent_id = self._sub_agent_runner.submit_background(sub_agent)
+            _send({"id": req_id, "type": "agent_started",
+                   "agent_id": agent_id, "description": description})
+        else:
+            _send({"id": req_id, "type": "agent_running",
+                   "description": description})
+            result = self._sub_agent_runner.submit(sub_agent)
+            _send({
+                "id": req_id,
+                "type": "agent_done",
+                "agent_id": result.agent_id,
+                "status": result.status,
+                "content": result.content,
+                "duration": result.duration_seconds,
+                "tool_calls": result.tool_calls_count,
+                "error": result.error_message,
+            })
 
 
 def run_server() -> None:

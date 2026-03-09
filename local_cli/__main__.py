@@ -9,14 +9,18 @@ from local_cli.health_check import (
     format_health_check,
     run_health_check,
 )
+from local_cli.ideation import IdeationEngine
+from local_cli.knowledge import KnowledgeStore
 from local_cli.model_manager import ModelManager
 from local_cli.model_registry import ModelRegistry
 from local_cli.model_selector import select_model_interactive
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.orchestrator import Orchestrator
+from local_cli.plan_manager import PlanManager
 from local_cli.rag import RAGEngine
 from local_cli.security import validate_model_name
-from local_cli.tools import get_default_tools
+from local_cli.skills import SkillsLoader
+from local_cli.tools import get_default_tools, get_sub_agent_tools
 
 
 def main() -> None:
@@ -163,6 +167,29 @@ def main() -> None:
             sys.stderr.write(f"Error: Failed to initialize provider: {exc}\n")
             sys.exit(1)
 
+    # 10b. Create SubAgentRunner and AgentTool, append to tools list.
+    sub_agent_runner = None
+    try:
+        from local_cli.sub_agent import SubAgentRunner
+        from local_cli.tools.agent_tool import AgentTool
+
+        sub_agent_runner = SubAgentRunner()
+        provider = orchestrator.get_active_provider()
+        agent_tool = AgentTool(
+            runner=sub_agent_runner,
+            provider=provider,
+            model=config.model,
+            sub_agent_tools=get_sub_agent_tools(),
+        )
+        tools.append(agent_tool)
+        if config.debug:
+            sys.stderr.write("[debug] AgentTool enabled (sub-agent support)\n")
+    except Exception as exc:
+        if config.debug:
+            sys.stderr.write(
+                f"[debug] AgentTool not available: {exc}\n"
+            )
+
     # 11. Optionally initialize RAG engine.
     rag_engine: RAGEngine | None = None
     rag_enabled = getattr(args, "rag", False) or False
@@ -190,14 +217,71 @@ def main() -> None:
     else:
         rag_topk = 5
 
-    # 12. Show update notice if available (non-blocking check finished).
+    # 12. Initialize plan manager.
+    plan_manager: PlanManager | None = None
+    try:
+        plan_manager = PlanManager(plans_dir=config.plan_dir)
+        if config.debug:
+            sys.stderr.write(
+                f"[debug] Plan manager initialized: {config.plan_dir}\n"
+            )
+    except Exception as exc:
+        sys.stderr.write(f"Warning: Plan manager initialization failed: {exc}\n")
+
+    # 13. Initialize knowledge store.
+    knowledge_store: KnowledgeStore | None = None
+    try:
+        knowledge_store = KnowledgeStore(knowledge_dir=config.knowledge_dir)
+        if config.debug:
+            sys.stderr.write(
+                f"[debug] Knowledge store initialized: {config.knowledge_dir}\n"
+            )
+    except Exception as exc:
+        sys.stderr.write(
+            f"Warning: Knowledge store initialization failed: {exc}\n"
+        )
+
+    # 14. Initialize skills loader and discover skills.
+    skills_loader: SkillsLoader | None = None
+    try:
+        skills_loader = SkillsLoader(skills_dir=config.skills_dir)
+        discovered = skills_loader.discover_skills()
+        if config.debug and discovered:
+            skill_names = ", ".join(s.name for s in discovered)
+            sys.stderr.write(
+                f"[debug] Discovered {len(discovered)} skills: {skill_names}\n"
+            )
+    except Exception as exc:
+        sys.stderr.write(
+            f"Warning: Skills loader initialization failed: {exc}\n"
+        )
+
+    # 15. Initialize ideation engine.
+    ideation_engine: IdeationEngine | None = None
+    try:
+        ideation_engine = IdeationEngine(client=client)
+        if config.debug:
+            sys.stderr.write("[debug] Ideation engine initialized\n")
+    except Exception as exc:
+        sys.stderr.write(
+            f"Warning: Ideation engine initialization failed: {exc}\n"
+        )
+
+    # 16. Determine initial REPL mode from CLI flags.
+    initial_mode = config.default_mode
+    if getattr(args, "plan", False):
+        initial_mode = "agent"  # Plan mode uses agent mode with plan context.
+    elif getattr(args, "ideate", False):
+        initial_mode = "ideate"
+
+    # 17. Show update notice if available (non-blocking check finished).
     _update_thread.join(timeout=0.5)  # Wait briefly for result.
     if _auto_update_check_result is not None:
         sys.stderr.write(
             f"\n  Update available! Run /update or local-cli --update to update.\n\n"
         )
 
-    # 14. Start the interactive REPL.
+    # 18. Start the interactive REPL.
     run_repl(
         config,
         client,
@@ -206,6 +290,12 @@ def main() -> None:
         rag_topk=rag_topk,
         orchestrator=orchestrator,
         model_manager=model_manager,
+        sub_agent_runner=sub_agent_runner,
+        plan_manager=plan_manager,
+        knowledge_store=knowledge_store,
+        skills_loader=skills_loader,
+        ideation_engine=ideation_engine,
+        initial_mode=initial_mode,
     )
 
 
