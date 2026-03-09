@@ -51,6 +51,31 @@ _COMPACT_ASSISTANT_MAX = 500
 # Number of recent messages to preserve uncompacted.
 _COMPACT_KEEP_RECENT = 10
 
+# ---------------------------------------------------------------------------
+# Fast-mode heuristic constants
+# ---------------------------------------------------------------------------
+
+# Default word-count threshold for complexity detection.
+_COMPLEX_WORD_THRESHOLD = 50
+
+# Keywords that suggest a request is complex / plan-worthy.
+_COMPLEX_KEYWORDS = frozenset({
+    "refactor",
+    "migrate",
+    "redesign",
+    "architecture",
+    "integrate",
+    "implement",
+    "restructure",
+    "multi-step",
+    "multiple files",
+    "across files",
+    "step by step",
+    "plan",
+    "break down",
+    "phases",
+})
+
 
 # ---------------------------------------------------------------------------
 # Streaming response collector
@@ -103,6 +128,7 @@ def collect_streaming_response(
             Partial content accumulated so far is returned.
     """
     content_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     last_chunk: dict[str, Any] = {}
     spinner_stopped = False
@@ -113,6 +139,21 @@ def collect_streaming_response(
 
             message = chunk.get("message", {})
 
+            # Handle thinking field (chain-of-thought reasoning).
+            # When `think: true` is enabled, models may include a
+            # "thinking" field with internal reasoning.  Display it in
+            # a dimmed style (prefixed with "> ") before main content.
+            thinking_delta = message.get("thinking", "")
+            if thinking_delta:
+                if spinner and not spinner_stopped:
+                    spinner.stop()
+                    spinner_stopped = True
+                thinking_parts.append(thinking_delta)
+                # Display thinking text line-by-line with "> " prefix.
+                for line in thinking_delta.splitlines(keepends=True):
+                    sys.stdout.write(f"> {line}")
+                sys.stdout.flush()
+
             # Accumulate content deltas and print to stdout.
             delta = message.get("content", "")
             if delta:
@@ -120,6 +161,10 @@ def collect_streaming_response(
                 if spinner and not spinner_stopped:
                     spinner.stop()
                     spinner_stopped = True
+                # If transitioning from thinking to content, add a
+                # separator newline for readability.
+                if thinking_parts and not content_parts:
+                    sys.stdout.write("\n")
                 content_parts.append(delta)
                 sys.stdout.write(delta)
                 sys.stdout.flush()
@@ -166,6 +211,8 @@ def collect_streaming_response(
         "role": "assistant",
         "content": "".join(content_parts),
     }
+    if thinking_parts:
+        assembled_message["thinking"] = "".join(thinking_parts)
     if tool_calls:
         assembled_message["tool_calls"] = tool_calls
 
@@ -912,3 +959,182 @@ def sub_agent_loop(
         # ---------------------------------------------------------------
 
     return final_content
+
+
+# ---------------------------------------------------------------------------
+# Plan context injection
+# ---------------------------------------------------------------------------
+
+
+def build_plan_context(plan_content: str) -> dict[str, Any]:
+    """Build a system message containing plan context for injection.
+
+    When a plan is active, this message is inserted into the conversation
+    so the LLM is aware of the plan structure and progress.  The content
+    is wrapped with clear delimiters so the model can distinguish plan
+    context from the main system prompt.
+
+    Args:
+        plan_content: The raw markdown content of the active plan.
+
+    Returns:
+        A system-role message dict suitable for insertion into the
+        messages list.
+    """
+    return {
+        "role": "system",
+        "content": (
+            "--- ACTIVE PLAN ---\n"
+            f"{plan_content}\n"
+            "--- END PLAN ---\n\n"
+            "You are working on the plan above. Execute the next "
+            "incomplete step and update the plan as you make progress."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fast-mode heuristic
+# ---------------------------------------------------------------------------
+
+
+def _is_complex_request(
+    prompt: str,
+    threshold: int = _COMPLEX_WORD_THRESHOLD,
+) -> bool:
+    """Determine whether a user prompt represents a complex request.
+
+    Used as a fast-mode heuristic: simple requests (short prompts, quick
+    questions) skip planning overhead and go directly to the agent loop.
+    Complex requests (long prompts, multi-file operations, architectural
+    changes) may benefit from plan mode.
+
+    A request is considered complex if:
+
+    * The word count exceeds *threshold*, **or**
+    * The prompt contains one or more plan-related keywords.
+
+    Args:
+        prompt: The user's input text.
+        threshold: Word-count threshold above which a prompt is
+            considered complex.  Defaults to ``_COMPLEX_WORD_THRESHOLD``.
+
+    Returns:
+        ``True`` if the prompt appears complex; ``False`` otherwise.
+    """
+    # Check word count.
+    words = prompt.split()
+    if len(words) > threshold:
+        return True
+
+    # Check for complexity-indicating keywords (case-insensitive).
+    prompt_lower = prompt.lower()
+    for keyword in _COMPLEX_KEYWORDS:
+        if keyword in prompt_lower:
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Ideation loop (tool-free brainstorming)
+# ---------------------------------------------------------------------------
+
+
+def ideation_loop(
+    client: OllamaClient,
+    model: str,
+    messages: list[dict[str, Any]],
+    think: bool | None = True,
+) -> None:
+    """Tool-free chat loop for brainstorming / ideation mode.
+
+    Similar to :func:`agent_loop` but calls ``chat_stream`` **without**
+    the ``tools`` parameter.  There is no tool execution step — the
+    function sends the messages, streams the response, appends it to
+    the conversation history, and returns.  This is a single-turn
+    interaction; the caller (REPL) manages the multi-turn loop.
+
+    The ``think`` parameter enables chain-of-thought reasoning when the
+    model supports it.  If the model does not support it, the request
+    is retried transparently without ``think``.
+
+    Args:
+        client: An :class:`OllamaClient` or :class:`LLMProvider` instance.
+            Any object with a ``chat_stream(model, messages, ...)`` method
+            is accepted.
+        model: The model name to use (e.g. ``"qwen3:8b"``).
+        messages: The ideation conversation history (mutated in place).
+        think: Enable chain-of-thought reasoning.  Defaults to ``True``.
+            Set to ``None`` to omit the parameter entirely.
+
+    Raises:
+        KeyboardInterrupt: Propagated if the user presses Ctrl+C before
+            streaming starts.
+    """
+    thinking_spinner = Spinner("Thinking")
+    thinking_spinner.start()
+
+    try:
+        kwargs: dict[str, Any] = {}
+        if think is not None:
+            kwargs["think"] = think
+
+        stream = client.chat_stream(model, messages, **kwargs)
+        full_response = collect_streaming_response(
+            stream, spinner=thinking_spinner,
+        )
+    except ProviderStreamError as exc:
+        thinking_spinner.stop()
+        if isinstance(exc, OllamaStreamError):
+            prefix = "Error from Ollama"
+        else:
+            prefix = "Error from provider"
+        sys.stderr.write(f"{prefix}: {exc}\n")
+        messages.append({
+            "role": "assistant",
+            "content": f"[{prefix}: {exc}]",
+        })
+        return
+    except ProviderRequestError:
+        # Model may not support `think` parameter — retry without.
+        thinking_spinner.stop()
+        if think is not None:
+            sys.stderr.write(
+                "Model does not support thinking mode, "
+                "falling back to standard generation\n"
+            )
+            thinking_spinner = Spinner("Thinking")
+            thinking_spinner.start()
+            try:
+                stream = client.chat_stream(model, messages)
+                full_response = collect_streaming_response(
+                    stream, spinner=thinking_spinner,
+                )
+            except ProviderStreamError as exc2:
+                thinking_spinner.stop()
+                if isinstance(exc2, OllamaStreamError):
+                    prefix = "Error from Ollama"
+                else:
+                    prefix = "Error from provider"
+                sys.stderr.write(f"{prefix}: {exc2}\n")
+                messages.append({
+                    "role": "assistant",
+                    "content": f"[{prefix}: {exc2}]",
+                })
+                return
+            except (ProviderRequestError, KeyboardInterrupt):
+                thinking_spinner.stop()
+                sys.stderr.write("\nIdeation request failed.\n")
+                return
+        else:
+            sys.stderr.write("\nIdeation request failed.\n")
+            return
+    except KeyboardInterrupt:
+        thinking_spinner.stop()
+        sys.stderr.write("\nInterrupted.\n")
+        return
+
+    # Append the assistant message to the conversation history.
+    assistant_message = full_response["message"]
+    messages.append(assistant_message)
