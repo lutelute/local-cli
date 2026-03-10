@@ -245,6 +245,16 @@ export default function App() {
           window.api.sendToPython({ id: nextId(), type: 'catalog' })
           break
 
+        case 'pull_start': {
+          // Server-initiated pull (e.g. auto-pull on model switch).
+          const pullModel = (msg as any).model || ''
+          if (pullModel) {
+            setPulling(pullModel)
+            setPullProgress('starting...')
+          }
+          break
+        }
+
         case 'pull_progress': {
           const completed = (msg as any).completed
           const total = (msg as any).total

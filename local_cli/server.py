@@ -553,19 +553,23 @@ class JsonLineServer:
             return
 
         # Verify the model is installed on Ollama (when using Ollama provider).
+        # If not installed, auto-pull it instead of erroring.
         if self._provider.name == "ollama":
             try:
                 models = self._client.list_models()
                 installed = {m.get("name", "") for m in models}
-                # Also check base name (e.g. "qwen3" matches "qwen3:8b").
                 installed_bases = {n.split(":")[0] for n in installed}
                 if model not in installed and model not in installed_bases:
-                    _send({"id": req_id, "type": "error",
-                           "message": f"Model '{model}' is not installed. Pull it first."})
+                    # Auto-pull, then switch on completion.
+                    self._auto_pull_and_switch(req_id, model)
                     return
             except OllamaConnectionError:
                 pass  # Can't verify, proceed anyway.
 
+        self._finish_switch_model(req_id, model)
+
+    def _finish_switch_model(self, req_id: int, model: str) -> None:
+        """Complete model switch: update config, clear conversation, notify."""
         self._config.model = model
         # Reset conversation to avoid sending incompatible tool_calls
         # from the previous model.
@@ -573,6 +577,31 @@ class JsonLineServer:
         self._messages.append({"role": "system", "content": self._system_prompt})
         _send({"id": req_id, "type": "model_changed", "model": model})
         _send({"id": req_id, "type": "cleared"})
+
+    def _auto_pull_and_switch(self, req_id: int, model: str) -> None:
+        """Pull a model and switch to it on success."""
+        _send({"id": req_id, "type": "pull_start", "model": model})
+        try:
+            for chunk in self._client.pull_model(model):
+                status = chunk.get("status", "")
+                completed = chunk.get("completed")
+                total = chunk.get("total")
+                _send({
+                    "id": req_id,
+                    "type": "pull_progress",
+                    "model": model,
+                    "status": status,
+                    "completed": completed,
+                    "total": total,
+                })
+        except (OllamaConnectionError, Exception) as exc:
+            _send({"id": req_id, "type": "error",
+                   "message": f"Failed to pull model '{model}': {exc}"})
+            return
+
+        _send({"id": req_id, "type": "pull_done", "model": model})
+        # The frontend's pull_done handler will send switch_model,
+        # which will now succeed since the model is installed.
 
     def _handle_switch_provider(self, req_id: int, provider: str) -> None:
         """Switch the active LLM provider (ollama or claude)."""
@@ -752,10 +781,11 @@ class JsonLineServer:
                 pass
 
             for r in results:
-                r["installed"] = (
-                    r["name"] in installed_names
-                    or r["name"].split(":")[0] in installed_names
-                )
+                name = r["name"]
+                if ":" in name:
+                    r["installed"] = name in installed_names
+                else:
+                    r["installed"] = name in installed_names
 
             _send({"id": req_id, "type": "search_results", "data": results})
         except Exception as exc:
