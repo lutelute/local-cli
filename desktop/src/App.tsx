@@ -207,6 +207,11 @@ export default function App() {
 
         case 'model_changed':
           setStatus(prev => ({ ...prev, model: msg.model || prev.model }))
+          // Show an informational divider when the model changes mid-conversation.
+          setMessages(prev => {
+            if (prev.length === 0) return prev
+            return [...prev, { id: uid(), role: 'system', content: `Model switched to ${msg.model}` }]
+          })
           break
 
         case 'provider_changed':
@@ -374,8 +379,24 @@ export default function App() {
 
   const handleModelSelect = useCallback((model: string) => {
     setShowPicker(false)
+    // If streaming, the backend will auto-stop on switch_model.
+    // Update frontend state immediately for responsiveness.
+    if (streaming) {
+      setStreaming(false)
+      setMessages(prev => {
+        const last = prev[prev.length - 1]
+        if (last?.id === activeMessageId.current && last.streaming) {
+          // Remove empty thinking placeholder, or finalize partial content.
+          if (!last.content && !last.toolCalls?.length) {
+            return prev.slice(0, -1)
+          }
+          return [...prev.slice(0, -1), { ...last, streaming: false, thinking: false }]
+        }
+        return prev
+      })
+    }
     window.api.sendToPython({ id: nextId(), type: 'switch_model', model })
-  }, [])
+  }, [streaming])
 
   const handlePull = useCallback((model: string) => {
     setPulling(model)

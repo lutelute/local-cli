@@ -184,6 +184,7 @@ class JsonLineServer:
         self._tool_defs = self._provider.format_tools(self._tools)
         self._tool_map = {t.name: t for t in self._tools}
         self._stop_flag = threading.Event()
+        self._pending_switch: tuple[int, str] | None = None
         self._tool_cache = ToolCache()
         self._token_tracker = TokenTracker()
         self._git_ops = GitOps()
@@ -236,10 +237,31 @@ class JsonLineServer:
                 self._handle_stop(req_id)
                 continue
 
+            # Model switch can arrive while chat is streaming.
+            # Interrupt the stream and defer the switch until the
+            # chat thread exits cleanly.
+            if req_type == "switch_model":
+                if self._chat_thread and self._chat_thread.is_alive():
+                    self._pending_switch = (req_id, req.get("model", ""))
+                    self._stop_flag.set()
+                    continue
+                # No active stream — fall through to normal dispatch.
+
             # Wait for any running chat to finish before processing
             # non-stop requests (except stop which is handled above).
             if self._chat_thread and self._chat_thread.is_alive():
                 self._chat_thread.join()
+
+            # Process any deferred model switch that was waiting for
+            # the chat thread to finish.
+            if self._pending_switch is not None:
+                switch_id, switch_model = self._pending_switch
+                self._pending_switch = None
+                try:
+                    self._handle_switch_model(switch_id, switch_model)
+                except Exception as exc:
+                    _send({"id": switch_id, "type": "error", "message": str(exc)})
+                continue
 
             try:
                 if req_type == "chat":
@@ -569,14 +591,31 @@ class JsonLineServer:
         self._finish_switch_model(req_id, model)
 
     def _finish_switch_model(self, req_id: int, model: str) -> None:
-        """Complete model switch: update config, clear conversation, notify."""
+        """Complete model switch: update config, sanitize history, notify.
+
+        Preserves the conversation history so the user does not lose
+        context.  Orphaned tool-result messages and dangling tool_calls
+        from the previous model are stripped to keep the history valid.
+        """
         self._config.model = model
-        # Reset conversation to avoid sending incompatible tool_calls
-        # from the previous model.
-        self._messages.clear()
-        self._messages.append({"role": "system", "content": self._system_prompt})
+
+        # Remove trailing orphaned tool-result messages.
+        while (
+            len(self._messages) > 1
+            and self._messages[-1].get("role") == "tool"
+        ):
+            self._messages.pop()
+
+        # Strip tool_calls from the last assistant message to avoid
+        # sending schemas the new model does not recognise.
+        for msg in reversed(self._messages):
+            if msg.get("role") == "assistant":
+                msg.pop("tool_calls", None)
+                break
+            if msg.get("role") != "tool":
+                break
+
         _send({"id": req_id, "type": "model_changed", "model": model})
-        _send({"id": req_id, "type": "cleared"})
 
     def _auto_pull_and_switch(self, req_id: int, model: str) -> None:
         """Pull a model and switch to it on success."""
