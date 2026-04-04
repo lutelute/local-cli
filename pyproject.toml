@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-cli"
-version = "0.7.4"
+version = "0.7.5"
 description = "Local-first, offline-capable AI coding agent CLI tool powered by Ollama"
 requires-python = ">=3.10"
 license = {text = "MIT"}
