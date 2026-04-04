@@ -26,7 +26,9 @@ from local_cli.security import validate_model_name, validate_ollama_host
 _DEFAULT_TIMEOUT = 30
 
 # Streaming chat completions (model may take time to start generating).
-_STREAM_TIMEOUT = 120
+# CPU-only inference with large models + tools can take several minutes
+# before the first token is emitted; 600s accommodates this.
+_STREAM_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------

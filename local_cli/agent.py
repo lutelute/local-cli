@@ -550,6 +550,7 @@ def agent_loop(
     cache: ToolCache | None = None,
     tracker: TokenTracker | None = None,
     options: dict[str, Any] | None = None,
+    think: bool | None = None,
 ) -> None:
     """Core agent loop: prompt LLM, execute tool calls, repeat.
 
@@ -634,6 +635,8 @@ def agent_loop(
             chat_kwargs: dict[str, Any] = {"tools": tool_defs}
             if options is not None:
                 chat_kwargs["options"] = options
+            if think is not None:
+                chat_kwargs["think"] = think
             stream = client.chat_stream(model, messages, **chat_kwargs)
             full_response = collect_streaming_response(
                 stream, spinner=thinking_spinner, tracker=tracker,

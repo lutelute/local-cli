@@ -254,14 +254,18 @@ function exchangeOAuthCode(code: string): Promise<{ apiKey?: string; error?: str
 function findPython(): string {
   if (process.platform === 'win32') return 'python'
 
-  // macOS GUI apps get a minimal PATH that only includes /usr/bin/python3
-  // (often Python 3.9), but local-cli requires Python 3.10+.
-  // Check common Homebrew/system paths for a modern Python.
-  const candidates = [
-    '/opt/homebrew/bin/python3',   // macOS ARM Homebrew
-    '/usr/local/bin/python3',      // macOS Intel Homebrew / Linux
-    'python3',                     // fallback to PATH
-  ]
+  // GUI apps may get a minimal PATH. Check common paths for Python 3.10+.
+  const candidates: string[] = process.platform === 'darwin'
+    ? [
+        '/opt/homebrew/bin/python3',   // macOS ARM Homebrew
+        '/usr/local/bin/python3',      // macOS Intel Homebrew
+        'python3',
+      ]
+    : [
+        '/usr/bin/python3',            // Linux system Python
+        '/usr/local/bin/python3',      // Linux manual install
+        'python3',
+      ]
   for (const candidate of candidates) {
     try {
       const { execFileSync } = require('child_process')
@@ -352,8 +356,9 @@ function createWindow() {
     height: 700,
     minWidth: 600,
     minHeight: 400,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 16 } }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -478,14 +483,23 @@ ipcMain.handle('check-app-update', async () => {
     const data = await fetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
     const latest = (data.tag_name || '').replace(/^v/, '')
     if (latest && latest !== APP_VERSION) {
-      const dmg = data.assets?.find((a: any) => a.name.endsWith('.dmg'))
-      const zip = data.assets?.find((a: any) => a.name.endsWith('-mac.zip') || a.name.endsWith('.zip'))
+      let downloadAsset: any
+      let zipAsset: any
+      if (process.platform === 'darwin') {
+        downloadAsset = data.assets?.find((a: any) => a.name.endsWith('.dmg'))
+        zipAsset = data.assets?.find((a: any) => a.name.endsWith('-mac.zip') || a.name.endsWith('.zip'))
+      } else if (process.platform === 'linux') {
+        downloadAsset = data.assets?.find((a: any) => a.name.endsWith('.AppImage'))
+        zipAsset = data.assets?.find((a: any) => a.name.endsWith('.deb'))
+      } else {
+        downloadAsset = data.assets?.find((a: any) => a.name.endsWith('.exe'))
+      }
       return {
         available: true,
         version: latest,
         notes: data.body || '',
-        downloadUrl: dmg?.browser_download_url || data.html_url,
-        zipUrl: zip?.browser_download_url || '',
+        downloadUrl: downloadAsset?.browser_download_url || data.html_url,
+        zipUrl: zipAsset?.browser_download_url || '',
         releaseUrl: data.html_url,
       }
     }
@@ -508,58 +522,86 @@ ipcMain.handle('install-app-update', async (_event, zipUrl: string) => {
     const tmpZip = path.join(os.tmpdir(), `local-cli-update-${Date.now()}.zip`)
     await downloadFile(zipUrl, tmpZip, (pct) => sendProgress('downloading', pct))
 
-    // 2. Extract ZIP.
+    // 2. Extract ZIP / AppImage.
     sendProgress('extracting', 0)
     const tmpDir = path.join(os.tmpdir(), `local-cli-update-${Date.now()}`)
     fs.mkdirSync(tmpDir, { recursive: true })
-    await new Promise<void>((resolve, reject) => {
-      execFile('ditto', ['-xk', tmpZip, tmpDir], (err) => {
-        if (err) reject(new Error(`Extract failed: ${err.message}`))
-        else resolve()
+
+    if (process.platform === 'darwin') {
+      await new Promise<void>((resolve, reject) => {
+        execFile('ditto', ['-xk', tmpZip, tmpDir], (err) => {
+          if (err) reject(new Error(`Extract failed: ${err.message}`))
+          else resolve()
+        })
       })
-    })
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        execFile('unzip', ['-o', tmpZip, '-d', tmpDir], (err) => {
+          if (err) reject(new Error(`Extract failed: ${err.message}`))
+          else resolve()
+        })
+      })
+    }
     sendProgress('extracting', 100)
 
-    // 3. Find the .app bundle in extracted contents.
-    const entries = fs.readdirSync(tmpDir)
-    const appBundle = entries.find(e => e.endsWith('.app'))
-    if (!appBundle) throw new Error('No .app bundle found in ZIP')
-    const newAppPath = path.join(tmpDir, appBundle)
-
-    // 4. Determine current app path and replace.
-    const currentAppPath = app.isPackaged
-      ? path.resolve(process.resourcesPath!, '..', '..')  // .app/Contents/Resources -> .app
-      : null
-
-    if (!currentAppPath || !currentAppPath.endsWith('.app')) {
-      throw new Error('Cannot determine app path. Dev mode does not support auto-update.')
-    }
-
-    sendProgress('installing', 0)
-
-    // 5. Create a shell script that waits for the app to quit, replaces it, and relaunches.
     const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
-    const scriptContent = `#!/bin/bash
-# Wait for the app to fully quit
+
+    if (process.platform === 'darwin') {
+      // macOS: Find the .app bundle in extracted contents.
+      const entries = fs.readdirSync(tmpDir)
+      const appBundle = entries.find(e => e.endsWith('.app'))
+      if (!appBundle) throw new Error('No .app bundle found in ZIP')
+      const newAppPath = path.join(tmpDir, appBundle)
+
+      const currentAppPath = app.isPackaged
+        ? path.resolve(process.resourcesPath!, '..', '..')
+        : null
+
+      if (!currentAppPath || !currentAppPath.endsWith('.app')) {
+        throw new Error('Cannot determine app path. Dev mode does not support auto-update.')
+      }
+
+      sendProgress('installing', 0)
+      fs.writeFileSync(installScript, `#!/bin/bash
 sleep 1
 while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do
   sleep 0.5
 done
-# Remove old app and move new one in place
 rm -rf "${currentAppPath}"
 mv "${newAppPath}" "${currentAppPath}"
-# Clean up
 rm -f "${tmpZip}"
 rm -rf "${tmpDir}"
-# Relaunch
 open "${currentAppPath}"
 rm -f "${installScript}"
-`
-    fs.writeFileSync(installScript, scriptContent, { mode: 0o755 })
+`, { mode: 0o755 })
+    } else if (process.platform === 'linux') {
+      // Linux: Replace AppImage in place.
+      const entries = fs.readdirSync(tmpDir)
+      const appImage = entries.find(e => e.endsWith('.AppImage'))
+      if (!appImage) throw new Error('No AppImage found in archive')
+      const newAppPath = path.join(tmpDir, appImage)
+
+      const currentAppPath = process.env.APPIMAGE || app.getPath('exe')
+
+      sendProgress('installing', 0)
+      fs.writeFileSync(installScript, `#!/bin/bash
+sleep 1
+while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do
+  sleep 0.5
+done
+cp "${newAppPath}" "${currentAppPath}"
+chmod +x "${currentAppPath}"
+rm -f "${tmpZip}"
+rm -rf "${tmpDir}"
+"${currentAppPath}" &
+rm -f "${installScript}"
+`, { mode: 0o755 })
+    } else {
+      throw new Error('Auto-update is not supported on this platform.')
+    }
 
     sendProgress('installing', 50)
 
-    // 6. Spawn the install script detached and quit.
     spawn('bash', [installScript], {
       detached: true,
       stdio: 'ignore',
@@ -567,7 +609,6 @@ rm -f "${installScript}"
 
     sendProgress('installing', 100)
 
-    // 7. Quit the app so the script can replace it.
     setTimeout(() => {
       pythonProcess?.kill()
       app.quit()
@@ -642,59 +683,79 @@ app.whenReady().then(async () => {
     const data = await fetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
     const latest = (data.tag_name || '').replace(/^v/, '')
     if (latest && latest !== APP_VERSION) {
-      const zip = data.assets?.find((a: any) =>
-        a.name.endsWith('-mac.zip') || a.name.endsWith('.zip')
-      )
-      if (zip?.browser_download_url && app.isPackaged) {
+      // Find platform-appropriate update asset.
+      let updateAsset: any
+      if (process.platform === 'darwin') {
+        updateAsset = data.assets?.find((a: any) => a.name.endsWith('-mac.zip') || a.name.endsWith('.zip'))
+      } else if (process.platform === 'linux') {
+        updateAsset = data.assets?.find((a: any) => a.name.endsWith('.AppImage'))
+      }
+      if (updateAsset?.browser_download_url && app.isPackaged) {
         console.log(`Auto-update: ${APP_VERSION} → ${latest}`)
-        // Notify renderer that auto-update is starting.
         const sendProgress = (stage: string, percent: number) => {
           mainWindow?.webContents.send('update-progress', { stage, percent, version: latest })
         }
         mainWindow?.webContents.send('auto-update-start', { version: latest })
 
-        // Download.
         sendProgress('downloading', 0)
-        const tmpZip = path.join(os.tmpdir(), `local-cli-update-${Date.now()}.zip`)
-        await downloadFile(zip.browser_download_url, tmpZip, (pct) => sendProgress('downloading', pct))
+        const tmpFile = path.join(os.tmpdir(), `local-cli-update-${Date.now()}${process.platform === 'darwin' ? '.zip' : '.AppImage'}`)
+        await downloadFile(updateAsset.browser_download_url, tmpFile, (pct) => sendProgress('downloading', pct))
 
-        // Extract.
-        sendProgress('extracting', 0)
-        const tmpDir = path.join(os.tmpdir(), `local-cli-update-${Date.now()}`)
-        fs.mkdirSync(tmpDir, { recursive: true })
-        await new Promise<void>((resolve, reject) => {
-          execFile('ditto', ['-xk', tmpZip, tmpDir], (err) => {
-            err ? reject(err) : resolve()
+        if (process.platform === 'darwin') {
+          // macOS: Extract ZIP and replace .app bundle.
+          sendProgress('extracting', 0)
+          const tmpDir = path.join(os.tmpdir(), `local-cli-update-${Date.now()}`)
+          fs.mkdirSync(tmpDir, { recursive: true })
+          await new Promise<void>((resolve, reject) => {
+            execFile('ditto', ['-xk', tmpFile, tmpDir], (err) => {
+              err ? reject(err) : resolve()
+            })
           })
-        })
-        sendProgress('extracting', 100)
+          sendProgress('extracting', 100)
 
-        // Find .app and replace.
-        const entries = fs.readdirSync(tmpDir)
-        const appBundle = entries.find(e => e.endsWith('.app'))
-        if (appBundle) {
-          const newAppPath = path.join(tmpDir, appBundle)
-          const currentAppPath = path.resolve(process.resourcesPath!, '..', '..')
+          const entries = fs.readdirSync(tmpDir)
+          const appBundle = entries.find(e => e.endsWith('.app'))
+          if (appBundle) {
+            const newAppPath = path.join(tmpDir, appBundle)
+            const currentAppPath = path.resolve(process.resourcesPath!, '..', '..')
 
-          if (currentAppPath.endsWith('.app')) {
-            sendProgress('installing', 50)
-            const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
-            fs.writeFileSync(installScript, `#!/bin/bash
+            if (currentAppPath.endsWith('.app')) {
+              sendProgress('installing', 50)
+              const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
+              fs.writeFileSync(installScript, `#!/bin/bash
 sleep 1
 while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do sleep 0.5; done
 rm -rf "${currentAppPath}"
 mv "${newAppPath}" "${currentAppPath}"
-rm -f "${tmpZip}"
+rm -f "${tmpFile}"
 rm -rf "${tmpDir}"
 open "${currentAppPath}"
 rm -f "${installScript}"
 `, { mode: 0o755 })
 
-            spawn('bash', [installScript], { detached: true, stdio: 'ignore' }).unref()
-            sendProgress('installing', 100)
-
-            setTimeout(() => { pythonProcess?.kill(); app.quit() }, 500)
+              spawn('bash', [installScript], { detached: true, stdio: 'ignore' }).unref()
+              sendProgress('installing', 100)
+              setTimeout(() => { pythonProcess?.kill(); app.quit() }, 500)
+            }
           }
+        } else if (process.platform === 'linux') {
+          // Linux: Replace AppImage in place.
+          const currentAppPath = process.env.APPIMAGE || app.getPath('exe')
+          sendProgress('installing', 50)
+          const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
+          fs.writeFileSync(installScript, `#!/bin/bash
+sleep 1
+while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do sleep 0.5; done
+cp "${tmpFile}" "${currentAppPath}"
+chmod +x "${currentAppPath}"
+rm -f "${tmpFile}"
+"${currentAppPath}" &
+rm -f "${installScript}"
+`, { mode: 0o755 })
+
+          spawn('bash', [installScript], { detached: true, stdio: 'ignore' }).unref()
+          sendProgress('installing', 100)
+          setTimeout(() => { pythonProcess?.kill(); app.quit() }, 500)
         }
       }
     }

@@ -1532,6 +1532,12 @@ def run_repl(
             user_options["top_k"] = config.top_k
         inference_options = {**default_options, **preset_options, **user_options}
 
+        # Determine think mode for models that support it.
+        family = get_model_family(config.model)
+        think: bool | None = None
+        if family in SUPPORTS_THINKING:
+            think = True if config.think_mode else False
+
         # Run the agent loop (streams response to stdout).
         try:
             agent_loop(
@@ -1541,6 +1547,7 @@ def run_repl(
                 messages=messages,
                 debug=config.debug,
                 options=inference_options,
+                think=think,
             )
         except KeyboardInterrupt:
             print("\nInterrupted.")
