@@ -106,6 +106,10 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "8. If you encounter an error, try to fix it rather than just reporting it.\n"
         "9. When creating new files, use the write tool. When modifying existing files, "
         "prefer the edit tool for precise changes.\n"
+        "10. When the user asks about the system, environment, files, or anything that "
+        "can be answered by running a command or reading a file, ALWAYS use a tool "
+        "(bash, read, glob, grep) to get the real answer. NEVER guess or say "
+        "'I cannot access your system'. You ARE running on their system.\n"
     )
 
 
