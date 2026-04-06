@@ -99,17 +99,34 @@ def perform_update() -> tuple[bool, str]:
         if "Already up to date" in output:
             return True, f"Already up to date (v{old_version})."
 
-        # Re-install in development mode if setup.py/pyproject.toml changed.
-        changed_files = output
-        if "pyproject.toml" in changed_files or "setup.py" in changed_files:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", "."],
-                cwd=root,
-                capture_output=True,
-                timeout=120,
+        # Always re-install after update to ensure new modules are
+        # registered and version metadata is refreshed.
+        pip_cmd = [sys.executable, "-m", "pip", "install", "-e", "."]
+        # PEP 668 (Python 3.12+): add --break-system-packages if needed.
+        try:
+            probe = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--dry-run", "-e", "."],
+                cwd=root, capture_output=True, text=True, timeout=30,
             )
+            if "externally-managed" in probe.stderr:
+                pip_cmd.insert(4, "--break-system-packages")
+        except Exception:
+            pass
 
-        return True, f"Updated successfully from v{old_version}. Restart to use the new version."
+        subprocess.run(pip_cmd, cwd=root, capture_output=True, timeout=120)
+
+        # Read new version from the updated source.
+        try:
+            new_ver_result = subprocess.run(
+                [sys.executable, "-c",
+                 "from local_cli import __version__; print(__version__)"],
+                cwd=root, capture_output=True, text=True, timeout=10,
+            )
+            new_version = new_ver_result.stdout.strip() or "?"
+        except Exception:
+            new_version = "?"
+
+        return True, f"Updated v{old_version} → v{new_version}. Restart to use the new version."
 
     except FileNotFoundError:
         return False, "git is not installed."
