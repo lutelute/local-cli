@@ -43,8 +43,13 @@ def get_provider(name: str, **kwargs: object) -> LLMProvider:
 
         return ClaudeProvider(**kwargs)
 
+    if name == "llama-server":
+        from local_cli.providers.llama_server_provider import LlamaServerProvider
+
+        return LlamaServerProvider(**kwargs)
+
     raise ValueError(
-        f"Unknown provider: {name!r}. Supported providers: 'ollama', 'claude'."
+        f"Unknown provider: {name!r}. Supported providers: 'ollama', 'claude', 'llama-server'."
     )
 
 

@@ -192,5 +192,9 @@ class AgentTool(Tool):
         if provider_name == "claude":
             return get_provider("claude")
 
+        if provider_name == "llama-server":
+            base_url = getattr(self._provider, "_base_url", "http://localhost:8090")
+            return get_provider("llama-server", base_url=base_url)
+
         # Fallback: attempt to create by name with no extra kwargs.
         return get_provider(provider_name)

@@ -1317,6 +1317,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run in JSON-line server mode (for desktop GUI).",
     )
     parser.add_argument(
+        "--web-monitor",
+        action="store_true",
+        default=False,
+        help="Run web-based agent monitor (browser dashboard with SSE streaming).",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=7070,
+        help="Port for --web-monitor (default: 7070).",
+    )
+    parser.add_argument(
         "--update",
         action="store_true",
         default=False,

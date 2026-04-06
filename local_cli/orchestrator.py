@@ -88,9 +88,15 @@ class Orchestrator:
         if name == "claude":
             return get_provider("claude")
 
+        if name == "llama-server":
+            return get_provider(
+                "llama-server",
+                base_url=self._config.llama_server_url,
+            )
+
         raise ValueError(
             f"Unknown provider: {name!r}. "
-            f"Supported providers: 'ollama', 'claude'."
+            f"Supported providers: 'ollama', 'claude', 'llama-server'."
         )
 
     # ------------------------------------------------------------------

@@ -50,6 +50,12 @@ def main() -> None:
         run_server()
         return
 
+    # 2c2. Web monitor mode — browser dashboard with SSE streaming.
+    if getattr(args, "web_monitor", False):
+        from local_cli.web_monitor import run_web_monitor
+        run_web_monitor(config=config, port=getattr(args, "web_port", 7070))
+        return
+
     # 2d. Handle --update flag (explicit update).
     if getattr(args, "update", False):
         from local_cli.updater import check_for_updates, perform_update

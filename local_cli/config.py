@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 CONFIG_DEFAULTS: dict[str, object] = {
-    "model": "qwen3:8b",
+    "model": "qwen3.5:9b",
     "sidecar_model": "",
     "ollama_host": "http://localhost:11434",
     "state_dir": "~/.local/state/local-cli",
@@ -31,6 +31,7 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "top_k": None,
     "think_mode": False,
     "keep_alive": None,
+    "llama_server_url": "http://localhost:8090",
 }
 
 # Mapping of environment variable names to config keys.
@@ -46,6 +47,7 @@ ENV_VAR_MAP: dict[str, str] = {
     "LOCAL_CLI_TOP_K": "top_k",
     "LOCAL_CLI_THINK_MODE": "think_mode",
     "LOCAL_CLI_KEEP_ALIVE": "keep_alive",
+    "LLAMA_SERVER_URL": "llama_server_url",
 }
 
 # Maximum config file size in bytes (10KB).
@@ -237,6 +239,7 @@ class Config:
         self.top_k: int | None = _parse_optional_int(merged["top_k"])
         self.think_mode: bool = _parse_bool(merged["think_mode"])
         self.keep_alive: str | None = _parse_optional_str(merged["keep_alive"])
+        self.llama_server_url: str = str(merged["llama_server_url"]).rstrip("/")
 
     @property
     def has_claude_access(self) -> bool:
