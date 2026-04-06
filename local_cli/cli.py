@@ -1329,6 +1329,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Port for --web-monitor (default: 7070).",
     )
     parser.add_argument(
+        "--bench",
+        action="store_true",
+        default=False,
+        help="Run quick benchmark (speed, knowledge, tool-calling).",
+    )
+    parser.add_argument(
         "--update",
         action="store_true",
         default=False,

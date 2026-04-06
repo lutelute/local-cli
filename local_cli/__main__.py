@@ -56,6 +56,20 @@ def main() -> None:
         run_web_monitor(config=config, port=getattr(args, "web_port", 7070))
         return
 
+    # 2c3. Bench mode — quick model benchmark.
+    if getattr(args, "bench", False):
+        from local_cli.bench import run_bench
+        from local_cli.providers import get_provider
+
+        if config.provider == "llama-server":
+            prov = get_provider("llama-server", base_url=config.llama_server_url)
+        elif config.provider == "claude":
+            prov = get_provider("claude")
+        else:
+            prov = get_provider("ollama", base_url=config.ollama_host)
+        run_bench(prov, config.model)
+        return
+
     # 2d. Handle --update flag (explicit update).
     if getattr(args, "update", False):
         from local_cli.updater import check_for_updates, perform_update
