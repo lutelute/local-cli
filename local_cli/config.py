@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 CONFIG_DEFAULTS: dict[str, object] = {
-    "model": "qwen3.5:9b",
+    "model": "qwen3.5:9b-q4_K_M",
     "sidecar_model": "",
     "ollama_host": "http://localhost:11434",
     "state_dir": "~/.local/state/local-cli",
