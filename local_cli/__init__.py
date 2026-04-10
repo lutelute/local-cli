@@ -5,7 +5,7 @@ Import this module to launch the interactive REPL (antigravity-style)::
     >>> import local_cli
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 def _launch() -> None:

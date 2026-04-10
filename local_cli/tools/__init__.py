@@ -24,6 +24,7 @@ def get_default_tools() -> list[Tool]:
     from local_cli.tools.glob_tool import GlobTool
     from local_cli.tools.grep_tool import GrepTool
     from local_cli.tools.read_tool import ReadTool
+    from local_cli.tools.todo_tool import TodoWriteTool
     from local_cli.tools.web_fetch_tool import WebFetchTool
     from local_cli.tools.write_tool import WriteTool
 
@@ -35,6 +36,7 @@ def get_default_tools() -> list[Tool]:
         GlobTool(),
         GrepTool(),
         WebFetchTool(),
+        TodoWriteTool(),
         AskUserTool(),
     ]
     return tools
@@ -55,6 +57,7 @@ def get_sub_agent_tools() -> list[Tool]:
     from local_cli.tools.glob_tool import GlobTool
     from local_cli.tools.grep_tool import GrepTool
     from local_cli.tools.read_tool import ReadTool
+    from local_cli.tools.todo_tool import TodoWriteTool
     from local_cli.tools.web_fetch_tool import WebFetchTool
     from local_cli.tools.write_tool import WriteTool
 
@@ -66,6 +69,7 @@ def get_sub_agent_tools() -> list[Tool]:
         GlobTool(),
         GrepTool(),
         WebFetchTool(),
+        TodoWriteTool(),
     ]
     return tools
 

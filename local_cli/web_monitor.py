@@ -37,6 +37,12 @@ def _build_system_prompt(tools: list[Tool]) -> str:
         "3. If code has errors, fix by rewriting and re-running.\n"
         "4. Read files before editing.\n"
         "5. Verify changes by reading back or running tests.\n"
+        "\n"
+        "TASK TRACKING:\n"
+        "For multi-step tasks (3+ steps) or multiple deliverables (e.g., 'make 10 games'),\n"
+        "use todo_write to maintain a checklist. Mark one task 'in_progress' at a time and\n"
+        "move to 'completed' immediately after finishing. Don't stop until all are done.\n"
+        "When making multiple items, check your todo list to avoid repetition.\n"
     )
 
 
