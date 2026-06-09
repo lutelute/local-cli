@@ -106,36 +106,41 @@ class ReadTool(Tool):
         if b"\x00" in raw:
             return f"Error: {file_path} appears to be a binary file."
 
-        # Read text content.
+        # Read text content.  Stream line-by-line so a huge file read with
+        # offset/limit is not loaded into memory in full; only the requested
+        # window is kept.  A utf-8 decode error falls back to a whole-file
+        # latin-1 read (rare; such files are usually small).
+        start_idx = offset - 1
+        selected: list[str] = []
+        line_count = 0
         decoded_as_latin1 = False
         try:
-            content = path.read_text(encoding="utf-8")
+            with path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    if line_count >= start_idx:
+                        if limit is not None and len(selected) >= limit:
+                            break
+                        selected.append(raw_line.rstrip("\r\n"))
+                    line_count += 1
         except UnicodeDecodeError:
             # Fallback: latin-1 accepts all byte values.  Flag it so the
             # model knows the decoding may be imperfect (possible mojibake).
             try:
-                content = path.read_text(encoding="latin-1")
-                decoded_as_latin1 = True
+                lines = path.read_text(encoding="latin-1").splitlines()
             except OSError as exc:
                 return f"Error: could not read file: {exc}"
+            decoded_as_latin1 = True
+            line_count = len(lines)
+            selected = lines[start_idx:]
+            if limit is not None:
+                selected = selected[:limit]
         except PermissionError:
             return f"Error: permission denied: {file_path}"
         except OSError as exc:
             return f"Error: could not read file: {exc}"
 
-        lines = content.splitlines()
-        total_lines = len(lines)
-
-        # Apply offset (1-based).
-        start_idx = offset - 1
-        selected = lines[start_idx:]
-
-        # Apply limit.
-        if limit is not None:
-            selected = selected[:limit]
-
-        if not selected and total_lines > 0:
-            return f"Error: offset {offset} is beyond end of file ({total_lines} lines)."
+        if not selected and line_count > 0:
+            return f"Error: offset {offset} is beyond end of file ({line_count} lines)."
 
         # Format with line numbers.
         numbered_lines: list[str] = []

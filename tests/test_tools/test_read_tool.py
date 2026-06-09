@@ -279,5 +279,38 @@ class TestReadToolEncoding(unittest.TestCase):
             os.unlink(path)
 
 
+class TestReadToolStreamingWindow(unittest.TestCase):
+    """offset/limit returns exactly the requested window (streaming path)."""
+
+    def setUp(self) -> None:
+        self.tool = ReadTool()
+
+    def test_offset_limit_window_on_large_file(self) -> None:
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(f"line{i}" for i in range(1, 1001)) + "\n")
+            result = self.tool.execute(file_path=path, offset=500, limit=3)
+            self.assertIn("line500", result)
+            self.assertIn("line502", result)
+            self.assertNotIn("line503", result)
+            self.assertNotIn("line499", result)
+        finally:
+            os.unlink(path)
+
+    def test_offset_beyond_end_reports_total(self) -> None:
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("a\nb\nc\n")
+            result = self.tool.execute(file_path=path, offset=10)
+            self.assertIn("beyond end", result)
+            self.assertIn("3 lines", result)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
