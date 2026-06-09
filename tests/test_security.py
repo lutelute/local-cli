@@ -103,6 +103,60 @@ class TestIsCommandDangerous(unittest.TestCase):
         """Empty command is safe."""
         self.assertFalse(is_command_dangerous(""))
 
+    # --- Hardened rm detection (flag order, ~, $HOME, /*, top-level) ---
+
+    def test_rm_fr_flag_order(self) -> None:
+        """Block rm with flags in -fr order, not just -rf."""
+        self.assertTrue(is_command_dangerous("rm -fr /"))
+
+    def test_rm_rf_home_tilde(self) -> None:
+        """Block rm -rf ~ (home directory)."""
+        self.assertTrue(is_command_dangerous("rm -rf ~"))
+
+    def test_rm_rf_home_var(self) -> None:
+        """Block rm -rf $HOME / ${HOME}."""
+        self.assertTrue(is_command_dangerous("rm -rf $HOME"))
+        self.assertTrue(is_command_dangerous("rm -rf ${HOME}"))
+
+    def test_rm_rf_root_glob(self) -> None:
+        """Block rm -rf /*."""
+        self.assertTrue(is_command_dangerous("rm -rf /*"))
+
+    def test_rm_rf_top_level_system_dir(self) -> None:
+        """Block rm -rf on a top-level system directory."""
+        self.assertTrue(is_command_dangerous("rm -rf /etc"))
+        self.assertTrue(is_command_dangerous("rm -rf /usr"))
+
+    def test_rm_separate_flags(self) -> None:
+        """Block rm with separate -r and -f flags targeting root."""
+        self.assertTrue(is_command_dangerous("rm -r -f /"))
+
+    def test_dd_to_nvme_device(self) -> None:
+        """Block dd writing to an nvme device."""
+        self.assertTrue(is_command_dangerous("dd if=image.iso of=/dev/nvme0n1"))
+
+    def test_chown_recursive_root(self) -> None:
+        """Block recursive chown of root."""
+        self.assertTrue(is_command_dangerous("chown -R nobody /"))
+
+    # --- Safe rm/dd variants that must NOT be flagged ---
+
+    def test_safe_rm_rf_relative_dir(self) -> None:
+        """rm -rf on a relative build dir is safe (common and intentional)."""
+        self.assertFalse(is_command_dangerous("rm -rf build/"))
+        self.assertFalse(is_command_dangerous("rm -rf ./node_modules"))
+        self.assertFalse(is_command_dangerous("rm -rf node_modules"))
+
+    def test_safe_rm_rf_deep_path(self) -> None:
+        """rm -rf on a deep absolute path is treated as intentional."""
+        self.assertFalse(
+            is_command_dangerous("rm -rf /home/user/project/build")
+        )
+
+    def test_safe_dd_read_from_device(self) -> None:
+        """dd reading from a device into a regular file is not blocked."""
+        self.assertFalse(is_command_dangerous("dd if=/dev/sda of=backup.img"))
+
 
 class TestGetSanitizedEnv(unittest.TestCase):
     """Tests for get_sanitized_env()."""
