@@ -16,6 +16,7 @@ import queue
 import threading
 from typing import Any
 
+from local_cli.agent import parse_tool_call, run_tool, truncate_tool_output
 from local_cli.config import Config
 from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
@@ -296,36 +297,27 @@ def _run_agent(
             break
 
         for tc in tool_calls:
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            tool_args = func.get("arguments", {})
-            if isinstance(tool_args, str):
-                try:
-                    tool_args = json.loads(tool_args)
-                except (json.JSONDecodeError, ValueError):
-                    tool_args = {}
-            tool_call_id = tc.get("id")
+            tool_name, tool_args, tool_call_id = parse_tool_call(tc)
 
             eq.put(json.dumps({"type": "tool_call", "name": tool_name, "args": tool_args}))
 
-            tool = tool_map.get(tool_name)
-            if tool is None:
-                output = f"Error: unknown tool '{tool_name}'"
-                is_error = True
-            else:
-                try:
-                    output = tool.execute(**tool_args)
-                    is_error = False
-                except Exception as exc:
-                    output = f"Error: {exc}"
-                    is_error = True
+            output = run_tool(tool_name, tool_args, tool_map)
+            is_error = output.startswith("Error:")
 
-            if len(output) > 5000:
-                output = output[:5000] + "\n...(truncated)"
+            eq.put(json.dumps({
+                "type": "tool_result",
+                "output": truncate_tool_output(output),
+                "error": is_error,
+            }))
 
-            eq.put(json.dumps({"type": "tool_result", "output": output, "error": is_error}))
-
-            tool_msg: dict[str, Any] = {"role": "tool", "content": output}
+            # Include tool_name and tool_call_id.  tool_name was previously
+            # omitted on this path (unlike the CLI/server loops), which
+            # breaks Claude tool-result matching.
+            tool_msg: dict[str, Any] = {
+                "role": "tool",
+                "tool_name": tool_name,
+                "content": output,
+            }
             if tool_call_id:
                 tool_msg["tool_call_id"] = tool_call_id
             messages.append(tool_msg)

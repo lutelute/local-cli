@@ -22,6 +22,8 @@ from local_cli.agent import (
     agent_loop,
     collect_streaming_response,
     compact_messages,
+    parse_tool_call,
+    run_tool,
 )
 from local_cli.ollama_client import OllamaStreamError
 from local_cli.tool_cache import ToolCache
@@ -1772,6 +1774,71 @@ class TestConfigToAgentOptionsPipeline(unittest.TestCase):
         # Default preset values for unknown models.
         self.assertEqual(opts["temperature"], 0.7)
         self.assertEqual(opts["num_ctx"], 8192)
+
+
+class TestParseToolCall(unittest.TestCase):
+    """Tests for parse_tool_call — the shared tool-call normalizer."""
+
+    def test_dict_arguments_passthrough(self) -> None:
+        """Arguments already shaped as a dict are returned unchanged."""
+        tc = {
+            "function": {"name": "read", "arguments": {"file_path": "/x"}},
+            "id": "call_1",
+        }
+        name, args, call_id = parse_tool_call(tc)
+        self.assertEqual(name, "read")
+        self.assertEqual(args, {"file_path": "/x"})
+        self.assertEqual(call_id, "call_1")
+
+    def test_json_string_arguments_parsed(self) -> None:
+        """Arguments encoded as a JSON string are parsed into a dict."""
+        tc = {"function": {"name": "edit", "arguments": '{"old": "a", "new": "b"}'}}
+        name, args, call_id = parse_tool_call(tc)
+        self.assertEqual(name, "edit")
+        self.assertEqual(args, {"old": "a", "new": "b"})
+        self.assertIsNone(call_id)
+
+    def test_malformed_json_string_becomes_empty(self) -> None:
+        """A non-parseable JSON string degrades to an empty dict."""
+        tc = {"function": {"name": "bash", "arguments": "{not valid json"}}
+        name, args, _ = parse_tool_call(tc)
+        self.assertEqual(name, "bash")
+        self.assertEqual(args, {})
+
+    def test_non_dict_arguments_become_empty(self) -> None:
+        """Arguments that parse to a non-dict (e.g. a JSON list) degrade to {}."""
+        tc = {"function": {"name": "bash", "arguments": "[1, 2, 3]"}}
+        _, args, _ = parse_tool_call(tc)
+        self.assertEqual(args, {})
+
+    def test_missing_function_yields_empty(self) -> None:
+        """An empty tool call yields an empty name/args and no id."""
+        name, args, call_id = parse_tool_call({})
+        self.assertEqual(name, "")
+        self.assertEqual(args, {})
+        self.assertIsNone(call_id)
+
+
+class TestRunTool(unittest.TestCase):
+    """Tests for run_tool — the shared tool dispatcher."""
+
+    def test_known_tool_executes(self) -> None:
+        """A known tool is executed and its result returned."""
+        tool = _DummyTool(name="dummy", result="done")
+        result = run_tool("dummy", {"arg": "x"}, {"dummy": tool})
+        self.assertEqual(result, "done")
+
+    def test_unknown_tool_returns_error(self) -> None:
+        """An unknown tool name returns an explicit error string."""
+        result = run_tool("nope", {}, {})
+        self.assertEqual(result, "Error: unknown tool 'nope'")
+
+    def test_tool_exception_becomes_error_string(self) -> None:
+        """A tool that raises is converted to an 'Error: ...' string."""
+        tool = _DummyTool(name="boom", side_effect=ValueError("bad"))
+        result = run_tool("boom", {}, {"boom": tool})
+        self.assertTrue(result.startswith("Error: ValueError"))
+        self.assertIn("bad", result)
 
 
 if __name__ == "__main__":

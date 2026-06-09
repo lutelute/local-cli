@@ -356,6 +356,99 @@ def _execute_tool(
         return f"Error: {type(exc).__name__}: {exc}"
 
 
+def parse_tool_call(
+    tc: dict[str, Any],
+) -> tuple[str, dict[str, Any], str | None]:
+    """Extract the name, arguments, and id from a raw tool call.
+
+    Normalizes the shapes local models emit: ``arguments`` may already be a
+    dict, or a JSON-encoded string (Ollama frequently returns the latter).
+    A string that fails to parse — or any non-dict value — degrades to an
+    empty dict rather than raising, so a malformed tool call becomes a
+    no-arg call the tool itself can reject, instead of crashing the loop.
+
+    This is the single tool-call parser shared by the CLI agent loop, the
+    sub-agent loop, the JSON-line server, and the web monitor, so all four
+    repair malformed calls identically.
+
+    Args:
+        tc: A single tool-call dict, shaped like
+            ``{"function": {"name": ..., "arguments": ...}, "id": ...}``.
+
+    Returns:
+        A ``(tool_name, arguments, tool_call_id)`` tuple.  ``tool_name`` is
+        ``""`` and ``arguments`` is ``{}`` when absent; ``tool_call_id`` is
+        ``None`` when the call carries no id.
+    """
+    func = tc.get("function", {})
+    tool_name = func.get("name", "")
+    arguments = func.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, ValueError):
+            arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return tool_name, arguments, tc.get("id")
+
+
+def run_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    tool_map: dict[str, Tool],
+    debug: bool = False,
+) -> str:
+    """Resolve *tool_name* in *tool_map* and execute it.
+
+    Returns an ``Error: unknown tool`` string for an unrecognized name and
+    routes execution through :func:`_execute_tool`, so exceptions are
+    converted to error strings uniformly across every front-end (CLI agent
+    loop, sub-agent loop, JSON-line server, web monitor).
+
+    Args:
+        tool_name: The name of the tool to run.
+        arguments: Keyword arguments for the tool.
+        tool_map: Mapping of tool name to :class:`Tool` instance.
+        debug: Forwarded to :func:`_execute_tool`.
+
+    Returns:
+        The tool result string, or an ``Error: ...`` message.
+    """
+    tool = tool_map.get(tool_name)
+    if tool is None:
+        return f"Error: unknown tool '{tool_name}'"
+    return _execute_tool(tool, arguments, debug=debug)
+
+
+# Max characters of a tool result forwarded to a GUI front-end (the
+# JSON-line server and the web monitor) for display.  The full result is
+# always kept in the message history; only the on-screen copy is capped.
+_GUI_TOOL_RESULT_MAX = 10_000
+
+
+def truncate_tool_output(
+    result: str, max_len: int = _GUI_TOOL_RESULT_MAX,
+) -> str:
+    """Cap a tool result for GUI display, marking when it was truncated.
+
+    Used by the server and web monitor so both surface the same amount of
+    a long tool result (they previously truncated at 10,000 and 5,000
+    characters respectively).
+
+    Args:
+        result: The full tool result string.
+        max_len: Maximum characters to keep.
+
+    Returns:
+        The result unchanged if within *max_len*, otherwise the first
+        *max_len* characters with a truncation marker appended.
+    """
+    if len(result) <= max_len:
+        return result
+    return result[:max_len] + "\n...(truncated)"
+
+
 def _extract_file_path(tool_name: str, arguments: dict[str, Any]) -> str | None:
     """Extract the primary file path from tool arguments for cache tracking.
 
@@ -702,16 +795,7 @@ def agent_loop(
         # 4. Execute each tool call and append results.
         # ---------------------------------------------------------------
         for tc in tool_calls:
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            arguments = func.get("arguments", {})
-            # Ollama sometimes returns arguments as a JSON string.
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except (json.JSONDecodeError, ValueError):
-                    arguments = {}
-            tool_call_id = tc.get("id")
+            tool_name, arguments, tool_call_id = parse_tool_call(tc)
 
             tool = tool_map.get(tool_name)
             if tool is None:
@@ -974,16 +1058,7 @@ def sub_agent_loop(
         # 4. Execute each tool call and append results.
         # ---------------------------------------------------------------
         for tc in tool_calls:
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            arguments = func.get("arguments", {})
-            # Ollama sometimes returns arguments as a JSON string.
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except (json.JSONDecodeError, ValueError):
-                    arguments = {}
-            tool_call_id = tc.get("id")
+            tool_name, arguments, tool_call_id = parse_tool_call(tc)
 
             tool = tool_map.get(tool_name)
             if tool is None:

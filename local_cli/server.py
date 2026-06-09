@@ -34,6 +34,9 @@ from local_cli.agent import (
     _COMPACT_TOKEN_THRESHOLD,
     _estimate_tokens,
     _needs_compaction,
+    parse_tool_call,
+    run_tool,
+    truncate_tool_output,
 )
 from local_cli.clipboard import (
     ClipboardError,
@@ -393,16 +396,7 @@ class JsonLineServer:
                     _send({"id": req_id, "type": "done"})
                     return
 
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                tool_args = func.get("arguments", {})
-                # Ollama sometimes returns arguments as a JSON string.
-                if isinstance(tool_args, str):
-                    try:
-                        tool_args = json.loads(tool_args)
-                    except (json.JSONDecodeError, ValueError):
-                        tool_args = {}
-                tool_call_id = tc.get("id")
+                tool_name, tool_args, tool_call_id = parse_tool_call(tc)
 
                 _send({
                     "id": req_id,
@@ -411,20 +405,13 @@ class JsonLineServer:
                     "args": tool_args,
                 })
 
-                tool = self._tool_map.get(tool_name)
-                if tool is None:
-                    result = f"Error: unknown tool '{tool_name}'"
-                else:
-                    try:
-                        result = tool.execute(**tool_args)
-                    except Exception as exc:
-                        result = f"Error: {exc}"
+                result = run_tool(tool_name, tool_args, self._tool_map)
 
                 _send({
                     "id": req_id,
                     "type": "tool_result",
                     "name": tool_name,
-                    "output": result if len(result) <= 10000 else result[:10000] + "\n...(truncated)",
+                    "output": truncate_tool_output(result),
                 })
 
                 # Include tool_name and tool_call_id in the tool result
