@@ -32,8 +32,10 @@ from typing import Any
 
 from local_cli.agent import (
     _COMPACT_TOKEN_THRESHOLD,
+    _TOOL_NUDGE_MESSAGE,
     _estimate_tokens,
     _needs_compaction,
+    _should_nudge_to_use_tools,
     parse_tool_call,
     run_tool,
     truncate_tool_output,
@@ -333,6 +335,7 @@ class JsonLineServer:
                 chat_kwargs["keep_alive"] = keep_alive
 
         max_iterations = 15
+        nudged = False  # one "use the tools" nudge per turn (see agent_loop)
         for _ in range(max_iterations):
             if self._stop_flag.is_set():
                 _send({"id": req_id, "type": "done"})
@@ -385,8 +388,13 @@ class JsonLineServer:
                 assistant_msg["tool_calls"] = tool_calls
             self._messages.append(assistant_msg)
 
-            # If no tool calls, we're done.
+            # If no tool calls, we may be done -- but first nudge once if the
+            # model printed code instead of using a tool.
             if not tool_calls:
+                if _should_nudge_to_use_tools(self._messages, assistant_msg, nudged):
+                    self._messages.append(dict(_TOOL_NUDGE_MESSAGE))
+                    nudged = True
+                    continue
                 _send({"id": req_id, "type": "done"})
                 return
 

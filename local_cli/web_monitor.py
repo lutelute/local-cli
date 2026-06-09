@@ -16,7 +16,13 @@ import queue
 import threading
 from typing import Any
 
-from local_cli.agent import parse_tool_call, run_tool, truncate_tool_output
+from local_cli.agent import (
+    _TOOL_NUDGE_MESSAGE,
+    _should_nudge_to_use_tools,
+    parse_tool_call,
+    run_tool,
+    truncate_tool_output,
+)
 from local_cli.config import Config
 from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
@@ -253,6 +259,7 @@ def _run_agent(
 
     total_gen_tokens = 0
     total_gen_time = 0.0
+    nudged = False  # one "use the tools" nudge per turn (see agent_loop)
 
     for _ in range(15):
         eq.put(json.dumps({"type": "stream_start"}))
@@ -294,6 +301,10 @@ def _run_agent(
         messages.append(assistant_msg)
 
         if not tool_calls:
+            if _should_nudge_to_use_tools(messages, assistant_msg, nudged):
+                messages.append(dict(_TOOL_NUDGE_MESSAGE))
+                nudged = True
+                continue
             break
 
         for tc in tool_calls:

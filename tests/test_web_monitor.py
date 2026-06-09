@@ -132,6 +132,23 @@ class TestRunAgent(unittest.TestCase):
         self.assertEqual(len(tool_msgs), 1)
         self.assertIn("unknown tool", tool_msgs[0]["content"])
 
+    def test_nudges_on_code_only_build_answer(self) -> None:
+        """A code-only answer to a build request triggers one nudge."""
+        turn1 = [{"message": {"content": "```python\nprint(1)\n```"}, "done": True}]
+        turn2 = [{"message": {"content": "no file needed"}, "done": True}]
+        provider = self._make_provider([turn1, turn2])
+
+        eq: queue.Queue = queue.Queue()
+        messages: list = []
+        _run_agent(provider, Config(), [], [], {}, "create a script", eq, messages)
+
+        nudges = [
+            m for m in messages
+            if m.get("role") == "user" and "did not create" in m.get("content", "")
+        ]
+        self.assertEqual(len(nudges), 1)
+        self.assertEqual(provider.chat_stream.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

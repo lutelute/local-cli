@@ -119,5 +119,22 @@ class TestHandleChat(unittest.TestCase):
             any(m.get("role") == "assistant" for m in server._messages)
         )
 
+    def test_nudges_on_code_only_build_answer(self) -> None:
+        """A code-only answer to a build request triggers one nudge."""
+        turn1 = [{"message": {"content": "```python\nprint(1)\n```"}, "done": True}]
+        turn2 = [{"message": {"content": "no file needed"}, "done": True}]
+        server = _make_server(self._provider([turn1, turn2]), [])
+        sent: list = []
+        with patch("local_cli.server._send", side_effect=sent.append):
+            server._handle_chat(1, "create a script")
+
+        nudges = [
+            m for m in server._messages
+            if m.get("role") == "user" and "did not create" in m.get("content", "")
+        ]
+        self.assertEqual(len(nudges), 1)
+        self.assertEqual(server._provider.chat_stream.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
