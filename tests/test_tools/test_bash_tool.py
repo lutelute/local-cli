@@ -250,5 +250,43 @@ class TestBashToolParameterValidation(unittest.TestCase):
         self.assertIn("Error", result)
 
 
+class TestBashToolConfirmation(unittest.TestCase):
+    """Tests for the risky-command confirmation hook."""
+
+    def test_risky_command_declined(self) -> None:
+        """A risky command is not run when confirm returns False."""
+        tool = BashTool(confirm=lambda cmd: False)
+        result = tool.execute(command="rm -rf some_build_dir/")
+        self.assertIn("declined", result.lower())
+
+    def test_risky_command_approved(self) -> None:
+        """A risky command runs when confirm returns True."""
+        calls: list[str] = []
+        tool = BashTool(confirm=lambda cmd: bool(calls.append(cmd)) or True)
+        result = tool.execute(command="kill -0 999999")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("declined", result.lower())
+
+    def test_safe_command_skips_confirm(self) -> None:
+        """A non-risky command never consults the confirm callback."""
+        calls: list[str] = []
+        tool = BashTool(confirm=lambda cmd: bool(calls.append(cmd)))
+        result = tool.execute(command="echo hello")
+        self.assertEqual(len(calls), 0)
+        self.assertIn("hello", result)
+
+    def test_no_confirm_callback_runs_risky(self) -> None:
+        """Without a confirm callback, risky commands run unprompted."""
+        tool = BashTool()
+        result = tool.execute(command="kill -0 999999")
+        self.assertNotIn("declined", result.lower())
+
+    def test_dangerous_blocked_even_when_confirm_approves(self) -> None:
+        """Dangerous commands stay blocked even if confirm would approve."""
+        tool = BashTool(confirm=lambda cmd: True)
+        result = tool.execute(command="rm -rf /")
+        self.assertIn("blocked by security policy", result)
+
+
 if __name__ == "__main__":
     unittest.main()

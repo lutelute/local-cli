@@ -1275,6 +1275,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Start directly in ideation (brainstorming) mode.",
     )
+    parser.add_argument(
+        "--yes",
+        "-y",
+        dest="auto_approve",
+        action="store_true",
+        default=None,
+        help="Auto-approve risky commands (skip confirmation prompts).",
+    )
     return parser
 
 

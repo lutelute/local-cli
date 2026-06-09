@@ -6,8 +6,13 @@ sanitize the subprocess environment.
 """
 
 import subprocess
+from typing import Callable
 
-from local_cli.security import get_sanitized_env, is_command_dangerous
+from local_cli.security import (
+    get_sanitized_env,
+    is_command_dangerous,
+    is_command_risky,
+)
 from local_cli.tools.base import Tool
 
 # Maximum output size in bytes (100 KB).
@@ -19,6 +24,23 @@ _DEFAULT_TIMEOUT = 120
 
 class BashTool(Tool):
     """Execute shell commands and return their output."""
+
+    def __init__(
+        self,
+        confirm: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Create the bash tool.
+
+        Args:
+            confirm: Optional callback invoked before running a *risky*
+                command (recursive rm, sudo, force push, kill, ...).  It
+                receives the command string and returns ``True`` to run it
+                or ``False`` to decline.  When ``None`` (the default — and
+                the case for sub-agents and GUI front-ends), risky commands
+                run without a prompt; outright-dangerous commands are always
+                blocked regardless of this callback.
+        """
+        self._confirm = confirm
 
     @property
     def name(self) -> str:
@@ -72,9 +94,16 @@ class BashTool(Tool):
             timeout = _DEFAULT_TIMEOUT
         timeout = int(timeout)
 
-        # Security check: block dangerous commands.
+        # Security check: block dangerous commands outright.
         if is_command_dangerous(command):
             return f"Error: command blocked by security policy: {command}"
+
+        # Risky-but-legitimate commands require confirmation when a confirm
+        # callback is wired up (CLI without --yes).  Declining returns a
+        # plain message the model can read and adapt to.
+        if self._confirm is not None and is_command_risky(command):
+            if not self._confirm(command):
+                return f"Command declined by user (not run): {command}"
 
         try:
             result = subprocess.run(

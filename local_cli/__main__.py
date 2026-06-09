@@ -23,6 +23,32 @@ from local_cli.skills import SkillsLoader
 from local_cli.tools import get_default_tools, get_sub_agent_tools
 
 
+def _cli_confirm(command: str) -> bool:
+    """Ask the user to approve a risky shell command before it runs.
+
+    Used by the interactive REPL when confirmation is enabled (the user did
+    not pass --yes).  Reads a yes/no answer from stdin; EOF or Ctrl-C is
+    treated as a decline.
+
+    Args:
+        command: The risky shell command awaiting approval.
+
+    Returns:
+        True to run the command, False to decline.
+    """
+    sys.stderr.write(
+        f"\n  ⚠  About to run a risky command:\n    {command}\n"
+        "  Proceed? [y/N] "
+    )
+    sys.stderr.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n")
+        return False
+    return answer in ("y", "yes")
+
+
 def main() -> None:
     """Run the local-cli application."""
     # 1. Parse CLI arguments.
@@ -138,6 +164,16 @@ def main() -> None:
 
     # 6. Get default tools.
     tools = get_default_tools()
+
+    # 6b. Wire risky-command confirmation into the REPL's bash tool unless
+    # the user opted into auto-approval (--yes).  Sub-agents and the GUI
+    # server keep the unconfirmed bash tool (no stdin to prompt on).
+    if not config.auto_approve:
+        from local_cli.tools.bash_tool import BashTool
+        for i, t in enumerate(tools):
+            if t.name == "bash":
+                tools[i] = BashTool(confirm=_cli_confirm)
+                break
 
     # 7. Load model registry (if configured).
     registry: ModelRegistry | None = None

@@ -8,6 +8,7 @@ from local_cli.security import (
     SANITIZED_ENV_VARS,
     get_sanitized_env,
     is_command_dangerous,
+    is_command_risky,
     validate_model_name,
     validate_ollama_host,
 )
@@ -156,6 +157,44 @@ class TestIsCommandDangerous(unittest.TestCase):
     def test_safe_dd_read_from_device(self) -> None:
         """dd reading from a device into a regular file is not blocked."""
         self.assertFalse(is_command_dangerous("dd if=/dev/sda of=backup.img"))
+
+
+class TestIsCommandRisky(unittest.TestCase):
+    """Tests for is_command_risky() — confirmation, not blocking."""
+
+    def test_recursive_rm_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("rm -rf build/"))
+        self.assertTrue(is_command_risky("rm -r ./tmp"))
+
+    def test_sudo_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("sudo apt install foo"))
+
+    def test_force_push_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("git push --force origin main"))
+        self.assertTrue(is_command_risky("git push -f"))
+
+    def test_git_reset_hard_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("git reset --hard HEAD~3"))
+
+    def test_kill_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("kill -9 1234"))
+        self.assertTrue(is_command_risky("killall python"))
+
+    def test_shutdown_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("sudo shutdown -h now"))
+
+    def test_chmod_recursive_is_risky(self) -> None:
+        self.assertTrue(is_command_risky("chmod -R 644 ./src"))
+
+    # --- Ordinary commands that must NOT require confirmation ---
+
+    def test_normal_commands_not_risky(self) -> None:
+        self.assertFalse(is_command_risky("ls -la"))
+        self.assertFalse(is_command_risky("git status"))
+        self.assertFalse(is_command_risky("git push origin main"))  # non-force
+        self.assertFalse(is_command_risky("python3 -m pytest"))
+        self.assertFalse(is_command_risky("rm file.txt"))  # non-recursive
+        self.assertFalse(is_command_risky("cat README.md"))
 
 
 class TestGetSanitizedEnv(unittest.TestCase):

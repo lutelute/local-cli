@@ -88,7 +88,8 @@ Create tagged snapshots before risky edits. Roll back instantly with `/rollback`
 Save conversations as JSONL files. Resume where you left off.
 
 ### Security
-- Dangerous command blocking (rm -rf /, fork bombs, etc.)
+- Dangerous command blocking (`rm -rf /` and its variants, fork bombs, `dd` to a device, etc.)
+- Risky-command confirmation — recursive `rm`, `sudo`, force push, `kill`, `shutdown`, etc. prompt for approval in the REPL (pass `--yes` to auto-approve)
 - Environment sanitization (strips API keys, tokens from subprocesses)
 - Path traversal prevention
 - Ollama host validation (localhost only)
@@ -281,6 +282,7 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | `--rag-model` | — | `all-minilm` | Embedding model |
 | `--select-model` | — | `false` | Interactive model picker |
 | `--server` | — | `false` | JSON-line server mode |
+| `--yes` / `-y` | — | `false` | Auto-approve risky commands (skip confirmation) |
 | `--update` | — | `false` | Check for updates |
 
 Config file location: `~/.config/local-cli/config` (key=value format).

@@ -76,6 +76,54 @@ def is_command_dangerous(cmd: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Risky commands — confirmed (not blocked) before running
+# ---------------------------------------------------------------------------
+
+# Commands that are legitimate but destructive, privileged, or hard to
+# undo.  They are not blocked; instead the agent asks for confirmation
+# before running them when confirmation is enabled (i.e. auto_approve is
+# off).  With ``--yes`` (auto_approve on) they run without prompting.
+RISKY_COMMANDS: list[str] = [
+    r"\brm\s+-[a-zA-Z]*r",                         # any recursive rm
+    r"\bsudo\b",                                   # privilege escalation
+    r"\bgit\s+push\b[^|;&\n]*(?:--force|-f)\b",    # force push
+    r"\bgit\s+reset\s+--hard\b",                   # discard commits
+    r"\bgit\s+clean\s+-[a-zA-Z]*f",                # delete untracked files
+    r"\bchmod\s+-R\b",                             # recursive permission change
+    r"\bchown\s+-R\b",                             # recursive owner change
+    r"\b(?:kill|killall|pkill)\b",                 # signal processes
+    r"\b(?:shutdown|reboot|halt|poweroff)\b",      # power state
+    r"\btruncate\b",                               # shrink/empty files
+    r"\bmv\b[^|;&\n]*\s/(?:etc|usr|bin|var|lib|boot|sys|opt)\b",  # mv into system dirs
+]
+
+_RISKY_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p) for p in RISKY_COMMANDS
+]
+
+
+def is_command_risky(cmd: str) -> bool:
+    """Check whether a command warrants confirmation before running.
+
+    Unlike :func:`is_command_dangerous` (always blocked), risky commands
+    are destructive or privileged but legitimate — recursive ``rm``,
+    ``sudo``, force pushes, ``kill``, ``shutdown`` and the like.  They are
+    only gated when the user has confirmation enabled (``auto_approve`` is
+    off); with ``--yes`` they run without prompting.
+
+    Args:
+        cmd: The shell command string to check.
+
+    Returns:
+        True if the command should be confirmed before running.
+    """
+    for pattern in _RISKY_PATTERNS:
+        if pattern.search(cmd):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Environment variable sanitization
 # ---------------------------------------------------------------------------
 
