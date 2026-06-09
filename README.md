@@ -52,7 +52,7 @@ Think of it as a local, offline-capable alternative to cloud-based AI coding ass
 ### Agent Loop
 The LLM autonomously calls tools to complete tasks. It reads files, writes code, runs commands, and iterates until the task is done — no manual step-by-step prompting required.
 
-### 9 Built-in Tools
+### 10 Built-in Tools
 
 | Tool | Description |
 |------|-------------|
@@ -64,6 +64,7 @@ The LLM autonomously calls tools to complete tasks. It reads files, writes code,
 | `grep` | Search file contents with regex |
 | `web_fetch` | Fetch and parse web pages |
 | `ask_user` | Ask the user a question |
+| `todo_write` | Track a structured task list (pending / in-progress / done) |
 | `agent` | Spawn sub-agents for parallel task execution |
 
 ### Multi-Provider
@@ -146,7 +147,7 @@ local-cli
 ### Quick Start
 
 ```bash
-# Default model (qwen3:8b)
+# Default model (qwen3.5:9b-q4_K_M)
 local-cli
 
 # Choose a model at startup
@@ -271,7 +272,7 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `--model` | `LOCAL_CLI_MODEL` | `qwen3:8b` | Model to use |
+| `--model` | `LOCAL_CLI_MODEL` | `qwen3.5:9b-q4_K_M` | Model to use |
 | `--provider` | `LOCAL_CLI_PROVIDER` | `ollama` | LLM provider |
 | `--debug` | `LOCAL_CLI_DEBUG` | `false` | Debug output |
 | `--rag` | — | `false` | Enable RAG |
@@ -342,7 +343,7 @@ local-cli/
 │   │   ├── claude_provider.py   # Claude API adapter
 │   │   ├── message_converter.py # Format normalization
 │   │   └── sse_parser.py        # SSE streaming parser
-│   └── tools/                   # 8 agent tools
+│   └── tools/                   # 10 agent tools
 │       ├── bash_tool.py         # Shell execution
 │       ├── read_tool.py         # File reading
 │       ├── write_tool.py        # File creation
@@ -350,12 +351,14 @@ local-cli/
 │       ├── glob_tool.py         # File pattern search
 │       ├── grep_tool.py         # Content search (regex)
 │       ├── web_fetch_tool.py    # URL fetching
-│       └── ask_user_tool.py     # User prompts
+│       ├── ask_user_tool.py     # User prompts
+│       ├── todo_tool.py         # Structured task tracking
+│       └── agent_tool.py        # Sub-agent spawning
 ├── desktop/                     # Electron + React + Vite
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 961 tests
+├── tests/                       # 1969 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -363,7 +366,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 961 passed
+# 1969 passed
 ```
 
 ---

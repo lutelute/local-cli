@@ -165,23 +165,26 @@ class JsonLineServer:
                 sub_agent_tools=get_sub_agent_tools(),
             )
             self._tools.append(agent_tool)
-        except Exception:
-            pass  # Degrade gracefully if sub-agent setup fails.
+        except Exception as exc:
+            # Non-fatal: continue without sub-agents, but surface the
+            # reason on stderr (stdout is the JSON-line channel) so a
+            # missing 'agent' tool can be diagnosed.
+            sys.stderr.write(f"[server] sub-agent setup failed: {exc}\n")
 
         # 008: Plan manager, knowledge store, skills loader.
         self._plan_manager: PlanManager | None = None
         try:
             self._plan_manager = PlanManager(plans_dir=self._config.plan_dir)
-        except Exception:
-            pass
+        except Exception as exc:
+            sys.stderr.write(f"[server] plan manager init failed: {exc}\n")
 
         self._knowledge_store: KnowledgeStore | None = None
         try:
             self._knowledge_store = KnowledgeStore(
                 knowledge_dir=self._config.knowledge_dir,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            sys.stderr.write(f"[server] knowledge store init failed: {exc}\n")
 
         self._skills_loader: SkillsLoader | None = None
         try:
@@ -189,8 +192,8 @@ class JsonLineServer:
                 skills_dir=self._config.skills_dir,
             )
             self._skills_loader.discover_skills()
-        except Exception:
-            pass
+        except Exception as exc:
+            sys.stderr.write(f"[server] skills loader init failed: {exc}\n")
 
         self._system_prompt = _build_system_prompt(self._tools)
         self._messages: list[dict[str, Any]] = [

@@ -730,6 +730,16 @@ class SubAgentRunner:
         self._ollama_parallel = ollama_parallel
         self._executor: ThreadPoolExecutor | None = None
         self._background: dict[str, Future[SubAgentResult]] = {}
+        # Cache of results for completed background agents.  A future is
+        # moved here (and removed from ``_background``) once its result is
+        # retrieved, so the ``_background`` dict — and the thread/message
+        # state each future keeps alive — does not grow without bound over
+        # a long-lived session.
+        self._completed: dict[str, SubAgentResult] = {}
+        # Guards ``_background`` / ``_completed``.  These are touched from
+        # the REPL thread and the server's background chat thread, so all
+        # access is serialized.
+        self._background_lock = threading.Lock()
         # Serializes worktree creation to avoid races on .git.
         self._worktree_lock = threading.Lock()
 
@@ -802,7 +812,8 @@ class SubAgentRunner:
         self._prepare_isolation(sub_agent)
         executor = self._ensure_executor()
         future = executor.submit(sub_agent.run)
-        self._background[sub_agent.agent_id] = future
+        with self._background_lock:
+            self._background[sub_agent.agent_id] = future
         return sub_agent.agent_id
 
     def get_background_result(
@@ -820,12 +831,24 @@ class SubAgentRunner:
         Returns:
             The sub-agent result if completed, or ``None``.
         """
-        future = self._background.get(agent_id)
-        if future is None:
-            return None
-        if not future.done():
-            return None
-        return future.result()
+        with self._background_lock:
+            # Already retrieved once — return the cached result.
+            cached = self._completed.get(agent_id)
+            if cached is not None:
+                return cached
+            future = self._background.get(agent_id)
+            if future is None:
+                return None
+            if not future.done():
+                return None
+            # Completed: move the result out of ``_background`` into the
+            # cache so the future (and the thread/message state it pins)
+            # can be garbage-collected.  ``future.result()`` returns
+            # immediately here since the future is already done.
+            result = future.result()
+            self._completed[agent_id] = result
+            del self._background[agent_id]
+            return result
 
     def list_background_agents(self) -> list[dict]:
         """List all background agents and their current status.
@@ -836,14 +859,19 @@ class SubAgentRunner:
             or ``'error'``.
         """
         agents: list[dict] = []
-        for agent_id, future in self._background.items():
-            if not future.done():
-                status = "running"
-            elif future.exception() is not None:
-                status = "error"
-            else:
-                status = "completed"
-            agents.append({"agent_id": agent_id, "status": status})
+        with self._background_lock:
+            for agent_id, future in self._background.items():
+                if not future.done():
+                    status = "running"
+                elif future.exception() is not None:
+                    status = "error"
+                else:
+                    status = "completed"
+                agents.append({"agent_id": agent_id, "status": status})
+            # Include agents whose results were already retrieved (moved to
+            # the completed cache and dropped from ``_background``).
+            for agent_id in self._completed:
+                agents.append({"agent_id": agent_id, "status": "completed"})
         return agents
 
     def submit_all(
@@ -951,9 +979,10 @@ class SubAgentRunner:
         ``OLLAMA_NUM_PARALLEL`` limit.  Excess agents will be queued
         by Ollama rather than running in parallel.
         """
-        running = sum(
-            1 for f in self._background.values() if not f.done()
-        )
+        with self._background_lock:
+            running = sum(
+                1 for f in self._background.values() if not f.done()
+            )
         # +1 for the agent about to be submitted.
         if running + 1 > self._ollama_parallel:
             warnings.warn(

@@ -1224,7 +1224,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default=None,
-        help="Ollama model to use (default: qwen3:8b).",
+        help="Ollama model to use (default: qwen3.5:9b-q4_K_M).",
     )
     parser.add_argument(
         "--debug",
