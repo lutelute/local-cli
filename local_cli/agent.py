@@ -765,6 +765,84 @@ def compact_messages(
 
 
 # ---------------------------------------------------------------------------
+# "Use the tools" nudge
+# ---------------------------------------------------------------------------
+
+# Words in the user's request that imply a file should actually be written
+# or changed (English + common Japanese stems).  Used to decide whether a
+# code-only answer warrants a nudge to use the tools.
+_BUILD_KEYWORDS: frozenset[str] = frozenset({
+    "create", "write", "make", "build", "implement", "generate",
+    "add", "fix", "refactor", "edit", "modify", "save", "rename",
+    "作", "書", "実装", "追加", "修正", "生成", "直",
+})
+
+
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    """Return the content of the most recent user message (or '')."""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg.get("content", "") or ""
+    return ""
+
+
+def _wrote_file_this_turn(messages: list[dict[str, Any]]) -> bool:
+    """Whether a write/edit tool ran since the last user message."""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return False
+        if msg.get("role") == "tool" and msg.get("tool_name") in ("write", "edit"):
+            return True
+    return False
+
+
+def _should_nudge_to_use_tools(
+    messages: list[dict[str, Any]],
+    assistant_message: dict[str, Any],
+    already_nudged: bool,
+) -> bool:
+    """Decide whether to nudge the model to use tools instead of printing code.
+
+    Conservative on purpose, to avoid nagging on legitimate "explain this
+    code" answers.  Fires only when *all* hold: we have not nudged yet this
+    turn; the assistant's answer contains a code fence; the user's request
+    contained a build/edit keyword; and no write/edit tool ran this turn.
+
+    Args:
+        messages: The conversation so far.
+        assistant_message: The assistant message that carried no tool calls.
+        already_nudged: Whether a nudge was already issued this turn.
+
+    Returns:
+        True if a single nudge is warranted.
+    """
+    if already_nudged:
+        return False
+    content = assistant_message.get("content", "") or ""
+    if "```" not in content:
+        return False
+    user_text = _last_user_text(messages).lower()
+    if not any(kw in user_text for kw in _BUILD_KEYWORDS):
+        return False
+    if _wrote_file_this_turn(messages):
+        return False
+    return True
+
+
+# Injected (once per turn) when the model answered with code but called no
+# tool on a request that asked for a file change.
+_TOOL_NUDGE_MESSAGE: dict[str, Any] = {
+    "role": "user",
+    "content": (
+        "You printed code but did not create or modify any file. If the "
+        "task needs a file written or changed, call the write or edit tool "
+        "now to actually apply it. If no file change is needed, say so "
+        "briefly."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Agent loop
 # ---------------------------------------------------------------------------
 
@@ -840,6 +918,8 @@ def agent_loop(
                 f"{compact_token_threshold} tokens "
                 f"(75% of num_ctx={options['num_ctx']})\n"
             )
+
+    nudged = False  # whether we've already nudged "use the tools" this turn
 
     while True:
         # ---------------------------------------------------------------
@@ -920,10 +1000,15 @@ def agent_loop(
             )
 
         # ---------------------------------------------------------------
-        # 3. Check for tool calls.  If none, we're done.
+        # 3. Check for tool calls.  If none, we may be done -- but first
+        #    nudge once if the model printed code instead of using a tool.
         # ---------------------------------------------------------------
         tool_calls = assistant_message.get("tool_calls", [])
         if not tool_calls:
+            if _should_nudge_to_use_tools(messages, assistant_message, nudged):
+                messages.append(dict(_TOOL_NUDGE_MESSAGE))
+                nudged = True
+                continue
             break
 
         # ---------------------------------------------------------------

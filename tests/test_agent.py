@@ -18,6 +18,7 @@ from local_cli.agent import (
     _execute_tool,
     _extract_file_path,
     _needs_compaction,
+    _should_nudge_to_use_tools,
     _truncate,
     agent_loop,
     collect_streaming_response,
@@ -1925,6 +1926,88 @@ class TestNormalizeArguments(unittest.TestCase):
 
     def test_non_dict_unchanged(self) -> None:
         self.assertEqual(normalize_arguments("write", "notadict"), "notadict")
+
+
+class TestShouldNudgeToUseTools(unittest.TestCase):
+    """Tests for the 'use the tools' nudge heuristic."""
+
+    @staticmethod
+    def _user(text: str) -> list:
+        return [{"role": "user", "content": text}]
+
+    def test_fires_on_code_only_build_request(self) -> None:
+        msgs = self._user("create a hello.py script")
+        asst = {"role": "assistant", "content": "Here:\n```python\nprint(1)\n```"}
+        self.assertTrue(_should_nudge_to_use_tools(msgs, asst, False))
+
+    def test_suppressed_when_already_nudged(self) -> None:
+        msgs = self._user("create a hello.py script")
+        asst = {"role": "assistant", "content": "```python\nprint(1)\n```"}
+        self.assertFalse(_should_nudge_to_use_tools(msgs, asst, True))
+
+    def test_suppressed_without_code_fence(self) -> None:
+        msgs = self._user("create a hello.py script")
+        asst = {"role": "assistant", "content": "I created the file."}
+        self.assertFalse(_should_nudge_to_use_tools(msgs, asst, False))
+
+    def test_suppressed_without_build_keyword(self) -> None:
+        msgs = self._user("explain how this code works")
+        asst = {"role": "assistant", "content": "```python\nprint(1)\n```"}
+        self.assertFalse(_should_nudge_to_use_tools(msgs, asst, False))
+
+    def test_suppressed_when_file_written_this_turn(self) -> None:
+        msgs = [
+            {"role": "user", "content": "create hello.py"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"function": {"name": "write"}}]},
+            {"role": "tool", "tool_name": "write", "content": "wrote"},
+        ]
+        asst = {"role": "assistant", "content": "Done:\n```python\nprint(1)\n```"}
+        self.assertFalse(_should_nudge_to_use_tools(msgs, asst, False))
+
+    def test_japanese_build_keyword(self) -> None:
+        msgs = self._user("hello.py を作って")
+        asst = {"role": "assistant", "content": "```python\nprint(1)\n```"}
+        self.assertTrue(_should_nudge_to_use_tools(msgs, asst, False))
+
+
+class TestAgentLoopNudge(unittest.TestCase):
+    """Integration: agent_loop nudges once on a code-only build answer."""
+
+    def test_nudges_then_completes(self) -> None:
+        client = MagicMock()
+        chunks1 = _make_chunks(["```python\nprint(1)\n```"])  # code, no tool
+        chunks2 = _make_chunks(["No file change needed."])     # plain → done
+        client.chat_stream.side_effect = [iter(chunks1), iter(chunks2)]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "create a script"},
+        ]
+        agent_loop(client, "m", [], messages)
+
+        nudges = [
+            m for m in messages
+            if m.get("role") == "user" and "did not create" in m.get("content", "")
+        ]
+        self.assertEqual(len(nudges), 1)
+        self.assertEqual(client.chat_stream.call_count, 2)
+
+    def test_no_nudge_on_plain_explanation(self) -> None:
+        client = MagicMock()
+        chunks1 = _make_chunks(["```python\nprint(1)\n```"])
+        client.chat_stream.side_effect = [iter(chunks1)]
+
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "explain this snippet"},
+        ]
+        agent_loop(client, "m", [], messages)
+
+        nudges = [
+            m for m in messages
+            if m.get("role") == "user" and "did not create" in m.get("content", "")
+        ]
+        self.assertEqual(len(nudges), 0)
+        self.assertEqual(client.chat_stream.call_count, 1)
 
 
 if __name__ == "__main__":
