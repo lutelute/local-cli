@@ -463,13 +463,76 @@ def resolve_tool_name(
     return None
 
 
+# Per-tool argument-key aliases.  Small models often pass a correct value
+# under a near-miss key (``path`` for ``file_path``, ``text`` for
+# ``content``).  Resolving the tool name (above) is only half the fix — the
+# call still fails if the keys don't match the tool's schema.  Keys here are
+# alias -> canonical, applied only when the canonical key is absent.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "write": {
+        "path": "file_path", "filepath": "file_path", "file": "file_path",
+        "filename": "file_path", "text": "content", "data": "content",
+        "body": "content", "contents": "content",
+    },
+    "read": {
+        "path": "file_path", "filepath": "file_path", "file": "file_path",
+        "filename": "file_path",
+    },
+    "edit": {
+        "path": "file_path", "filepath": "file_path", "file": "file_path",
+        "old": "old_text", "old_string": "old_text", "oldstr": "old_text",
+        "search": "old_text", "find": "old_text", "target": "old_text",
+        "new": "new_text", "new_string": "new_text", "newstr": "new_text",
+        "replace": "new_text", "replacement": "new_text",
+    },
+    "bash": {
+        "cmd": "command", "script": "command", "shell_command": "command",
+        "shell": "command", "cmdline": "command",
+    },
+    "grep": {
+        "query": "pattern", "regex": "pattern", "search": "pattern",
+        "directory": "path", "dir": "path",
+    },
+    "glob": {"glob": "pattern", "query": "pattern"},
+    "web_fetch": {"uri": "url", "link": "url", "address": "url"},
+    "todo_write": {"tasks": "todos", "items": "todos", "list": "todos"},
+}
+
+
+def normalize_arguments(
+    tool_name: str, arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Rename near-miss argument keys to a tool's canonical schema keys.
+
+    Renames an alias key to its canonical name only when the canonical key
+    is not already present, so a correct call is never disturbed and a
+    correct key always wins over an alias.
+
+    Args:
+        tool_name: The (already resolved) real tool name.
+        arguments: The tool-call arguments.
+
+    Returns:
+        A new dict with alias keys renamed, or *arguments* unchanged when
+        the tool has no aliases or *arguments* is not a dict.
+    """
+    aliases = _ARG_ALIASES.get(tool_name)
+    if not aliases or not isinstance(arguments, dict):
+        return arguments
+    result = dict(arguments)
+    for alias, canonical in aliases.items():
+        if alias in result and canonical not in result:
+            result[canonical] = result.pop(alias)
+    return result
+
+
 def run_tool(
     tool_name: str,
     arguments: dict[str, Any],
     tool_map: dict[str, Tool],
     debug: bool = False,
 ) -> str:
-    """Resolve *tool_name* (with alias/fuzzy fallback) and execute it.
+    """Resolve *tool_name* (alias/fuzzy), normalize its args, and execute it.
 
     Returns an ``Error: unknown tool`` string only for a name that can't be
     resolved even after alias/normalization fallback, and routes execution
@@ -479,7 +542,7 @@ def run_tool(
 
     Args:
         tool_name: The name of the tool to run (may be a near-miss).
-        arguments: Keyword arguments for the tool.
+        arguments: Keyword arguments for the tool (keys may be near-misses).
         tool_map: Mapping of tool name to :class:`Tool` instance.
         debug: Forwarded to :func:`_execute_tool`.
 
@@ -489,6 +552,7 @@ def run_tool(
     resolved = resolve_tool_name(tool_name, tool_map)
     if resolved is None:
         return f"Error: unknown tool '{tool_name}'"
+    arguments = normalize_arguments(resolved, arguments)
     return _execute_tool(tool_map[resolved], arguments, debug=debug)
 
 
@@ -868,6 +932,7 @@ def agent_loop(
         for tc in tool_calls:
             tool_name, arguments, tool_call_id = parse_tool_call(tc)
             tool_name = resolve_tool_name(tool_name, tool_map) or tool_name
+            arguments = normalize_arguments(tool_name, arguments)
 
             tool = tool_map.get(tool_name)
             if tool is None:
@@ -1132,6 +1197,7 @@ def sub_agent_loop(
         for tc in tool_calls:
             tool_name, arguments, tool_call_id = parse_tool_call(tc)
             tool_name = resolve_tool_name(tool_name, tool_map) or tool_name
+            arguments = normalize_arguments(tool_name, arguments)
 
             tool = tool_map.get(tool_name)
             if tool is None:

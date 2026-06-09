@@ -22,6 +22,7 @@ from local_cli.agent import (
     agent_loop,
     collect_streaming_response,
     compact_messages,
+    normalize_arguments,
     parse_tool_call,
     resolve_tool_name,
     run_tool,
@@ -1840,6 +1841,90 @@ class TestRunTool(unittest.TestCase):
         result = run_tool("boom", {}, {"boom": tool})
         self.assertTrue(result.startswith("Error: ValueError"))
         self.assertIn("bad", result)
+
+    def test_resolves_near_miss_name(self) -> None:
+        """run_tool resolves an aliased name and runs the real tool."""
+        tool = _DummyTool(name="write", result="written")
+        result = run_tool("write_file", {"x": 1}, {"write": tool})
+        self.assertEqual(result, "written")
+
+    def test_normalizes_arguments_before_dispatch(self) -> None:
+        """run_tool renames alias arg keys to the tool's canonical keys."""
+        captured: dict = {}
+
+        class _Capture(_DummyTool):
+            def execute(self, **kwargs: object) -> str:
+                captured.update(kwargs)
+                return "ok"
+
+        tool = _Capture(name="write")
+        run_tool("write_file", {"path": "/a", "text": "hi"}, {"write": tool})
+        self.assertEqual(captured, {"file_path": "/a", "content": "hi"})
+
+
+class TestResolveToolName(unittest.TestCase):
+    """Tests for resolve_tool_name — near-miss tool name resolution."""
+
+    def setUp(self) -> None:
+        self.tool_map = {
+            name: _DummyTool(name=name)
+            for name in ("write", "read", "bash", "grep", "web_fetch", "todo_write")
+        }
+
+    def test_exact_match(self) -> None:
+        self.assertEqual(resolve_tool_name("write", self.tool_map), "write")
+
+    def test_known_alias(self) -> None:
+        self.assertEqual(resolve_tool_name("write_file", self.tool_map), "write")
+        self.assertEqual(resolve_tool_name("run", self.tool_map), "bash")
+        self.assertEqual(resolve_tool_name("search", self.tool_map), "grep")
+
+    def test_case_and_separator_insensitive(self) -> None:
+        self.assertEqual(resolve_tool_name("WebFetch", self.tool_map), "web_fetch")
+        self.assertEqual(resolve_tool_name("web-fetch", self.tool_map), "web_fetch")
+        self.assertEqual(resolve_tool_name("TODO_WRITE", self.tool_map), "todo_write")
+
+    def test_create_file_alias(self) -> None:
+        self.assertEqual(resolve_tool_name("create_file", self.tool_map), "write")
+
+    def test_unresolvable_returns_none(self) -> None:
+        self.assertIsNone(resolve_tool_name("frobnicate", self.tool_map))
+
+    def test_alias_target_absent_returns_none(self) -> None:
+        # 'subagent' aliases 'agent', which isn't in this tool_map.
+        self.assertIsNone(resolve_tool_name("subagent", self.tool_map))
+
+
+class TestNormalizeArguments(unittest.TestCase):
+    """Tests for normalize_arguments — argument-key alias resolution."""
+
+    def test_renames_alias_keys(self) -> None:
+        args = normalize_arguments("write", {"path": "/a", "text": "hi"})
+        self.assertEqual(args, {"file_path": "/a", "content": "hi"})
+
+    def test_canonical_key_wins_over_alias(self) -> None:
+        # When the canonical key is already present, the alias is left as-is.
+        args = normalize_arguments(
+            "write", {"file_path": "/correct", "path": "/wrong"},
+        )
+        self.assertEqual(args["file_path"], "/correct")
+
+    def test_edit_aliases(self) -> None:
+        args = normalize_arguments(
+            "edit", {"file": "/f", "old": "a", "new": "b"},
+        )
+        self.assertEqual(args, {"file_path": "/f", "old_text": "a", "new_text": "b"})
+
+    def test_bash_alias(self) -> None:
+        self.assertEqual(
+            normalize_arguments("bash", {"cmd": "ls"}), {"command": "ls"},
+        )
+
+    def test_unknown_tool_unchanged(self) -> None:
+        self.assertEqual(normalize_arguments("mystery", {"foo": 1}), {"foo": 1})
+
+    def test_non_dict_unchanged(self) -> None:
+        self.assertEqual(normalize_arguments("write", "notadict"), "notadict")
 
 
 if __name__ == "__main__":
