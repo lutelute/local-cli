@@ -234,5 +234,50 @@ class TestReadToolParameterValidation(unittest.TestCase):
         self.assertIn("Error", result)
 
 
+class TestReadToolEncoding(unittest.TestCase):
+    """Binary detection and the latin-1 fallback note."""
+
+    def setUp(self) -> None:
+        self.tool = ReadTool()
+
+    def test_binary_file_detected(self) -> None:
+        """A file with null bytes in the first 8KB is reported as binary."""
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            with open(path, "wb") as f:
+                f.write(b"text\x00\x01binary")
+            result = self.tool.execute(file_path=path)
+            self.assertIn("binary file", result)
+        finally:
+            os.unlink(path)
+
+    def test_latin1_file_gets_note(self) -> None:
+        """A non-UTF-8 (latin-1) file is read with a decoding-warning note."""
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            with open(path, "wb") as f:
+                f.write(b"caf\xe9 latin\n")  # valid latin-1, invalid UTF-8
+            result = self.tool.execute(file_path=path)
+            self.assertIn("latin-1", result)
+            self.assertIn("caf", result)
+        finally:
+            os.unlink(path)
+
+    def test_utf8_file_has_no_note(self) -> None:
+        """A normal UTF-8 file is read without any decoding note."""
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("hello world\n")
+            result = self.tool.execute(file_path=path)
+            self.assertNotIn("latin-1", result)
+            self.assertIn("hello world", result)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()

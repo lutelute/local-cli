@@ -92,8 +92,12 @@ class ReadTool(Tool):
             return f"Error: not a regular file: {file_path}"
 
         # Detect binary files by checking for null bytes in the first 8KB.
+        # Read only the first 8KB rather than the whole file, so a huge file
+        # is not loaded into memory just for this check -- important on the
+        # memory-constrained machines local-cli targets.
         try:
-            raw = path.read_bytes()[:8192]
+            with path.open("rb") as fh:
+                raw = fh.read(8192)
         except PermissionError:
             return f"Error: permission denied: {file_path}"
         except OSError as exc:
@@ -103,12 +107,15 @@ class ReadTool(Tool):
             return f"Error: {file_path} appears to be a binary file."
 
         # Read text content.
+        decoded_as_latin1 = False
         try:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            # Fallback: try with latin-1 which accepts all byte values.
+            # Fallback: latin-1 accepts all byte values.  Flag it so the
+            # model knows the decoding may be imperfect (possible mojibake).
             try:
                 content = path.read_text(encoding="latin-1")
+                decoded_as_latin1 = True
             except OSError as exc:
                 return f"Error: could not read file: {exc}"
         except PermissionError:
@@ -135,4 +142,10 @@ class ReadTool(Tool):
         for i, line in enumerate(selected, start=offset):
             numbered_lines.append(f"{i:6d}\t{line}")
 
-        return "\n".join(numbered_lines)
+        body = "\n".join(numbered_lines)
+        if decoded_as_latin1:
+            body = (
+                f"[note: {file_path} is not valid UTF-8; decoded as latin-1, "
+                "some characters may be wrong]\n" + body
+            )
+        return body
