@@ -21,7 +21,7 @@ from local_cli.harness import AgentEvent, HarnessConfig
 from local_cli.config import Config
 from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
-from local_cli.prompts import build_system_prompt
+from local_cli.prompts import build_skill_messages, build_system_prompt
 from local_cli.tools import get_default_tools
 from local_cli.tools.base import Tool
 
@@ -225,6 +225,7 @@ def _run_agent(
     task: str,
     eq: queue.Queue,
     messages: list[dict[str, Any]],
+    skills_loader: Any = None,
 ) -> None:
     """Run the unified agent loop, pushing SSE events to *eq*.
 
@@ -239,6 +240,8 @@ def _run_agent(
     """
     del tool_defs, tool_map  # derived inside run_agent
 
+    # Inject matching skills (same behaviour as the CLI REPL).
+    messages.extend(build_skill_messages(skills_loader, task))
     messages.append({"role": "user", "content": task})
 
     # Provider-specific kwargs: only Ollama accepts inference options /
@@ -351,6 +354,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     """HTTP handler for the web monitor."""
 
     # Set by run_web_monitor before starting the server.
+    skills_loader: Any = None
     provider: LLMProvider
     config: Config
     tools: list[Tool]
@@ -417,6 +421,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     self.tools, self.tool_defs, self.tool_map,
                     task, self.event_queue,
                     self.session_messages,
+                    self.skills_loader,
                 ),
                 daemon=True,
             )
@@ -471,9 +476,20 @@ def run_web_monitor(config: Config | None = None, port: int = 7070) -> None:
     tool_defs = provider.format_tools(tools)
     tool_map = {t.name: t for t in tools}
 
+    # Discover skills so the web monitor injects them like the CLI does.
+    skills_loader = None
+    try:
+        from local_cli.skills import SkillsLoader
+
+        skills_loader = SkillsLoader(skills_dir=config.skills_dir)
+        skills_loader.discover_skills()
+    except Exception:
+        skills_loader = None
+
     # Inject shared state into handler class.
     _Handler.provider = provider
     _Handler.config = config
+    _Handler.skills_loader = skills_loader
     _Handler.tools = tools
     _Handler.tool_defs = tool_defs
     _Handler.tool_map = tool_map

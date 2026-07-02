@@ -60,7 +60,7 @@ from local_cli.sub_agent import SubAgentRunner
 from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
 from local_cli.tools import get_default_tools, get_sub_agent_tools
-from local_cli.prompts import build_system_prompt
+from local_cli.prompts import build_skill_messages, build_system_prompt
 from local_cli.tools.agent_tool import AgentTool
 from local_cli.tools.base import Tool
 
@@ -298,6 +298,12 @@ class JsonLineServer:
             return
 
         self._stop_flag.clear()
+
+        # Inject matching skills (same behaviour as the CLI REPL —
+        # previously the GUI paths silently skipped skill injection).
+        self._messages.extend(
+            build_skill_messages(self._skills_loader, content)
+        )
         self._messages.append({"role": "user", "content": content})
 
         # Build merged inference options: defaults < presets < user config.

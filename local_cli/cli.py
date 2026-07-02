@@ -32,7 +32,7 @@ from local_cli.knowledge import KnowledgeError, KnowledgeNotFoundError, Knowledg
 from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
-from local_cli.prompts import build_system_prompt
+from local_cli.prompts import build_skill_messages, build_system_prompt
 from local_cli.session import SessionManager
 from local_cli.skills import SkillsLoader
 from local_cli.token_tracker import TokenTracker
@@ -1441,17 +1441,7 @@ def run_repl(
         # -- Agent mode -----------------------------------------------------
 
         # Inject skills context if skills match the user input.
-        if ctx.skills_loader is not None:
-            matching_skills = ctx.skills_loader.get_matching_skills(stripped)
-            for skill in matching_skills:
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"--- SKILL: {skill.name} ---\n"
-                        f"{skill.content}\n"
-                        f"--- END SKILL ---"
-                    ),
-                })
+        messages.extend(build_skill_messages(ctx.skills_loader, stripped))
 
         # Fast-mode heuristic: suggest plan for complex requests.
         if (

@@ -14,8 +14,48 @@ that.
 """
 
 import os
+from typing import Any
 
 from local_cli.tools.base import Tool
+
+
+def build_skill_messages(
+    skills_loader: Any,
+    user_text: str,
+) -> list[dict[str, str]]:
+    """Build system messages for skills matching *user_text*.
+
+    Shared by every front-end (CLI REPL, JSON-line server, web monitor)
+    so skill auto-injection behaves identically everywhere — previously
+    only the CLI injected skills, so the same agent behaved differently
+    when driven from a GUI.
+
+    Args:
+        skills_loader: A :class:`~local_cli.skills.SkillsLoader` (or
+            ``None``, or any object with ``get_matching_skills(text)``).
+        user_text: The user's message, matched against skill triggers.
+
+    Returns:
+        One system-role message per matching skill (empty when the
+        loader is missing, matching fails, or nothing matches).
+    """
+    if skills_loader is None:
+        return []
+    try:
+        matching = skills_loader.get_matching_skills(user_text)
+    except Exception:
+        return []
+    return [
+        {
+            "role": "system",
+            "content": (
+                f"--- SKILL: {skill.name} ---\n"
+                f"{skill.content}\n"
+                f"--- END SKILL ---"
+            ),
+        }
+        for skill in matching
+    ]
 
 
 def build_system_prompt(tools: list[Tool], role: str = "main") -> str:
