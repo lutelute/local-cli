@@ -18,9 +18,12 @@ Requires a running Ollama with the requested models installed.
 
 import argparse
 import ast
+import contextlib
+import io
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -64,7 +67,10 @@ def _setup_edit(workdir: Path) -> None:
 def _check_edit(workdir: Path) -> tuple[bool, str]:
     namespace: dict = {}
     try:
-        exec((workdir / "app.py").read_text(encoding="utf-8"), namespace)
+        # Suppress stray prints in case the model rewrote app.py into a
+        # script (observed live).
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec((workdir / "app.py").read_text(encoding="utf-8"), namespace)
         result = namespace["add"](2, 3)
     except Exception as exc:
         return False, f"app.py broken: {exc}"
@@ -105,6 +111,84 @@ def _check_multi(workdir: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _setup_search_fix(workdir: Path) -> None:
+    """A small project: the bug is in one of several files."""
+    src = workdir / "src"
+    src.mkdir()
+    (src / "utils.py").write_text(
+        "def clamp(value, low, high):\n"
+        "    return max(low, min(high, value))\n"
+        "\n"
+        "\n"
+        "def calc_total(items):\n"
+        "    total = 1\n"
+        "    for item in items:\n"
+        "        total *= item\n"
+        "    return total\n",
+        encoding="utf-8",
+    )
+    (src / "main.py").write_text(
+        "from utils import calc_total\n"
+        "\n"
+        "print(calc_total([1, 2, 3]))\n",
+        encoding="utf-8",
+    )
+    (workdir / "README.md").write_text(
+        "# demo project\n\nutilities live under src/\n", encoding="utf-8",
+    )
+
+
+def _check_search_fix(workdir: Path) -> tuple[bool, str]:
+    namespace: dict = {}
+    path = workdir / "src" / "utils.py"
+    if not path.is_file():
+        return False, "src/utils.py missing"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(path.read_text(encoding="utf-8"), namespace)
+        result = namespace["calc_total"]([2, 3])
+    except Exception as exc:
+        return False, f"utils.py broken: {exc}"
+    if result != 5:
+        return False, f"calc_total([2, 3]) returned {result}, expected 5"
+    return True, "ok"
+
+
+def _setup_test_fix(workdir: Path) -> None:
+    (workdir / "calc.py").write_text(
+        "def mul(a, b):\n    return a + b\n", encoding="utf-8",
+    )
+    (workdir / "test_calc.py").write_text(
+        "from calc import mul\n"
+        "\n"
+        "assert mul(3, 4) == 12, f'mul(3, 4) = {mul(3, 4)}, expected 12'\n"
+        "print('test passed')\n",
+        encoding="utf-8",
+    )
+
+
+def _check_test_fix(workdir: Path) -> tuple[bool, str]:
+    proc = subprocess.run(
+        [sys.executable, "test_calc.py"],
+        cwd=str(workdir), capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return False, f"test still failing: {detail[-1] if detail else '?'}"
+    return True, "ok"
+
+
+def _check_todo_multi(workdir: Path) -> tuple[bool, str]:
+    expected = {"a.txt": "alpha", "b.txt": "beta", "c.txt": "gamma"}
+    for name, word in expected.items():
+        path = workdir / name
+        if not path.is_file():
+            return False, f"{name} missing"
+        if word not in path.read_text(encoding="utf-8"):
+            return False, f"{name} content wrong"
+    return True, "ok"
+
+
 TASKS = [
     {
         "name": "create_file",
@@ -135,6 +219,36 @@ TASKS = [
         ),
         "setup": None,
         "check": _check_multi,
+    },
+    {
+        "name": "search_fix",
+        "prompt": (
+            "Somewhere in this project, calc_total is wrong: "
+            "calc_total([2, 3]) should return 5 but returns 6. Find the "
+            "function and fix it."
+        ),
+        "setup": _setup_search_fix,
+        "check": _check_search_fix,
+    },
+    {
+        "name": "test_fix",
+        "prompt": (
+            "Run test_calc.py with python. It fails. Fix calc.py so the "
+            "test passes, and run it again to confirm."
+        ),
+        "setup": _setup_test_fix,
+        "check": _check_test_fix,
+    },
+    {
+        "name": "todo_multi",
+        "prompt": (
+            "Create three files: a.txt containing 'alpha', b.txt "
+            "containing 'beta', and c.txt containing 'gamma'. Use the "
+            "todo_write tool to track your progress through the three "
+            "files."
+        ),
+        "setup": None,
+        "check": _check_todo_multi,
     },
 ]
 
