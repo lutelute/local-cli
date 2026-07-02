@@ -302,6 +302,7 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | `--update` | — | `false` | Check for updates |
 | — | `LOCAL_CLI_COMPACT_MODE` | `truncate` | Context compaction: `truncate` or `summarize` |
 | — | `LOCAL_CLI_MAX_ITERATIONS` | `40` | Agent step limit per turn (`0` = unlimited) |
+| `--mascot` | `LOCAL_CLI_MASCOT` | `false` | Replace the spinner with Loca, the local cat `(=･ω･=)` |
 
 Config file location: `~/.config/local-cli/config` (key=value format).
 

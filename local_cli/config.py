@@ -34,6 +34,7 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "llama_server_url": "http://localhost:8090",
     "compact_mode": "truncate",
     "max_iterations": 40,
+    "mascot": False,
 }
 
 # Mapping of environment variable names to config keys.
@@ -52,6 +53,7 @@ ENV_VAR_MAP: dict[str, str] = {
     "LLAMA_SERVER_URL": "llama_server_url",
     "LOCAL_CLI_COMPACT_MODE": "compact_mode",
     "LOCAL_CLI_MAX_ITERATIONS": "max_iterations",
+    "LOCAL_CLI_MASCOT": "mascot",
 }
 
 # Maximum config file size in bytes (10KB).
@@ -248,6 +250,8 @@ class Config:
         # summary with truncation fallback); 0 iterations = unlimited.
         self.compact_mode: str = str(merged["compact_mode"])
         self.max_iterations: int = int(merged["max_iterations"])  # type: ignore[arg-type]
+        # Cosmetic: replace the braille spinner with Loca the local cat.
+        self.mascot: bool = _parse_bool(merged["mascot"])
 
     @property
     def has_claude_access(self) -> bool:

@@ -35,6 +35,7 @@ from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.prompts import build_skill_messages, build_system_prompt
 from local_cli.session import SessionManager
 from local_cli.skills import SkillsLoader
+from local_cli.spinner import set_spinner_style
 from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
 from local_cli.tools.base import Tool
@@ -186,7 +187,7 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
 
     # -- /exit, /quit -------------------------------------------------------
     if cmd in ("/exit", "/quit"):
-        print("Goodbye!")
+        print("(=^ω^=)ﾉｼ  Goodbye!" if ctx.config.mascot else "Goodbye!")
         return False
 
     # -- /help --------------------------------------------------------------
@@ -1159,6 +1160,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable debug output.",
     )
     parser.add_argument(
+        "--mascot",
+        action="store_true",
+        default=None,
+        help="Replace the spinner with Loca, the local cat mascot.",
+    )
+    parser.add_argument(
         "--rag",
         action="store_true",
         default=None,
@@ -1341,6 +1348,9 @@ def run_repl(
         initial_mode: Starting REPL mode (``"agent"`` or ``"ideate"``).
     """
     # Print welcome banner.
+    if config.mascot:
+        set_spinner_style("mascot")
+        print("  (=･ω･=)ﾉ  Loca is here — happy hacking!")
     tool_names = ", ".join(t.name for t in tools)
     print(f"local-cli v{__version__} | model: {config.model}")
     print(f"Tools: {tool_names}")
@@ -1407,7 +1417,7 @@ def run_repl(
         try:
             user_input = input(prompt_label)
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
+            print("\n(=^ω^=)ﾉｼ  Goodbye!" if config.mascot else "\nGoodbye!")
             break
 
         # Skip empty input.
