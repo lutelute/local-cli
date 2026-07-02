@@ -618,6 +618,92 @@ class TestToolsFallback(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Error-stop guard
+# ---------------------------------------------------------------------------
+
+
+class TestErrorStopGuard(unittest.TestCase):
+    """Finishing right after a failed tool call draws one push-back."""
+
+    def test_pushback_on_finishing_after_error(self) -> None:
+        tool = _DummyTool(result="Error: old_text not found in app.py")
+        client = _ScriptedClient([
+            _turn("", [_call("dummy", {"arg": "bad"})]),
+            _turn("I fixed app.py!"),          # finishing on an error
+            _turn("Sorry — actually retrying"),  # reply to the push-back
+        ])
+        events, emit = _recorder()
+        messages = [{"role": "user", "content": "fix app.py"}]
+        result = run_agent(client, "m", [tool], messages, emit=emit)
+
+        self.assertEqual(result, "Sorry — actually retrying")
+        self.assertIn("error_stop", _kinds(events))
+        pushbacks = [
+            m for m in messages
+            if m.get("role") == "user"
+            and "tool call FAILED" in m.get("content", "")
+        ]
+        self.assertEqual(len(pushbacks), 1)
+
+    def test_pushback_only_once_per_turn(self) -> None:
+        tool = _DummyTool(result="Error: still failing")
+        client = _ScriptedClient([
+            _turn("", [_call("dummy", {"arg": "a"})]),
+            _turn("done!"),      # push-back 1 fires
+            _turn("done again!"),  # still ends on error, but no 2nd push
+        ])
+        events, emit = _recorder()
+        run_agent(client, "m", [tool],
+                  [{"role": "user", "content": "go"}], emit=emit)
+        self.assertEqual(_kinds(events).count("error_stop"), 1)
+
+    def test_no_pushback_after_successful_tool(self) -> None:
+        tool = _DummyTool(result="wrote file ok")
+        client = _ScriptedClient([
+            _turn("", [_call("dummy", {"arg": "a"})]),
+            _turn("all done"),
+        ])
+        events, emit = _recorder()
+        run_agent(client, "m", [tool],
+                  [{"role": "user", "content": "go"}], emit=emit)
+        self.assertNotIn("error_stop", _kinds(events))
+
+    def test_no_pushback_when_error_was_recovered(self) -> None:
+        """An error followed by a successful call is a recovery, not a stop."""
+        fail = _DummyTool(name="edit", result="Error: not found")
+        ok = _DummyTool(name="write", result="Wrote file")
+        client = _ScriptedClient([
+            _turn("", [_call("edit", {"arg": "x"})]),
+            _turn("", [_call("write", {"arg": "y"})]),
+            _turn("all done"),
+        ])
+        events, emit = _recorder()
+        run_agent(client, "m", [fail, ok],
+                  [{"role": "user", "content": "go"}], emit=emit)
+        self.assertNotIn("error_stop", _kinds(events))
+
+    def test_no_pushback_on_plain_answer_turn(self) -> None:
+        client = _ScriptedClient([_turn("The answer is 42.")])
+        events, emit = _recorder()
+        run_agent(client, "m", [],
+                  [{"role": "user", "content": "what is 6*7?"}], emit=emit)
+        self.assertNotIn("error_stop", _kinds(events))
+
+    def test_guard_disabled_by_config(self) -> None:
+        tool = _DummyTool(result="Error: nope")
+        client = _ScriptedClient([
+            _turn("", [_call("dummy", {"arg": "a"})]),
+            _turn("done!"),
+        ])
+        events, emit = _recorder()
+        run_agent(
+            client, "m", [tool], [{"role": "user", "content": "go"}],
+            emit=emit, harness=HarnessConfig(error_stop_guard=False),
+        )
+        self.assertNotIn("error_stop", _kinds(events))
+
+
+# ---------------------------------------------------------------------------
 # Summary compaction
 # ---------------------------------------------------------------------------
 

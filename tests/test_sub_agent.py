@@ -130,6 +130,9 @@ def _setup_provider_tool_then_response(
 
     First call to chat_stream returns a tool call.
     Second call returns a simple response.
+    A third response (same content) is queued in case the harness's
+    error-stop guard pushes back on a failed tool call; it goes unused
+    on the happy path, and either way the final content is identical.
     """
     tc = [
         {
@@ -140,11 +143,11 @@ def _setup_provider_tool_then_response(
         }
     ]
     tool_call_chunks = _make_chunks([""], tool_calls=tc)
-    final_chunks = _make_chunks([final_content])
 
     provider.chat_stream.side_effect = [
         iter(tool_call_chunks),
-        iter(final_chunks),
+        iter(_make_chunks([final_content])),
+        iter(_make_chunks([final_content])),
     ]
 
 

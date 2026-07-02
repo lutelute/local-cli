@@ -21,8 +21,10 @@ from local_cli.harness import (
     apply_summary,
     build_summary_request,
     compaction_bounds,
+    error_stop_message,
     extract_text_tool_calls,
     is_tools_unsupported_error,
+    last_tool_result_errored,
     loop_break_message,
     loop_warning_message,
     null_emit,
@@ -1166,6 +1168,7 @@ def run_agent(
     detector = LoopDetector() if hc.loop_detection else None
     reminder = TodoReminder() if hc.todo_reminders else None
     nudged = False  # whether we've already nudged "use the tools" this turn
+    error_nudged = False  # one push-back per turn for finishing on an error
     force_final = False  # when True, the next LLM call gets no tools
     tools_disabled = False  # endpoint rejected tools; text-driven fallback
     final_content = ""
@@ -1349,6 +1352,19 @@ def run_agent(
                 messages.append(dict(_TOOL_NUDGE_MESSAGE))
                 nudged = True
                 emit(AgentEvent("nudge", {}))
+                continue
+            # Error-stop guard: the model is finishing right after a
+            # failed tool call (small models routinely ignore the error
+            # and declare success).  Push back once.
+            if (
+                not force_final
+                and hc.error_stop_guard
+                and not error_nudged
+                and last_tool_result_errored(messages)
+            ):
+                messages.append(error_stop_message())
+                error_nudged = True
+                emit(AgentEvent("error_stop", {}))
                 continue
             break
 
@@ -1628,6 +1644,12 @@ class _ConsoleEmitter:
                 f"  [harness] {data.get('model', 'model')} does not "
                 "support structured tool calls — switching to "
                 "text-driven tools\n"
+            )
+
+        elif kind == "error_stop":
+            sys.stderr.write(
+                "  [harness] model tried to finish on a failed tool "
+                "call — pushing back\n"
             )
 
         elif kind == "verify_warning":

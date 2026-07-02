@@ -88,6 +88,9 @@ class HarnessConfig:
             tool result on failure.
         todo_reminders: Re-inject the todo list state when it has gone
             stale for several iterations.
+        error_stop_guard: When the model tries to finish right after a
+            failed tool call, push back once — small models routinely
+            ignore the error and declare the task done.
         compact_mode: ``"truncate"`` (classic in-place truncation) or
             ``"summarize"`` (ask the model to summarize older history,
             falling back to truncation on failure).
@@ -102,6 +105,7 @@ class HarnessConfig:
     loop_detection: bool = True
     verify_writes: bool = True
     todo_reminders: bool = True
+    error_stop_guard: bool = True
     compact_mode: str = "truncate"
     keep_recent: int = 10
     retry_on_overload: bool = True
@@ -415,6 +419,54 @@ def loop_break_message() -> dict[str, Any]:
             "Summarize what you accomplished, what failed and why, and "
             "what you would try next. Do not attempt further tool calls."
             "</system-reminder>"
+        ),
+    }
+
+
+def last_tool_result_errored(messages: list[dict[str, Any]]) -> bool:
+    """Whether the most recent tool result in this turn was an error.
+
+    Walks backwards from just before the final assistant message,
+    skipping harness-injected ``<system-reminder>`` user messages, and
+    reports whether the first tool message found carries an
+    ``Error:``-prefixed result.  A real user message ends the walk —
+    errors from a previous turn are not this turn's business.
+
+    Args:
+        messages: The conversation history, whose last entry is the
+            assistant message that carried no tool calls.
+
+    Returns:
+        ``True`` when the model is about to finish on a failed tool call.
+    """
+    for msg in reversed(messages[:-1]):
+        role = msg.get("role")
+        if role == "tool":
+            return (msg.get("content") or "").startswith("Error:")
+        if role == "user":
+            content = msg.get("content") or ""
+            if content.startswith("<system-reminder>"):
+                continue
+            return False
+    return False
+
+
+def error_stop_message() -> dict[str, Any]:
+    """Build the push-back injected when finishing on a failed tool call.
+
+    Small models routinely ignore a tool error and declare the task
+    done (observed live: an edit whose ``old_text`` never matched,
+    followed by "fixed it!").  One deterministic push-back makes the
+    model either actually recover or explain the blocker.
+    """
+    return {
+        "role": "user",
+        "content": (
+            "<system-reminder>Your last tool call FAILED and you have "
+            "not fixed it. Do not stop here. Re-read the error message, "
+            "adjust the call (or read the file first to get the exact "
+            "text), and complete the task. Only if the task is truly "
+            "impossible, explain exactly why.</system-reminder>"
         ),
     }
 
