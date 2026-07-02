@@ -343,5 +343,94 @@ class TestEditToolAtomicWrite(unittest.TestCase):
             os.unlink(path)
 
 
+class TestEditToolClosestMatchHint(unittest.TestCase):
+    """Tests for the closest-match hint on old_text-not-found errors."""
+
+    def setUp(self) -> None:
+        self.tool = EditTool()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, text: str) -> str:
+        path = self.dir / "code.py"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_wrong_indentation_gets_hint_with_actual_text(self) -> None:
+        """A near-miss (wrong indentation) shows the real block."""
+        path = self._write(
+            "class Foo:\n"
+            "    def bar(self):\n"
+            "        return 42\n"
+        )
+        # The model guessed the body without the class indentation.
+        result = self.tool.execute(
+            file_path=path,
+            old_text="def bar(self):\n    return 42",
+            new_text="def bar(self):\n    return 43",
+        )
+        self.assertIn("not found", result)
+        self.assertIn("most similar text", result)
+        self.assertIn("    def bar(self):", result)
+        self.assertIn("line 2", result)
+        self.assertIn("EXACTLY", result)
+
+    def test_typo_in_old_text_gets_hint(self) -> None:
+        path = self._write("value = compute_total(items)\n")
+        result = self.tool.execute(
+            file_path=path,
+            old_text="value = computeTotal(items)",
+            new_text="value = compute_sum(items)",
+        )
+        self.assertIn("not found", result)
+        self.assertIn("compute_total(items)", result)
+
+    def test_completely_unrelated_text_gets_no_hint(self) -> None:
+        """Below the similarity floor, only the plain error is returned."""
+        path = self._write("alpha beta gamma\n")
+        result = self.tool.execute(
+            file_path=path,
+            old_text="zzzzzz qqqqqq wwwwww",
+            new_text="x",
+        )
+        self.assertIn("not found", result)
+        self.assertNotIn("most similar", result)
+
+    def test_file_not_modified_when_hint_shown(self) -> None:
+        original = "def f():\n    return 1\n"
+        path = self._write(original)
+        self.tool.execute(
+            file_path=path,
+            old_text="def f():\n  return 1",  # wrong indent
+            new_text="def f():\n  return 2",
+        )
+        self.assertEqual(Path(path).read_text(encoding="utf-8"), original)
+
+    def test_huge_old_text_skips_hint(self) -> None:
+        path = self._write("short file\n")
+        result = self.tool.execute(
+            file_path=path,
+            old_text="x" * 5_000,
+            new_text="y",
+        )
+        self.assertIn("not found", result)
+        self.assertNotIn("most similar", result)
+
+    def test_multiline_hint_reports_start_line(self) -> None:
+        lines = [f"line_{i} = {i}" for i in range(1, 21)]
+        path = self._write("\n".join(lines) + "\n")
+        result = self.tool.execute(
+            file_path=path,
+            old_text="line_10 = 10\nline_11 = eleven",  # second line wrong
+            new_text="replacement",
+        )
+        self.assertIn("not found", result)
+        self.assertIn("line 10", result)
+        self.assertIn("line_10 = 10", result)
+
+
 if __name__ == "__main__":
     unittest.main()

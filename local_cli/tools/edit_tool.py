@@ -4,12 +4,93 @@ Performs exact string matching and replacement within files.  Reads the
 file, locates an exact match of the ``old_text`` parameter, replaces it
 with ``new_text``, and writes the result back.  Returns a diff-like
 output showing the changes made.
+
+When ``old_text`` is not found, the error includes the most similar
+block from the file (located with :mod:`difflib`) so the model can copy
+the exact text — small local models most often fail edits by guessing
+whitespace or indentation slightly wrong, and without the hint they
+retry the same wrong ``old_text`` forever.
 """
 
+import difflib
 from pathlib import Path
 
 from local_cli.tools._fileio import atomic_write_text
 from local_cli.tools.base import Tool
+
+# Skip the similarity search on big inputs — it is O(lines * window).
+_HINT_MAX_CONTENT_LINES = 5_000
+_HINT_MAX_OLD_TEXT_CHARS = 3_000
+
+# Minimum similarity ratio for a hint to be worth showing.
+_HINT_MIN_RATIO = 0.55
+
+
+def _closest_block(content: str, old_text: str) -> tuple[int, str] | None:
+    """Find the block of *content* most similar to *old_text*.
+
+    Slides a window of ``len(old_text.splitlines())`` lines over the
+    file and scores each window with :class:`difflib.SequenceMatcher`
+    (``old_text`` is kept as ``seq2`` so difflib's internal cache is
+    reused across windows).
+
+    Args:
+        content: The full file content.
+        old_text: The text the model tried (and failed) to match.
+
+    Returns:
+        ``(start_line, block_text)`` with a 1-based start line, or
+        ``None`` when the file is empty, the inputs are too large, or
+        nothing scores above ``_HINT_MIN_RATIO``.
+    """
+    if len(old_text) > _HINT_MAX_OLD_TEXT_CHARS:
+        return None
+    content_lines = content.splitlines()
+    if not content_lines or len(content_lines) > _HINT_MAX_CONTENT_LINES:
+        return None
+
+    window_size = max(1, len(old_text.splitlines()))
+    matcher = difflib.SequenceMatcher(autojunk=False)
+    matcher.set_seq2(old_text)
+
+    best_ratio = 0.0
+    best_start = -1
+    for i in range(max(1, len(content_lines) - window_size + 1)):
+        window = "\n".join(content_lines[i : i + window_size])
+        matcher.set_seq1(window)
+        # Cheap upper bounds first; only compute the real ratio when the
+        # window could beat the current best.
+        if matcher.real_quick_ratio() <= best_ratio:
+            continue
+        if matcher.quick_ratio() <= best_ratio:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_start = i
+
+    if best_start < 0 or best_ratio < _HINT_MIN_RATIO:
+        return None
+    block = "\n".join(content_lines[best_start : best_start + window_size])
+    return best_start + 1, block
+
+
+def _not_found_error(file_path: str, content: str, old_text: str) -> str:
+    """Build the old_text-not-found error, with a closest-match hint."""
+    error = f"Error: old_text not found in {file_path}."
+    closest = _closest_block(content, old_text)
+    if closest is None:
+        return error
+    start_line, block = closest
+    return (
+        f"{error} The most similar text in the file starts at line "
+        f"{start_line}:\n"
+        "---\n"
+        f"{block}\n"
+        "---\n"
+        "Retry with old_text copied EXACTLY from the file above (watch "
+        "whitespace and indentation)."
+    )
 
 
 def _make_diff_output(
@@ -153,7 +234,7 @@ class EditTool(Tool):
                 old_text = norm_old
                 count = content.count(old_text)
             else:
-                return f"Error: old_text not found in {file_path}"
+                return _not_found_error(file_path, content, old_text)
 
         # Perform the replacement.
         if replace_all:
