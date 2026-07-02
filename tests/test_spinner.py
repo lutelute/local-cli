@@ -130,5 +130,68 @@ class TestSpinnerStyle(unittest.TestCase):
         self.assertEqual(s._frames, _MASCOT_FRAMES)
 
 
+class TestPixelMascot(unittest.TestCase):
+    """Tests for the multi-row pixel-art mascot."""
+
+    def tearDown(self) -> None:
+        from local_cli.spinner import set_spinner_style
+        set_spinner_style("dots")
+
+    def test_render_produces_colored_rows(self) -> None:
+        from local_cli.spinner import _PIXEL_IDLE, _render_pixel_frame
+        lines = _render_pixel_frame(_PIXEL_IDLE, "Thinking")
+        self.assertEqual(len(lines), len(_PIXEL_IDLE))
+        self.assertTrue(any("\033[38;5;214m" in line for line in lines))
+        self.assertIn("Thinking...", lines[2])
+        # Every color code is closed by a reset (no bleed into output).
+        for line in lines:
+            self.assertEqual(line.count("\033[38;5;"), line.count("\033[0m"))
+
+    def test_blink_frame_hides_the_eyes(self) -> None:
+        """Closed eyes are fur-colored so the blink is visible."""
+        from local_cli.spinner import (
+            _PIXEL_BLINK,
+            _PIXEL_IDLE,
+            _render_pixel_frame,
+        )
+        open_eyes = _render_pixel_frame(_PIXEL_IDLE, "")
+        closed = _render_pixel_frame(_PIXEL_BLINK, "")
+        self.assertIn("\033[38;5;236m", "".join(open_eyes))
+        self.assertNotIn("\033[38;5;236m", "".join(closed))
+
+    def test_non_tty_falls_back_to_one_line_mascot(self) -> None:
+        """Pixel mode degrades to the line mascot when not a terminal."""
+        from io import StringIO
+        from local_cli.spinner import Spinner, set_spinner_style
+
+        set_spinner_style("pixel")
+        captured = StringIO()  # StringIO.isatty() is False
+        original_stderr = sys.stderr
+        sys.stderr = captured
+        try:
+            s = Spinner("Thinking")
+            self.assertEqual(s._style, "mascot")
+            s.start()
+            time.sleep(0.05)
+            s.stop()
+        finally:
+            sys.stderr = original_stderr
+
+        output = captured.getvalue()
+        self.assertIn("ω", output)          # line mascot drew
+        self.assertNotIn("\033[5F", output)  # no cursor control leaked
+
+    def test_pixel_style_selected_on_tty(self) -> None:
+        """On a TTY-like stderr the pixel style stays active."""
+        from unittest.mock import patch
+        from local_cli.spinner import Spinner, set_spinner_style
+
+        set_spinner_style("pixel")
+        with patch.object(sys, "stderr") as fake_err:
+            fake_err.isatty.return_value = True
+            s = Spinner("x")
+        self.assertEqual(s._style, "pixel")
+
+
 if __name__ == "__main__":
     unittest.main()

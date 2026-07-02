@@ -187,7 +187,10 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
 
     # -- /exit, /quit -------------------------------------------------------
     if cmd in ("/exit", "/quit"):
-        print("(=^ω^=)ﾉｼ  Goodbye!" if ctx.config.mascot else "Goodbye!")
+        print(
+            "(=^ω^=)ﾉｼ  Goodbye!" if ctx.config.mascot != "off"
+            else "Goodbye!"
+        )
         return False
 
     # -- /help --------------------------------------------------------------
@@ -1161,9 +1164,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mascot",
-        action="store_true",
+        nargs="?",
+        const="cat",
         default=None,
-        help="Replace the spinner with Loca, the local cat mascot.",
+        choices=["cat", "pixel"],
+        help="Replace the spinner with Loca, the local cat mascot "
+             "(--mascot for the one-line face, --mascot pixel for "
+             "animated pixel art).",
     )
     parser.add_argument(
         "--rag",
@@ -1348,8 +1355,8 @@ def run_repl(
         initial_mode: Starting REPL mode (``"agent"`` or ``"ideate"``).
     """
     # Print welcome banner.
-    if config.mascot:
-        set_spinner_style("mascot")
+    if config.mascot != "off":
+        set_spinner_style("pixel" if config.mascot == "pixel" else "mascot")
         print("  (=･ω･=)ﾉ  Loca is here — happy hacking!")
     tool_names = ", ".join(t.name for t in tools)
     print(f"local-cli v{__version__} | model: {config.model}")
@@ -1417,7 +1424,10 @@ def run_repl(
         try:
             user_input = input(prompt_label)
         except (EOFError, KeyboardInterrupt):
-            print("\n(=^ω^=)ﾉｼ  Goodbye!" if config.mascot else "\nGoodbye!")
+            print(
+                "\n(=^ω^=)ﾉｼ  Goodbye!" if config.mascot != "off"
+                else "\nGoodbye!"
+            )
             break
 
         # Skip empty input.

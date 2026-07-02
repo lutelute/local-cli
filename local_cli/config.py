@@ -34,7 +34,7 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "llama_server_url": "http://localhost:8090",
     "compact_mode": "truncate",
     "max_iterations": 40,
-    "mascot": False,
+    "mascot": "off",
 }
 
 # Mapping of environment variable names to config keys.
@@ -163,6 +163,22 @@ def _parse_optional_str(value: object) -> str | None:
     return s if s else None
 
 
+def _parse_mascot(value: object) -> str:
+    """Parse the mascot setting to "off", "cat", or "pixel".
+
+    Accepts booleans (True -> "cat") and strings; truthy boolean words
+    map to "cat" so LOCAL_CLI_MASCOT=1 keeps working.
+    """
+    if isinstance(value, bool):
+        return "cat" if value else "off"
+    text = str(value).strip().lower()
+    if text == "pixel":
+        return "pixel"
+    if text in ("1", "true", "yes", "cat", "mascot", "on"):
+        return "cat"
+    return "off"
+
+
 def _parse_bool(value: object) -> bool:
     """Parse a value as a boolean.
 
@@ -250,8 +266,9 @@ class Config:
         # summary with truncation fallback); 0 iterations = unlimited.
         self.compact_mode: str = str(merged["compact_mode"])
         self.max_iterations: int = int(merged["max_iterations"])  # type: ignore[arg-type]
-        # Cosmetic: replace the braille spinner with Loca the local cat.
-        self.mascot: bool = _parse_bool(merged["mascot"])
+        # Cosmetic: replace the braille spinner with Loca the local cat
+        # ("off", "cat" = one-line face, "pixel" = animated pixel art).
+        self.mascot: str = _parse_mascot(merged["mascot"])
 
     @property
     def has_claude_access(self) -> bool:

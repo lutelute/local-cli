@@ -4,11 +4,16 @@ Provides a threaded spinner that animates in the terminal while the main
 thread is blocked (e.g. waiting for LLM response or executing a tool).
 Uses only stdlib -- no external dependencies.
 
-Two styles are available process-wide via :func:`set_spinner_style`:
+Three styles are available process-wide via :func:`set_spinner_style`:
 
 - ``"dots"`` (default): the classic braille-dot cycle.
 - ``"mascot"``: Loca the local cat (``(=･ω･=)``) blinks and fidgets
-  while you wait.  Enabled by ``--mascot`` / ``LOCAL_CLI_MASCOT=1``.
+  on a single line.  Enabled by ``--mascot`` / ``LOCAL_CLI_MASCOT=cat``.
+- ``"pixel"``: a five-row pixel-art Loca, drawn with colored block
+  characters and animated with ANSI cursor movement (blinks, ear
+  twitches).  Enabled by ``--mascot pixel`` / ``LOCAL_CLI_MASCOT=pixel``.
+  Falls back to the single-line mascot when stderr is not a TTY (pipes,
+  CI) so cursor-control codes never pollute logs.
 """
 
 import sys
@@ -37,8 +42,89 @@ _MASCOT_FRAMES = (
 # Mascot frame interval (seconds) — a lazy cat blinks slowly.
 _MASCOT_INTERVAL = 0.24
 
+# ---------------------------------------------------------------------------
+# Pixel-art mascot
+# ---------------------------------------------------------------------------
+
+# Pixel maps: one character per pixel.  X = fur, o = open eye,
+# - = closed eye, n = nose, . = transparent.  Rendered at two terminal
+# columns per pixel ("██") with 256-color ANSI codes.
+_PIXEL_IDLE = (
+    ".X...X.",
+    "XXXXXXX",
+    "XoXXXoX",
+    "XXXnXXX",
+    ".XXXXX.",
+)
+_PIXEL_BLINK = (
+    ".X...X.",
+    "XXXXXXX",
+    "X-XXX-X",
+    "XXXnXXX",
+    ".XXXXX.",
+)
+_PIXEL_EAR = (
+    ".X..X..",
+    "XXXXXXX",
+    "XoXXXoX",
+    "XXXnXXX",
+    ".XXXXX.",
+)
+
+# Animation sequence: mostly idle, an occasional blink and ear twitch.
+_PIXEL_FRAMES = (
+    _PIXEL_IDLE, _PIXEL_IDLE, _PIXEL_IDLE, _PIXEL_BLINK,
+    _PIXEL_IDLE, _PIXEL_IDLE, _PIXEL_EAR, _PIXEL_IDLE,
+)
+
+# Pixel frame interval (seconds).
+_PIXEL_INTERVAL = 0.28
+
+# 256-color codes per pixel kind (orange tabby, dark eyes, pink nose).
+# A closed eye ("-") is fur-colored so the eye visibly disappears when
+# the cat blinks.
+_PIXEL_COLORS = {
+    "X": "\033[38;5;214m",
+    "o": "\033[38;5;236m",
+    "-": "\033[38;5;214m",
+    "n": "\033[38;5;211m",
+}
+_ANSI_RESET = "\033[0m"
+
+# Row (0-based) whose right side carries the "Thinking..." message.
+_PIXEL_MESSAGE_ROW = 2
+
+
+def _render_pixel_frame(pixels: tuple[str, ...], message: str) -> list[str]:
+    """Render a pixel map into colored terminal lines.
+
+    Each pixel becomes two columns ("██") so the art is roughly square;
+    the spinner message is attached to the right of the face row.
+
+    Args:
+        pixels: Rows of pixel characters (see the ``_PIXEL_*`` maps).
+        message: The spinner message (e.g. ``"Thinking"``).
+
+    Returns:
+        One string per row, including ANSI color codes.
+    """
+    lines: list[str] = []
+    for row_index, row in enumerate(pixels):
+        parts: list[str] = ["  "]
+        for pixel in row:
+            color = _PIXEL_COLORS.get(pixel)
+            if color is None:
+                parts.append("  ")
+            else:
+                parts.append(f"{color}██{_ANSI_RESET}")
+        if row_index == _PIXEL_MESSAGE_ROW and message:
+            parts.append(f"  {message}...")
+        lines.append("".join(parts))
+    return lines
+
+
 # Styles recognised by set_spinner_style.
-_STYLES = ("dots", "mascot")
+_STYLES = ("dots", "mascot", "pixel")
 
 # Process-wide style; new Spinner instances read this at start().
 _active_style = "dots"
@@ -82,14 +168,32 @@ class Spinner:
         self._message = message
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        if _active_style == "mascot":
-            self._frames: tuple[str, ...] | str = _MASCOT_FRAMES
+
+        style = _active_style
+        # Pixel mode needs cursor-control escapes; fall back to the
+        # one-line mascot when stderr is not a terminal (pipes, CI).
+        if style == "pixel":
+            try:
+                if not sys.stderr.isatty():
+                    style = "mascot"
+            except Exception:
+                style = "mascot"
+        self._style = style
+
+        if style == "mascot":
+            self._frames: tuple = _MASCOT_FRAMES
             self._interval = _MASCOT_INTERVAL
+        elif style == "pixel":
+            self._frames = _PIXEL_FRAMES
+            self._interval = _PIXEL_INTERVAL
         else:
             self._frames = _FRAMES
             self._interval = _INTERVAL
 
     def _animate(self) -> None:
+        if self._style == "pixel":
+            self._animate_pixel()
+            return
         idx = 0
         max_len = 0
         while not self._stop_event.is_set():
@@ -106,6 +210,35 @@ class Spinner:
         # cells, so clear generously.
         sys.stderr.write("\r" + " " * (max_len * 2) + "\r")
         sys.stderr.flush()
+
+    def _animate_pixel(self) -> None:
+        """Animate the multi-row pixel mascot with cursor movement.
+
+        Each redraw moves the cursor back to the first art row
+        (``ESC[nF``), rewrites every row after erasing it (``ESC[K``),
+        and on stop erases the whole block and returns the cursor, so
+        subsequent output starts exactly where the spinner began.
+        """
+        height = len(_PIXEL_IDLE)
+        idx = 0
+        drawn = False
+        while not self._stop_event.is_set():
+            frame = self._frames[idx % len(self._frames)]
+            lines = _render_pixel_frame(frame, self._message)
+            if drawn:
+                sys.stderr.write(f"\033[{height}F")
+            for line in lines:
+                sys.stderr.write("\033[K" + line + "\n")
+            sys.stderr.flush()
+            drawn = True
+            idx += 1
+            self._stop_event.wait(self._interval)
+        if drawn:
+            sys.stderr.write(f"\033[{height}F")
+            for _ in range(height):
+                sys.stderr.write("\033[K\n")
+            sys.stderr.write(f"\033[{height}F")
+            sys.stderr.flush()
 
     def start(self) -> None:
         """Start the spinner animation."""
