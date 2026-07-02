@@ -536,6 +536,88 @@ class TestOverloadRetry(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Text-driven fallback for models without tool support
+# ---------------------------------------------------------------------------
+
+
+class _NoToolSupportClient:
+    """Rejects requests that carry tools; then answers with text calls."""
+
+    def __init__(self, turns: list[list[dict]]) -> None:
+        self._turns = list(turns)
+        self.requests: list[dict[str, Any]] = []
+
+    def chat_stream(self, model: str, messages: list[dict], **kwargs: Any):
+        self.requests.append({"kwargs": kwargs, "message_count": len(messages)})
+        if "tools" in kwargs:
+            raise ProviderRequestError(
+                'registry.ollama.ai/library/tiny "tiny" does not support tools'
+            )
+        if self._turns:
+            return iter(self._turns.pop(0))
+        return iter(_turn("done"))
+
+
+class TestToolsFallback(unittest.TestCase):
+    """Models whose endpoint rejects tools switch to text-driven calls."""
+
+    def test_fallback_teaches_format_and_rescues_calls(self) -> None:
+        tool = _DummyTool()
+        # After the fallback, the model "calls" the tool as fenced JSON.
+        client = _NoToolSupportClient([
+            _turn(
+                "```json\n"
+                '{"name": "dummy", "arguments": {"arg": "via-text"}}\n'
+                "```"
+            ),
+            _turn("task complete"),
+        ])
+        events, emit = _recorder()
+        messages = [{"role": "user", "content": "do it"}]
+        result = run_agent(client, "tiny", [tool], messages, emit=emit)
+
+        self.assertEqual(result, "task complete")
+        self.assertEqual(tool.calls, [{"arg": "via-text"}])
+        kinds = _kinds(events)
+        self.assertIn("tools_fallback", kinds)
+        self.assertIn("rescue", kinds)
+        # First request carried tools; all later ones must not.
+        self.assertIn("tools", client.requests[0]["kwargs"])
+        for req in client.requests[1:]:
+            self.assertNotIn("tools", req["kwargs"])
+        # The format instruction was injected for the model.
+        instructions = [
+            m for m in messages
+            if m.get("role") == "user"
+            and "driven by TEXT" in m.get("content", "")
+        ]
+        self.assertEqual(len(instructions), 1)
+        self.assertIn("dummy", instructions[0]["content"])
+
+    def test_other_request_errors_still_fail(self) -> None:
+        class _BadModelClient:
+            def chat_stream(self, model, messages, **kwargs):
+                raise ProviderRequestError("model not found")
+
+        events, emit = _recorder()
+        messages = [{"role": "user", "content": "hi"}]
+        result = run_agent(_BadModelClient(), "m", [], messages, emit=emit)
+        self.assertEqual(result, "")
+        self.assertIn("error", _kinds(events))
+
+    def test_fallback_disabled_with_rescue_off(self) -> None:
+        tool = _DummyTool()
+        client = _NoToolSupportClient([_turn("never reached")])
+        events, emit = _recorder()
+        run_agent(
+            client, "tiny", [tool], [{"role": "user", "content": "x"}],
+            emit=emit, harness=HarnessConfig(text_tool_rescue=False),
+        )
+        self.assertNotIn("tools_fallback", _kinds(events))
+        self.assertIn("error", _kinds(events))
+
+
+# ---------------------------------------------------------------------------
 # Summary compaction
 # ---------------------------------------------------------------------------
 

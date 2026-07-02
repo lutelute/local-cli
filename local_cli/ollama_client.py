@@ -61,6 +61,45 @@ class OllamaStreamError(ProviderStreamError):
 
 
 # ---------------------------------------------------------------------------
+# Error formatting
+# ---------------------------------------------------------------------------
+
+
+def _format_http_error(exc: urllib.error.HTTPError, url: str) -> str:
+    """Build an error message including the server's error detail.
+
+    Ollama puts the actual failure reason (e.g. ``"<model>" does not
+    support tools``) in the JSON response body; ``exc.reason`` is just
+    the bare HTTP phrase ("Bad Request").  Reading the body makes 4xx
+    errors diagnosable — and lets the agent loop detect the
+    tools-unsupported case and fall back to text-driven tool calls.
+
+    Args:
+        exc: The HTTP error (its body is consumed here).
+        url: The request URL, for context.
+
+    Returns:
+        A message like ``Ollama API error 400 at <url>: Bad Request
+        (<server detail>)``.
+    """
+    message = f"Ollama API error {exc.code} at {url}: {exc.reason}"
+    try:
+        raw = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return message
+    if not raw:
+        return message
+    detail = raw
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict) and payload.get("error"):
+            detail = str(payload["error"])
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return f"{message} ({detail[:300]})"
+
+
+# ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
 
@@ -131,7 +170,7 @@ class OllamaClient:
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
             raise OllamaRequestError(
-                f"Ollama API error {exc.code} at {url}: {exc.reason}"
+                _format_http_error(exc, url)
             ) from exc
         except urllib.error.URLError as exc:
             raise OllamaConnectionError(
@@ -183,7 +222,7 @@ class OllamaClient:
             resp = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             raise OllamaRequestError(
-                f"Ollama API error {exc.code} at {url}: {exc.reason}"
+                _format_http_error(exc, url)
             ) from exc
         except urllib.error.URLError as exc:
             raise OllamaConnectionError(

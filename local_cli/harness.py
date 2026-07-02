@@ -419,6 +419,72 @@ def loop_break_message() -> dict[str, Any]:
     }
 
 
+def is_tools_unsupported_error(exc: Exception) -> bool:
+    """Whether *exc* means the model/endpoint rejects structured tool calls.
+
+    Ollama returns HTTP 400 with a message like ``"<model>" does not
+    support tools`` for models whose chat template has no tool-calling
+    support (many small or Japanese-specialized models).  Detecting this
+    lets the loop fall back to text-driven tool calls instead of dying —
+    combined with :func:`extract_text_tool_calls`, such models can still
+    act as agents.
+
+    Args:
+        exc: The provider request error.
+
+    Returns:
+        ``True`` when the error indicates missing tool support.
+    """
+    msg = str(exc).lower()
+    return (
+        "does not support tools" in msg
+        or "tool use is not supported" in msg
+        or "tools are not supported" in msg
+    )
+
+
+def text_tools_fallback_message(tools: list[Any]) -> dict[str, Any]:
+    """Build the instruction injected when falling back to text tools.
+
+    Teaches the model the exact fenced-JSON shape that
+    :func:`extract_text_tool_calls` rescues, and lists each tool with
+    its argument names so calls can be produced without a schema.
+
+    Args:
+        tools: The active tool instances (name + parameters are read).
+
+    Returns:
+        A user-role message dict to append to the conversation.
+    """
+    lines: list[str] = []
+    for tool in tools:
+        name = getattr(tool, "name", "?")
+        try:
+            props = tool.parameters.get("properties", {})
+            args = ", ".join(f'"{key}": ...' for key in props)
+            lines.append(f"- {name}: {{{args}}}")
+        except Exception:
+            lines.append(f"- {name}")
+    return {
+        "role": "user",
+        "content": (
+            "<system-reminder>This model endpoint rejected structured "
+            "tool calls, so tools are now driven by TEXT. To call a "
+            "tool, reply with ONLY one JSON object in a fenced block, "
+            "exactly like:\n"
+            "```json\n"
+            '{"name": "write", "arguments": {"file_path": "a.py", '
+            '"content": "print(1)"}}\n'
+            "```\n"
+            "Available tools and their arguments:\n"
+            + "\n".join(lines)
+            + "\nMake one tool call per reply. The result will come "
+            "back as the next message; continue until the task is done, "
+            "then answer normally with no JSON.</system-reminder>"
+        ),
+    }
+
+
 def step_limit_message(limit: int) -> dict[str, Any]:
     """Build the final-turn message injected when the step cap is reached."""
     return {

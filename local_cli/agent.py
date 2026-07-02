@@ -22,10 +22,12 @@ from local_cli.harness import (
     build_summary_request,
     compaction_bounds,
     extract_text_tool_calls,
+    is_tools_unsupported_error,
     loop_break_message,
     loop_warning_message,
     null_emit,
     step_limit_message,
+    text_tools_fallback_message,
     verify_file_write,
 )
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
@@ -1165,6 +1167,7 @@ def run_agent(
     reminder = TodoReminder() if hc.todo_reminders else None
     nudged = False  # whether we've already nudged "use the tools" this turn
     force_final = False  # when True, the next LLM call gets no tools
+    tools_disabled = False  # endpoint rejected tools; text-driven fallback
     final_content = ""
     iteration = 0
 
@@ -1221,7 +1224,7 @@ def run_agent(
         }))
 
         chat_kwargs: dict[str, Any] = {}
-        if not force_final:
+        if not force_final and not tools_disabled:
             chat_kwargs["tools"] = tool_defs
         if options is not None:
             chat_kwargs["options"] = options
@@ -1270,6 +1273,21 @@ def run_agent(
             })
             break
         except ProviderRequestError as exc:
+            # A model whose chat template has no tool support rejects
+            # the request outright.  Fall back to text-driven tools:
+            # drop the tools parameter, teach the model the fenced-JSON
+            # call shape, and let extract_text_tool_calls rescue its
+            # calls — such models can still act as agents.
+            if (
+                not tools_disabled
+                and "tools" in chat_kwargs
+                and hc.text_tool_rescue
+                and is_tools_unsupported_error(exc)
+            ):
+                tools_disabled = True
+                messages.append(text_tools_fallback_message(tools))
+                emit(AgentEvent("tools_fallback", {"model": model}))
+                continue
             if raise_provider_errors:
                 raise
             emit(AgentEvent("error", {
@@ -1603,6 +1621,13 @@ class _ConsoleEmitter:
             sys.stderr.write(
                 f"  [harness] rescued {data['count']} tool call(s) "
                 "written as text\n"
+            )
+
+        elif kind == "tools_fallback":
+            sys.stderr.write(
+                f"  [harness] {data.get('model', 'model')} does not "
+                "support structured tool calls — switching to "
+                "text-driven tools\n"
             )
 
         elif kind == "verify_warning":
