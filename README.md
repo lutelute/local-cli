@@ -329,6 +329,8 @@ Switch at runtime with `/provider claude` or `/provider ollama`.
 | `gemma3:12b` | 8.1 GB | Multilingual, Japanese |
 | `qwen3:0.6b` | 0.5 GB | Quick testing |
 
+**Agent-quality guidance** (measured with `scripts/harness_eval.py`): tool-trained models from ~4B up complete multi-step agent tasks reliably, in English and Japanese (qwen3.5:4b scored 7/7 on the eval suite). Sub-1B models handle simple create/run tasks but fail multi-step edits even with the harness pushing back. Chat-specialized models without tool training (e.g. Japanese conversation models) run via the text-driven fallback and manage single tool calls, but tend to go silent mid-task — prefer tool-trained models for real agent work.
+
 ---
 
 ## Architecture
