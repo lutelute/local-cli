@@ -116,6 +116,15 @@ Electron app with terminal-style UI, model picker, file explorer, and settings p
 ### Zero Dependencies
 Python stdlib only. No `pip install` needed for the core CLI.
 
+### Mascot — Loca 🐈
+An optional terminal companion. Pass `--mascot` (or `LOCAL_CLI_MASCOT=cat`) and the spinner becomes Loca, the local cat, blinking on one line while it thinks:
+
+```
+  (=･ω･=)  Thinking...      (=-ω-=)  blink      (=･ω-=)  wink
+```
+
+Pass `--mascot pixel` for an animated pixel-art Loca — a five-row cat sprite (orange fur, pink ears and cheeks, big highlighted eyes, an ω mouth) that blinks and twitches its ears via ANSI cursor control. It automatically falls back to the one-line face when output is piped or not a TTY, so cursor codes never end up in your logs. Pure decoration, default off, still zero-dependency.
+
 ---
 
 ## Download
@@ -299,7 +308,8 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | `--select-model` | — | `false` | Interactive model picker |
 | `--server` | — | `false` | JSON-line server mode |
 | `--yes` / `-y` | — | `false` | Auto-approve risky commands (skip confirmation) |
-| `--update` | — | `false` | Check for updates |
+| `--update` | — | `false` | Check for updates now (git pull + reinstall) |
+| `--auto-update` | `LOCAL_CLI_AUTO_UPDATE` | `false` | Install available updates automatically on startup, then restart |
 | — | `LOCAL_CLI_COMPACT_MODE` | `truncate` | Context compaction: `truncate` or `summarize` |
 | — | `LOCAL_CLI_MAX_ITERATIONS` | `40` | Agent step limit per turn (`0` = unlimited) |
 | `--mascot [style]` | `LOCAL_CLI_MASCOT` | `off` | Loca the local cat: `--mascot` for the one-line face `(=･ω･=)`, `--mascot pixel` for animated pixel art (TTY only; falls back to the face in pipes) |
@@ -382,7 +392,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2164 tests
+├── tests/                       # 2220 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -390,7 +400,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2164 passed
+# 2220 passed
 ```
 
 ---
