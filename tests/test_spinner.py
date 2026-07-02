@@ -138,17 +138,30 @@ class TestPixelMascot(unittest.TestCase):
         set_spinner_style("dots")
 
     def test_render_produces_colored_rows(self) -> None:
-        from local_cli.spinner import _PIXEL_IDLE, _render_pixel_frame
+        from local_cli.spinner import (
+            _PIXEL_IDLE,
+            _PIXEL_MESSAGE_ROW,
+            _render_pixel_frame,
+        )
         lines = _render_pixel_frame(_PIXEL_IDLE, "Thinking")
         self.assertEqual(len(lines), len(_PIXEL_IDLE))
         self.assertTrue(any("\033[38;5;214m" in line for line in lines))
-        self.assertIn("Thinking...", lines[2])
+        self.assertIn("Thinking...", lines[_PIXEL_MESSAGE_ROW])
         # Every color code is closed by a reset (no bleed into output).
         for line in lines:
             self.assertEqual(line.count("\033[38;5;"), line.count("\033[0m"))
 
+    def test_all_frames_same_dimensions(self) -> None:
+        """Idle / blink / ear maps share width and height (clean redraw)."""
+        from local_cli.spinner import _PIXEL_BLINK, _PIXEL_EAR, _PIXEL_IDLE
+        for frame in (_PIXEL_BLINK, _PIXEL_EAR):
+            self.assertEqual(len(frame), len(_PIXEL_IDLE))
+            self.assertEqual(
+                {len(r) for r in frame}, {len(r) for r in _PIXEL_IDLE},
+            )
+
     def test_blink_frame_hides_the_eyes(self) -> None:
-        """Closed eyes are fur-colored so the blink is visible."""
+        """The eye color disappears entirely when Loca blinks."""
         from local_cli.spinner import (
             _PIXEL_BLINK,
             _PIXEL_IDLE,

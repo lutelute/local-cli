@@ -159,19 +159,49 @@ def _start_update_check() -> tuple[threading.Thread, dict]:
     return thread, result
 
 
-def _show_update_notice(thread: threading.Thread, result: dict) -> None:
-    """Print the update notice if the background check found one.
+def _show_update_notice(
+    thread: threading.Thread,
+    result: dict,
+    auto_update: bool = False,
+) -> None:
+    """Handle an available update found by the background check.
+
+    When *auto_update* is set, the update is installed automatically
+    (git pull + reinstall via :func:`~local_cli.updater.perform_update`)
+    and the user is told to restart to load the new code, since the
+    process is already running the old version.  Otherwise a one-line
+    notice points at ``/update``.  ``perform_update`` refuses when the
+    working tree is dirty, so a local checkout is never clobbered.
 
     Args:
         thread: The background check thread (joined briefly).
         result: The shared result dict from :func:`_start_update_check`.
+        auto_update: Install the update automatically instead of
+            only notifying.
     """
     thread.join(timeout=0.5)
-    if result.get("message") is not None:
+    if result.get("message") is None:
+        return
+
+    if not auto_update:
         sys.stderr.write(
             "\n  Update available! Run /update or local-cli --update "
             "to update.\n\n"
         )
+        return
+
+    sys.stderr.write("\n  Update available — installing automatically...\n")
+    try:
+        from local_cli.updater import perform_update
+        success, message = perform_update()
+    except Exception as exc:  # noqa: BLE001 — update must never crash startup
+        sys.stderr.write(f"  Auto-update failed: {exc}\n\n")
+        return
+    sys.stderr.write(f"  {message}\n")
+    if success:
+        sys.stderr.write("  Restart local-cli to use the new version.\n\n")
+    else:
+        sys.stderr.write("\n")
 
 
 def _build_client(config: Config) -> OllamaClient:
@@ -505,7 +535,7 @@ def main() -> None:
     )
     initial_mode = _resolve_initial_mode(args, config)
 
-    _show_update_notice(update_thread, update_result)
+    _show_update_notice(update_thread, update_result, config.auto_update)
 
     run_repl(
         config,

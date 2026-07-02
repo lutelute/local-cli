@@ -258,6 +258,55 @@ class TestUpdateCheck(unittest.TestCase):
             _show_update_notice(thread, result)
         self.assertFalse(stderr.write.called)
 
+    def test_auto_update_installs_when_enabled(self) -> None:
+        """With auto_update, an available update is installed, not just shown."""
+        with patch(
+            "local_cli.updater.check_for_updates",
+            return_value=(True, "v2 available"),
+        ):
+            thread, result = _start_update_check()
+            thread.join(timeout=2)
+        with patch(
+            "local_cli.updater.perform_update",
+            return_value=(True, "Updated to v0.11.0"),
+        ) as perform:
+            with patch("sys.stderr") as stderr:
+                _show_update_notice(thread, result, auto_update=True)
+        perform.assert_called_once()
+        written = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn("installing automatically", written)
+        self.assertIn("Restart", written)
+
+    def test_auto_update_off_only_notifies(self) -> None:
+        """Without auto_update, perform_update is never called."""
+        with patch(
+            "local_cli.updater.check_for_updates",
+            return_value=(True, "v2 available"),
+        ):
+            thread, result = _start_update_check()
+            thread.join(timeout=2)
+        with patch("local_cli.updater.perform_update") as perform:
+            with patch("sys.stderr"):
+                _show_update_notice(thread, result, auto_update=False)
+        perform.assert_not_called()
+
+    def test_auto_update_failure_does_not_crash(self) -> None:
+        """A failing auto-update is caught and reported, not raised."""
+        with patch(
+            "local_cli.updater.check_for_updates",
+            return_value=(True, "v2 available"),
+        ):
+            thread, result = _start_update_check()
+            thread.join(timeout=2)
+        with patch(
+            "local_cli.updater.perform_update",
+            side_effect=RuntimeError("network down"),
+        ):
+            with patch("sys.stderr") as stderr:
+                _show_update_notice(thread, result, auto_update=True)
+        written = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn("Auto-update failed", written)
+
 
 if __name__ == "__main__":
     unittest.main()

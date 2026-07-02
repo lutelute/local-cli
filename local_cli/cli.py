@@ -1281,6 +1281,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check for updates and pull the latest version.",
     )
     parser.add_argument(
+        "--auto-update",
+        dest="auto_update",
+        action="store_true",
+        default=None,
+        help="Install available updates automatically on startup "
+             "(git pull + reinstall).",
+    )
+    parser.add_argument(
         "--plan",
         action="store_true",
         default=False,

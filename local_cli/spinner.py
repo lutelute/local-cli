@@ -46,29 +46,54 @@ _MASCOT_INTERVAL = 0.24
 # Pixel-art mascot
 # ---------------------------------------------------------------------------
 
-# Pixel maps: one character per pixel.  X = fur, o = open eye,
-# - = closed eye, n = nose, . = transparent.  Rendered at two terminal
-# columns per pixel ("██") with 256-color ANSI codes.
+# Pixel maps: one character per pixel, drawn at two terminal columns per
+# pixel ("██") with 256-color ANSI codes.  Loca is a round-faced orange
+# kitten: o = outline/mouth, y = orange fur, w = cream muzzle,
+# p = ear-inner pink, c = cheek blush, k = eye, h = eye highlight,
+# n = nose, . = transparent.  Each map is left/right symmetric.
 _PIXEL_IDLE = (
-    ".X...X.",
-    "XXXXXXX",
-    "XoXXXoX",
-    "XXXnXXX",
-    ".XXXXX.",
+    "..ooo.....ooo..",
+    ".oypyo...oypyo.",
+    "oyppyyyyyyyppyo",
+    "oyyyyyyyyyyyyyo",
+    "oywwwwwwwwwwwyo",
+    "oywhkkwwwkkhwyo",
+    "oywkkwwwwwkkwyo",
+    "oycwwwwnwwwwcyo",
+    "oywwwwmwmwwwwyo",
+    ".oywwwwwwwwwyo.",
+    "..oyywwywwyyo..",
+    "...ooooooooo...",
 )
+# Blink: the eyes close to a short brown line.
 _PIXEL_BLINK = (
-    ".X...X.",
-    "XXXXXXX",
-    "X-XXX-X",
-    "XXXnXXX",
-    ".XXXXX.",
+    "..ooo.....ooo..",
+    ".oypyo...oypyo.",
+    "oyppyyyyyyyppyo",
+    "oyyyyyyyyyyyyyo",
+    "oywwwwwwwwwwwyo",
+    "oywwwwwwwwwwwyo",
+    "oywoowwwwwoowyo",
+    "oycwwwwnwwwwcyo",
+    "oywwwwmwmwwwwyo",
+    ".oywwwwwwwwwyo.",
+    "..oyywwywwyyo..",
+    "...ooooooooo...",
 )
+# Ear twitch: the ear tips lean inward a touch.
 _PIXEL_EAR = (
-    ".X..X..",
-    "XXXXXXX",
-    "XoXXXoX",
-    "XXXnXXX",
-    ".XXXXX.",
+    "...ooo...ooo...",
+    "..oypyo.oypyo..",
+    "oyppyyyyyyyppyo",
+    "oyyyyyyyyyyyyyo",
+    "oywwwwwwwwwwwyo",
+    "oywhkkwwwkkhwyo",
+    "oywkkwwwwwkkwyo",
+    "oycwwwwnwwwwcyo",
+    "oywwwwmwmwwwwyo",
+    ".oywwwwwwwwwyo.",
+    "..oyywwywwyyo..",
+    "...ooooooooo...",
 )
 
 # Animation sequence: mostly idle, an occasional blink and ear twitch.
@@ -80,19 +105,23 @@ _PIXEL_FRAMES = (
 # Pixel frame interval (seconds).
 _PIXEL_INTERVAL = 0.28
 
-# 256-color codes per pixel kind (orange tabby, dark eyes, pink nose).
-# A closed eye ("-") is fur-colored so the eye visibly disappears when
-# the cat blinks.
+# 256-color codes per pixel kind.  A closed eye is drawn with the
+# outline color (see _PIXEL_BLINK) so the eyes visibly disappear.
 _PIXEL_COLORS = {
-    "X": "\033[38;5;214m",
-    "o": "\033[38;5;236m",
-    "-": "\033[38;5;214m",
-    "n": "\033[38;5;211m",
+    "o": "\033[38;5;94m",    # outline / mouth (soft brown)
+    "y": "\033[38;5;214m",   # orange fur
+    "w": "\033[38;5;230m",   # cream muzzle
+    "p": "\033[38;5;218m",   # ear inner pink
+    "c": "\033[38;5;217m",   # cheek blush
+    "k": "\033[38;5;236m",   # eye
+    "h": "\033[38;5;231m",   # eye highlight (white)
+    "n": "\033[38;5;211m",   # nose
 }
 _ANSI_RESET = "\033[0m"
 
-# Row (0-based) whose right side carries the "Thinking..." message.
-_PIXEL_MESSAGE_ROW = 2
+# Row (0-based) whose right side carries the "Thinking..." message —
+# the eye row, so the label sits beside Loca's face.
+_PIXEL_MESSAGE_ROW = 5
 
 
 def _render_pixel_frame(pixels: tuple[str, ...], message: str) -> list[str]:

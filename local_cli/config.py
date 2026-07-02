@@ -35,6 +35,7 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "compact_mode": "truncate",
     "max_iterations": 40,
     "mascot": "off",
+    "auto_update": False,
 }
 
 # Mapping of environment variable names to config keys.
@@ -54,6 +55,7 @@ ENV_VAR_MAP: dict[str, str] = {
     "LOCAL_CLI_COMPACT_MODE": "compact_mode",
     "LOCAL_CLI_MAX_ITERATIONS": "max_iterations",
     "LOCAL_CLI_MASCOT": "mascot",
+    "LOCAL_CLI_AUTO_UPDATE": "auto_update",
 }
 
 # Maximum config file size in bytes (10KB).
@@ -269,6 +271,9 @@ class Config:
         # Cosmetic: replace the braille spinner with Loca the local cat
         # ("off", "cat" = one-line face, "pixel" = animated pixel art).
         self.mascot: str = _parse_mascot(merged["mascot"])
+        # When true, an available update is installed automatically on
+        # startup (git pull + reinstall) instead of only being notified.
+        self.auto_update: bool = _parse_bool(merged["auto_update"])
 
     @property
     def has_claude_access(self) -> bool:
