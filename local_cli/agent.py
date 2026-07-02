@@ -29,6 +29,7 @@ from local_cli.harness import (
     loop_warning_message,
     null_emit,
     step_limit_message,
+    text_tool_nudge_message,
     text_tools_fallback_message,
     verify_file_write,
 )
@@ -1349,7 +1350,13 @@ def run_agent(
             if not force_final and _should_nudge_to_use_tools(
                 messages, assistant_message, nudged,
             ):
-                messages.append(dict(_TOOL_NUDGE_MESSAGE))
+                # On the no-tool-support fallback the standard "call the
+                # write tool" wording is meaningless — restate the
+                # fenced-JSON call shape instead.
+                if tools_disabled:
+                    messages.append(text_tool_nudge_message())
+                else:
+                    messages.append(dict(_TOOL_NUDGE_MESSAGE))
                 nudged = True
                 emit(AgentEvent("nudge", {}))
                 continue

@@ -485,6 +485,28 @@ def error_stop_message() -> dict[str, Any]:
     }
 
 
+def text_tool_nudge_message() -> dict[str, Any]:
+    """Build the "use the tools" nudge for text-driven tool mode.
+
+    The standard nudge says "call the write or edit tool", which is
+    meaningless to a model running on the no-tool-support fallback — it
+    needs the fenced-JSON call shape restated instead.
+    """
+    return {
+        "role": "user",
+        "content": (
+            "You printed code but did not actually create or modify any "
+            "file. To apply it, reply with ONLY one fenced JSON tool "
+            "call, exactly like:\n"
+            "```json\n"
+            '{"name": "write", "arguments": {"file_path": "a.py", '
+            '"content": "print(1)"}}\n'
+            "```\n"
+            "If no file change is needed, say so briefly."
+        ),
+    }
+
+
 def is_tools_unsupported_error(exc: Exception) -> bool:
     """Whether *exc* means the model/endpoint rejects structured tool calls.
 

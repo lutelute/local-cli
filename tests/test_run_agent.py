@@ -616,6 +616,35 @@ class TestToolsFallback(unittest.TestCase):
         self.assertNotIn("tools_fallback", _kinds(events))
         self.assertIn("error", _kinds(events))
 
+    def test_nudge_in_text_mode_teaches_json_shape(self) -> None:
+        """In fallback mode the nudge restates the fenced-JSON format."""
+        tool = _DummyTool(name="write")
+        client = _NoToolSupportClient([
+            # Prints code (no JSON call) on a build request -> nudge.
+            _turn("```python\nprint('hi')\n```"),
+            # Answers the nudge with a proper fenced JSON call.
+            _turn(
+                "```json\n"
+                '{"name": "write", "arguments": {"file_path": "a.py", '
+                '"content": "print(1)"}}\n'
+                "```"
+            ),
+            _turn("created it"),
+        ])
+        events, emit = _recorder()
+        messages = [{"role": "user", "content": "create a.py that prints hi"}]
+        result = run_agent(client, "tiny", [tool], messages, emit=emit)
+
+        self.assertEqual(result, "created it")
+        self.assertIn("nudge", _kinds(events))
+        self.assertEqual(len(tool.calls), 1)
+        nudges = [
+            m for m in messages
+            if m.get("role") == "user"
+            and "fenced JSON tool" in m.get("content", "")
+        ]
+        self.assertEqual(len(nudges), 1)
+
 
 # ---------------------------------------------------------------------------
 # Error-stop guard

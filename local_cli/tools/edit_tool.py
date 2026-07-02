@@ -195,6 +195,16 @@ class EditTool(Tool):
         if not isinstance(new_text, str):
             return "Error: 'new_text' parameter is required and must be a string."
 
+        # A no-op edit still reports "1 occurrence replaced", which small
+        # models read as success (observed live: old_text="add",
+        # new_text="add", followed by "fixed it").  Reject it instead.
+        if old_text == new_text:
+            return (
+                "Error: old_text and new_text are identical, so this edit "
+                "changes nothing. Put the exact current text in old_text "
+                "and the corrected text in new_text."
+            )
+
         replace_all = kwargs.get("replace_all", False)
         if not isinstance(replace_all, bool):
             replace_all = False

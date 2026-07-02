@@ -419,6 +419,19 @@ class TestEditToolClosestMatchHint(unittest.TestCase):
         self.assertIn("not found", result)
         self.assertNotIn("most similar", result)
 
+    def test_identical_old_and_new_text_rejected(self) -> None:
+        """A no-op edit is rejected instead of reporting success."""
+        original = "def add(a, b):\n    return a - b\n"
+        path = self._write(original)
+        result = self.tool.execute(
+            file_path=path, old_text="add", new_text="add",
+        )
+        self.assertIn("Error", result)
+        self.assertIn("identical", result)
+        self.assertIn("changes nothing", result)
+        # File untouched.
+        self.assertEqual(Path(path).read_text(encoding="utf-8"), original)
+
     def test_multiline_hint_reports_start_line(self) -> None:
         lines = [f"line_{i} = {i}" for i in range(1, 21)]
         path = self._write("\n".join(lines) + "\n")
