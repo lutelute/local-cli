@@ -300,12 +300,28 @@ class _TaskTimeout(Exception):
     pass
 
 
+# Leave-one-out ablation configurations: baseline (all interventions on)
+# plus one config per intervention with just that intervention disabled.
+# Measures each intervention's marginal contribution on real models.
+ABLATIONS: list[tuple[str, dict]] = [
+    ("baseline", {}),
+    ("-text_rescue", {"text_tool_rescue": False}),
+    ("-loop_detection", {"loop_detection": False}),
+    ("-verify_writes", {"verify_writes": False}),
+    ("-error_stop", {"error_stop_guard": False}),
+    ("-defer_writes", {"defer_writes_after_search": False}),
+    ("-empty_guard", {"empty_response_guard": False}),
+    ("-todo_reminders", {"todo_reminders": False}),
+]
+
+
 def _run_task(
     client: OllamaClient,
     model: str,
     task: dict,
     timeout_s: int,
     max_iterations: int,
+    harness_overrides: dict | None = None,
 ) -> dict:
     """Run one task against one model and machine-check the result."""
     workdir = Path(tempfile.mkdtemp(prefix=f"heval_{task['name']}_"))
@@ -351,7 +367,10 @@ def _run_task(
         run_agent(
             client, model, tools, messages,
             emit=emit,
-            harness=HarnessConfig(max_iterations=max_iterations),
+            harness=HarnessConfig(
+                max_iterations=max_iterations,
+                **(harness_overrides or {}),
+            ),
             # Deterministic decoding so intervention changes are A/B
             # comparable across eval runs.
             options={"num_ctx": 8192, "temperature": 0, "seed": 42},
@@ -383,6 +402,68 @@ def _run_task(
     }
 
 
+def _run_ablation(client: OllamaClient, args, tasks: list[dict]) -> None:
+    """Leave-one-out ablation: measure each intervention's contribution.
+
+    Runs the full task suite once with everything on (baseline), then
+    once per intervention with only that intervention disabled, and
+    prints a per-config table (score, iterations, tool calls, and the
+    interventions that fired).  Deterministic decoding makes the runs
+    directly comparable.
+    """
+    all_results: dict[str, dict] = {}
+    for model in args.models:
+        print(f"===== ABLATION: {model} ({len(tasks)} tasks) =====")
+        model_rows: dict[str, dict] = {}
+        for config_name, overrides in ABLATIONS:
+            passed = 0
+            iters = 0
+            calls = 0
+            seconds = 0.0
+            fired: dict[str, int] = {}
+            failures: list[str] = []
+            for task in tasks:
+                rec = _run_task(
+                    client, model, task, args.timeout,
+                    args.max_iterations, harness_overrides=overrides,
+                )
+                passed += 1 if rec["success"] else 0
+                iters += rec["iterations"]
+                calls += rec["tool_calls"]
+                seconds += rec["seconds"]
+                for key, count in rec["interventions"].items():
+                    fired[key] = fired.get(key, 0) + count
+                if not rec["success"]:
+                    failures.append(task["name"])
+            fired_str = ", ".join(
+                f"{k}x{v}" for k, v in sorted(fired.items())
+            ) or "-"
+            print(
+                f"{config_name:<18} {passed}/{len(tasks)}  "
+                f"iters={iters:<3} calls={calls:<3} "
+                f"time={seconds:.0f}s  fired: {fired_str}"
+                + (f"  failed: {', '.join(failures)}" if failures else ""),
+                flush=True,
+            )
+            model_rows[config_name] = {
+                "passed": passed,
+                "total": len(tasks),
+                "iterations": iters,
+                "tool_calls": calls,
+                "seconds": round(seconds, 1),
+                "interventions": fired,
+                "failures": failures,
+            }
+        all_results[model] = model_rows
+
+    if args.out:
+        Path(args.out).write_text(
+            json.dumps(all_results, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"\nFull results: {args.out}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", nargs="+", required=True)
@@ -393,6 +474,10 @@ def main() -> None:
                         help="write full JSON results to this path")
     parser.add_argument("--tasks", nargs="*", default=[],
                         help="task names to run (default: all)")
+    parser.add_argument("--ablate", action="store_true",
+                        help="leave-one-out ablation over the harness "
+                             "interventions (baseline + one run per "
+                             "intervention disabled)")
     args = parser.parse_args()
 
     tasks = TASKS
@@ -400,6 +485,11 @@ def main() -> None:
         tasks = [t for t in TASKS if t["name"] in set(args.tasks)]
 
     client = OllamaClient()
+
+    if args.ablate:
+        _run_ablation(client, args, tasks)
+        return
+
     results: dict[str, list[dict]] = {}
 
     for model in args.models:
