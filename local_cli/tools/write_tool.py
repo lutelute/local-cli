@@ -112,9 +112,15 @@ class WriteTool(Tool):
 
         path = Path(file_path)
 
-        # Reject writing to a directory.
+        # Reject writing to a directory.  Small models frequently pass
+        # the working directory here and then give up, so tell them the
+        # exact fix instead of just the failure.
         if path.exists() and path.is_dir():
-            return f"Error: path is a directory, not a file: {file_path}"
+            return (
+                f"Error: path is a directory, not a file: {file_path}. "
+                f"Append the file name and retry, e.g. "
+                f"file_path=\"{file_path.rstrip('/')}/<name>.<ext>\"."
+            )
 
         # Create parent directories if they don't exist.
         try:

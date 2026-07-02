@@ -14,23 +14,81 @@ that.
 """
 
 import os
+from typing import Any
 
 from local_cli.tools.base import Tool
 
 
-def build_system_prompt(tools: list[Tool]) -> str:
+def build_skill_messages(
+    skills_loader: Any,
+    user_text: str,
+) -> list[dict[str, str]]:
+    """Build system messages for skills matching *user_text*.
+
+    Shared by every front-end (CLI REPL, JSON-line server, web monitor)
+    so skill auto-injection behaves identically everywhere — previously
+    only the CLI injected skills, so the same agent behaved differently
+    when driven from a GUI.
+
+    Args:
+        skills_loader: A :class:`~local_cli.skills.SkillsLoader` (or
+            ``None``, or any object with ``get_matching_skills(text)``).
+        user_text: The user's message, matched against skill triggers.
+
+    Returns:
+        One system-role message per matching skill (empty when the
+        loader is missing, matching fails, or nothing matches).
+    """
+    if skills_loader is None:
+        return []
+    try:
+        matching = skills_loader.get_matching_skills(user_text)
+    except Exception:
+        return []
+    return [
+        {
+            "role": "system",
+            "content": (
+                f"--- SKILL: {skill.name} ---\n"
+                f"{skill.content}\n"
+                f"--- END SKILL ---"
+            ),
+        }
+        for skill in matching
+    ]
+
+
+def build_system_prompt(tools: list[Tool], role: str = "main") -> str:
     """Build the agent system prompt, including a description of *tools*.
 
     Args:
         tools: The tool instances available to the agent.  Each tool's
             name and description are listed so the model knows what it
             can call.
+        role: ``"main"`` for the primary agent, ``"sub_agent"`` for a
+            spawned sub-agent.  Sub-agents get the same full prompt
+            (previously they ran on a four-sentence stub and behaved
+            noticeably worse) plus a short section on reporting back.
 
     Returns:
         The full system prompt string.
     """
     tool_section = "\n".join(f"- {t.name}: {t.description}" for t in tools)
     cwd = os.getcwd()
+
+    sub_agent_section = ""
+    if role == "sub_agent":
+        sub_agent_section = (
+            "\nSUB-AGENT MODE:\n"
+            "You are a sub-agent spawned by a main agent to complete one "
+            "specific task.\n"
+            "- Focus ONLY on the assigned task. Do not expand its scope.\n"
+            "- Your final message is returned to the main agent as the "
+            "task result. Make it a clear, self-contained report of what "
+            "you did, what you found, and any files you changed.\n"
+            "- You cannot ask the user questions; make reasonable "
+            "assumptions and note them in your report.\n"
+        )
 
     return (
         "You are a coding agent — an autonomous AI assistant that completes tasks by "
@@ -95,4 +153,5 @@ def build_system_prompt(tools: list[Tool]) -> str:
         "can be answered by running a command or reading a file, ALWAYS use a tool "
         "(bash, read, glob, grep) to get the real answer. NEVER guess or say "
         "'I cannot access your system'. You ARE running on their system.\n"
+        f"{sub_agent_section}"
     )

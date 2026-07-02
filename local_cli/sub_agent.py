@@ -23,11 +23,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from local_cli.providers.base import (
-    LLMProvider,
-    ProviderRequestError,
-    ProviderStreamError,
-)
+from local_cli.agent import run_agent
+from local_cli.harness import AgentEvent
+from local_cli.prompts import build_system_prompt
+from local_cli.providers.base import LLMProvider
 from local_cli.tools.base import Tool
 
 
@@ -99,43 +98,9 @@ class SubAgentResult:
 # ---------------------------------------------------------------------------
 
 
-# Default system prompt for sub-agents.
-_SUB_AGENT_SYSTEM_PROMPT = (
-    "You are a sub-agent working on a specific task. "
-    "Complete the task thoroughly and return a clear, concise result. "
-    "You have access to tools to help you accomplish the task. "
-    "Focus only on the assigned task."
-)
-
 # Default timeout for sub-agent execution (seconds).
 _DEFAULT_TIMEOUT = 300.0
 
-# ---------------------------------------------------------------------------
-# Retry constants for 503/overload handling
-# ---------------------------------------------------------------------------
-
-# Maximum number of retries on provider overload (HTTP 503).
-_RETRY_MAX_ATTEMPTS = 3
-
-# Base delay in seconds for exponential backoff (1s, 2s, 4s).
-_RETRY_BASE_DELAY = 1.0
-
-
-def _is_overloaded_error(exc: Exception) -> bool:
-    """Check if an exception indicates a provider overload (HTTP 503).
-
-    Inspects the exception message for common overload indicators
-    such as HTTP 503 status codes and "Service Unavailable" messages.
-    Used to decide whether to retry a failed provider request.
-
-    Args:
-        exc: The exception to check.
-
-    Returns:
-        ``True`` if the error indicates a 503 or overload condition.
-    """
-    msg = str(exc).lower()
-    return "503" in msg or "service unavailable" in msg or "overloaded" in msg
 
 
 class SubAgent:
@@ -251,7 +216,8 @@ class SubAgent:
 
         # Initialize the message list with system prompt and user task.
         self._messages = [
-            {"role": "system", "content": _SUB_AGENT_SYSTEM_PROMPT},
+            {"role": "system",
+             "content": build_system_prompt(self._tools, role="sub_agent")},
             {"role": "user", "content": self._prompt},
         ]
         self._tool_calls_count = 0
@@ -309,11 +275,21 @@ class SubAgent:
     # ------------------------------------------------------------------
 
     def _run_agent_loop(self, start_time: float) -> str:
-        """Run the silent agent loop until completion or timeout.
+        """Run the unified agent loop silently, with timeout checks.
 
-        This is a simplified, silent variant of the main
-        :func:`~local_cli.agent.agent_loop` that does not write to
-        stdout/stderr and does not use spinners.
+        Delegates to :func:`local_cli.agent.run_agent` — the same core
+        loop (and deterministic harness interventions: tool-name
+        resolution, argument normalization, text tool-call rescue, loop
+        detection, overload retry, compaction) used by the CLI, the
+        JSON-line server, and the web monitor.  Previously this was a
+        fourth, simplified re-implementation that lacked all of those.
+
+        The timeout is enforced through the event callback: every loop
+        event (per stream chunk, per tool call) re-checks the clock, so
+        an exceeded timeout raises :class:`_SubAgentTimeout` out of the
+        loop and :meth:`run` converts it to a ``timeout`` status.
+        Provider errors propagate (``raise_provider_errors=True``) so
+        :meth:`run` reports them as an ``error`` status, as before.
 
         Args:
             start_time: Monotonic timestamp of when execution started,
@@ -325,184 +301,20 @@ class SubAgent:
         Raises:
             _SubAgentTimeout: If the timeout is exceeded.
         """
-        tool_map: dict[str, Tool] = {t.name: t for t in self._tools}
-        tool_defs: list[dict[str, Any]] = self._provider.format_tools(
-            self._tools,
-        )
 
-        final_content = ""
-
-        while True:
-            # Check timeout before each LLM call.
+        def on_event(event: AgentEvent) -> None:
             self._check_timeout(start_time)
-
-            # Send messages to the LLM with retry on 503 overload.
-            full_response = self._chat_with_retry(
-                tool_defs, start_time,
-            )
-
-            # Check timeout after response collection (streaming can
-            # take a long time).
-            self._check_timeout(start_time)
-
-            # Append the assistant message to the conversation history.
-            assistant_message = full_response["message"]
-            self._messages.append(assistant_message)
-            final_content = assistant_message.get("content", "")
-
-            # Check for tool calls.  If none, we're done.
-            tool_calls = assistant_message.get("tool_calls", [])
-            if not tool_calls:
-                break
-
-            # Execute each tool call and append results.
-            for tc in tool_calls:
-                self._check_timeout(start_time)
-
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                arguments = func.get("arguments", {})
-
-                # Ollama sometimes returns arguments as a JSON string.
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json.loads(arguments)
-                    except (json.JSONDecodeError, ValueError):
-                        arguments = {}
-
-                tool_call_id = tc.get("id")
-                tool = tool_map.get(tool_name)
-
-                if tool is None:
-                    result = f"Error: unknown tool '{tool_name}'"
-                else:
-                    try:
-                        result = tool.execute(**arguments)
-                    except Exception as exc:
-                        result = f"Error: {type(exc).__name__}: {exc}"
-
+            if event.kind == "tool_result":
                 self._tool_calls_count += 1
 
-                # Append tool result as a 'tool' role message.
-                tool_msg: dict[str, Any] = {
-                    "role": "tool",
-                    "tool_name": tool_name,
-                    "content": result,
-                }
-                if tool_call_id is not None:
-                    tool_msg["tool_call_id"] = tool_call_id
-                self._messages.append(tool_msg)
-
-        return final_content
-
-    def _chat_with_retry(
-        self,
-        tool_defs: list[dict[str, Any]],
-        start_time: float,
-    ) -> dict[str, Any]:
-        """Call provider.chat_stream with retry on overload (HTTP 503).
-
-        Retries up to ``_RETRY_MAX_ATTEMPTS`` times with exponential
-        backoff (1s, 2s, 4s) when the provider returns an overload
-        error (HTTP 503 / Service Unavailable).  Non-overload request
-        errors are raised immediately without retry.
-
-        Args:
-            tool_defs: Tool definitions in the provider's format.
-            start_time: Monotonic timestamp for timeout checking
-                between retries.
-
-        Returns:
-            The assembled response dict from the silent collector.
-
-        Raises:
-            ProviderRequestError: If retries are exhausted or the
-                error is not an overload condition.
-            ProviderStreamError: If a mid-stream error occurs (not
-                retried).
-            _SubAgentTimeout: If the timeout is exceeded during
-                retry backoff.
-        """
-        for attempt in range(_RETRY_MAX_ATTEMPTS + 1):
-            if attempt > 0:
-                # Exponential backoff: 1s, 2s, 4s.
-                delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                time.sleep(delay)
-                self._check_timeout(start_time)
-            try:
-                stream = self._provider.chat_stream(
-                    self._model,
-                    self._messages,
-                    tools=tool_defs,
-                )
-                return self._collect_silent_response(stream)
-            except ProviderRequestError as exc:
-                if not _is_overloaded_error(exc):
-                    raise
-                if attempt == _RETRY_MAX_ATTEMPTS:
-                    raise
-                # Will retry on next iteration.
-
-        # Unreachable -- the loop always returns or raises.
-        raise ProviderRequestError(  # pragma: no cover
-            "Provider overloaded after retries"
+        return run_agent(
+            self._provider,
+            self._model,
+            self._tools,
+            self._messages,
+            emit=on_event,
+            raise_provider_errors=True,
         )
-
-    @staticmethod
-    def _collect_silent_response(
-        stream: Any,
-    ) -> dict[str, Any]:
-        """Accumulate a streaming response silently (no stdout/stderr).
-
-        Silent variant of
-        :func:`~local_cli.agent.collect_streaming_response` that
-        accumulates content without writing to stdout, creating
-        spinners, or printing debug output.
-
-        Args:
-            stream: A generator yielding streaming chunks from the
-                provider.
-
-        Returns:
-            A dictionary with the assembled response in the same
-            format as :func:`collect_streaming_response`.
-        """
-        content_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        last_chunk: dict[str, Any] = {}
-
-        try:
-            for chunk in stream:
-                last_chunk = chunk
-                message = chunk.get("message", {})
-
-                delta = message.get("content", "")
-                if delta:
-                    content_parts.append(delta)
-
-                chunk_tool_calls = message.get("tool_calls")
-                if chunk_tool_calls:
-                    tool_calls.extend(chunk_tool_calls)
-
-        except KeyboardInterrupt:
-            # Propagate interrupt -- the caller (run()) handles it.
-            raise
-        except ProviderStreamError:
-            # Stream error -- re-raise for the caller to handle.
-            raise
-
-        # Build the assembled response.
-        assembled_message: dict[str, Any] = {
-            "role": "assistant",
-            "content": "".join(content_parts),
-        }
-        if tool_calls:
-            assembled_message["tool_calls"] = tool_calls
-
-        result: dict[str, Any] = dict(last_chunk)
-        result["message"] = assembled_message
-
-        return result
 
     # ------------------------------------------------------------------
     # Internal helpers

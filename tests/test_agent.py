@@ -540,6 +540,8 @@ class TestAgentLoopWithToolCalls(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -574,6 +576,8 @@ class TestAgentLoopWithToolCalls(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -643,6 +647,8 @@ class TestAgentLoopErrorHandling(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -672,6 +678,8 @@ class TestAgentLoopErrorHandling(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -736,6 +744,8 @@ class TestAgentLoopErrorHandling(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -837,6 +847,8 @@ class TestAgentLoopCacheHit(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -865,6 +877,8 @@ class TestAgentLoopCacheHit(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -905,6 +919,8 @@ class TestAgentLoopCacheMiss(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -933,6 +949,8 @@ class TestAgentLoopCacheMiss(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -961,6 +979,8 @@ class TestAgentLoopCacheMiss(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -1048,6 +1068,8 @@ class TestAgentLoopCacheNonCacheable(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -1070,6 +1092,8 @@ class TestAgentLoopCacheNonCacheable(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -1116,6 +1140,8 @@ class TestAgentLoopCacheInvalidation(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [
@@ -1147,6 +1173,8 @@ class TestAgentLoopCacheInvalidation(unittest.TestCase):
         client.chat_stream.side_effect = [
             iter(first_chunks),
             iter(second_chunks),
+            # Reply to a possible error-stop push-back (unused otherwise).
+            iter(_make_chunks(["Done."])),
         ]
 
         messages: list[dict[str, Any]] = [

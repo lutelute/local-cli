@@ -149,6 +149,37 @@ class TestRunAgent(unittest.TestCase):
         self.assertEqual(len(nudges), 1)
         self.assertEqual(provider.chat_stream.call_count, 2)
 
+    def test_matching_skills_injected_before_user_message(self) -> None:
+        """The web monitor injects matching skills like the CLI does."""
+
+        class _Skill:
+            name = "review-guide"
+            content = "Check error handling."
+
+        class _Loader:
+            def get_matching_skills(self, text):
+                return [_Skill()] if "review" in text else []
+
+        turn1 = [{"message": {"content": "sure"}, "done": True}]
+        provider = self._make_provider([turn1])
+
+        eq: queue.Queue = queue.Queue()
+        messages: list = []
+        _run_agent(
+            provider, Config(), [], [], {}, "review my code", eq, messages,
+            _Loader(),
+        )
+
+        skill_idx = next(
+            i for i, m in enumerate(messages)
+            if "review-guide" in m.get("content", "")
+        )
+        user_idx = next(
+            i for i, m in enumerate(messages) if m.get("role") == "user"
+        )
+        self.assertEqual(messages[skill_idx]["role"], "system")
+        self.assertLess(skill_idx, user_idx)
+
 
 if __name__ == "__main__":
     unittest.main()

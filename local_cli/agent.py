@@ -10,11 +10,37 @@ import json
 import re
 import sys
 import time
-from typing import Any, Generator
+from typing import Any, Callable, Generator
 
+from local_cli.harness import (
+    DISCOVERY_TOOLS,
+    MUTATION_TOOLS,
+    AgentEvent,
+    EmitFn,
+    HarnessConfig,
+    LoopDetector,
+    TodoReminder,
+    apply_summary,
+    build_summary_request,
+    compaction_bounds,
+    deferred_write_result,
+    empty_response_message,
+    error_stop_message,
+    extract_text_tool_calls,
+    is_tools_unsupported_error,
+    last_tool_result_errored,
+    loop_break_message,
+    loop_warning_message,
+    null_emit,
+    step_limit_message,
+    text_tool_nudge_message,
+    text_tools_fallback_message,
+    verify_file_write,
+)
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
 from local_cli.providers.base import (
     LLMProvider,
+    ProviderConnectionError,
     ProviderRequestError,
     ProviderStreamError,
 )
@@ -241,79 +267,6 @@ def collect_streaming_response(
             tracker.record_from_claude(result)
         else:
             tracker.record_from_ollama(result)
-
-    return result
-
-
-def _collect_silent_response(
-    stream: Generator[dict[str, Any], None, None],
-) -> dict[str, Any]:
-    """Accumulate a streaming chat response silently (no I/O).
-
-    Silent variant of :func:`collect_streaming_response` that accumulates
-    content and tool calls without writing to stdout, creating spinners,
-    or printing debug output.  Designed for sub-agent execution in threads
-    where all output must be captured, not printed.
-
-    Args:
-        stream: A generator yielding parsed streaming chunks from the
-            provider (same format as :func:`collect_streaming_response`).
-
-    Returns:
-        A dictionary representing the full response, in the same format
-        as :func:`collect_streaming_response`::
-
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "<accumulated text>",
-                    "tool_calls": [...]  # only if present
-                },
-                "done": True,
-                ...  # other fields from the final chunk
-            }
-
-    Raises:
-        ProviderStreamError: Re-raised if the stream yields an error.
-        KeyboardInterrupt: Re-raised if the stream is interrupted.
-    """
-    content_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    last_chunk: dict[str, Any] = {}
-
-    try:
-        for chunk in stream:
-            last_chunk = chunk
-            message = chunk.get("message", {})
-
-            # Accumulate content deltas silently (no stdout).
-            delta = message.get("content", "")
-            if delta:
-                content_parts.append(delta)
-
-            # Accumulate tool calls.
-            chunk_tool_calls = message.get("tool_calls")
-            if chunk_tool_calls:
-                tool_calls.extend(chunk_tool_calls)
-
-    except KeyboardInterrupt:
-        # Re-raise -- let the caller decide how to handle.
-        raise
-    except ProviderStreamError:
-        # Re-raise -- let the caller decide how to handle.
-        raise
-
-    # Build the assembled response.
-    assembled_message: dict[str, Any] = {
-        "role": "assistant",
-        "content": "".join(content_parts),
-    }
-    if tool_calls:
-        assembled_message["tool_calls"] = tool_calls
-
-    # Merge the final chunk's top-level fields with our assembled message.
-    result: dict[str, Any] = dict(last_chunk)
-    result["message"] = assembled_message
 
     return result
 
@@ -865,276 +818,7 @@ _TOOL_NUDGE_MESSAGE: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# Agent loop
-# ---------------------------------------------------------------------------
-
-
-def agent_loop(
-    client: LLMProvider,
-    model: str,
-    tools: list[Tool],
-    messages: list[dict[str, Any]],
-    debug: bool = False,
-    cache: ToolCache | None = None,
-    tracker: TokenTracker | None = None,
-    options: dict[str, Any] | None = None,
-    think: bool | None = None,
-) -> None:
-    """Core agent loop: prompt LLM, execute tool calls, repeat.
-
-    Sends the conversation *messages* to the LLM via streaming chat.  If
-    the LLM responds with tool calls, each tool is executed and the results
-    are appended to *messages* as ``role: "tool"`` entries.  The loop
-    continues until the LLM responds without any tool calls.
-
-    The *messages* list is mutated in place -- each assistant response and
-    tool result is appended so the caller retains the full conversation
-    history.
-
-    Tool result messages include a ``tool_call_id`` field when the tool
-    call has an ``id`` (critical for providers like Claude that require
-    ``tool_use_id`` in subsequent tool result messages).
-
-    Args:
-        client: An :class:`~local_cli.providers.base.LLMProvider` instance
-            (or any object with a compatible ``chat_stream(model, messages,
-            tools=...)`` method -- including :class:`OllamaClient` which
-            is accepted via duck typing for backward compatibility).
-        model: The model name to use (e.g. ``"qwen3:8b"``).
-        tools: A list of :class:`Tool` instances available for the LLM.
-        messages: The conversation history (mutated in place).
-        debug: If True, print extra diagnostic information to stderr.
-        cache: An optional :class:`ToolCache` instance for caching results
-            of cacheable (idempotent) tools.  When provided, the agent
-            checks the cache before executing cacheable tools and stores
-            results after successful execution.  Pass ``None`` to disable
-            caching (the default).
-        tracker: An optional :class:`TokenTracker` instance for recording
-            token usage from each LLM call.  When provided, token counts
-            are extracted from each streaming response and accumulated
-            for the session.  Pass ``None`` to disable tracking (the
-            default).
-        options: Optional inference parameters to pass to the LLM provider.
-            When provided, these are forwarded to ``client.chat_stream()``
-            as the ``options`` keyword argument.  If the dict contains a
-            ``num_ctx`` key, the context compaction threshold is
-            dynamically adjusted to 75% of that value.
-
-    Raises:
-        KeyboardInterrupt: Propagated if the user presses Ctrl+C during
-            tool execution (streaming interrupts are handled gracefully).
-    """
-    tool_map: dict[str, Tool] = {t.name: t for t in tools}
-    tool_defs: list[dict[str, Any]] = [t.to_ollama_tool() for t in tools]
-
-    # Compute a dynamic compaction token threshold when the caller
-    # specifies a context window size via options["num_ctx"].  Use 75%
-    # of the context window so compaction kicks in before hitting the
-    # hard limit.
-    compact_token_threshold: int | None = None
-    if options and "num_ctx" in options:
-        compact_token_threshold = int(options["num_ctx"] * 0.75)
-        if debug:
-            sys.stderr.write(
-                f"[debug] Dynamic compaction threshold: "
-                f"{compact_token_threshold} tokens "
-                f"(75% of num_ctx={options['num_ctx']})\n"
-            )
-
-    nudged = False  # whether we've already nudged "use the tools" this turn
-
-    while True:
-        # ---------------------------------------------------------------
-        # 0. Compact conversation history if thresholds are exceeded.
-        # ---------------------------------------------------------------
-        if _needs_compaction(messages, token_threshold=compact_token_threshold):
-            compact_messages(messages, debug=debug)
-
-        # ---------------------------------------------------------------
-        # 1. Send messages to the LLM and collect the streaming response.
-        # ---------------------------------------------------------------
-        if debug:
-            sys.stderr.write(
-                f"[debug] Sending {len(messages)} messages to {model}\n"
-            )
-
-        thinking_spinner = Spinner("Thinking")
-        thinking_spinner.start()
-
-        try:
-            chat_kwargs: dict[str, Any] = {"tools": tool_defs}
-            if options is not None:
-                chat_kwargs["options"] = options
-            if think is not None:
-                chat_kwargs["think"] = think
-            stream = client.chat_stream(model, messages, **chat_kwargs)
-            full_response = collect_streaming_response(
-                stream, spinner=thinking_spinner, tracker=tracker,
-            )
-        except ProviderStreamError as exc:
-            thinking_spinner.stop()
-            # Use provider-specific prefix when possible for backward
-            # compatibility (existing tests assert "Error from Ollama").
-            if isinstance(exc, OllamaStreamError):
-                prefix = "Error from Ollama"
-            else:
-                prefix = "Error from provider"
-            sys.stderr.write(f"{prefix}: {exc}\n")
-            messages.append({
-                "role": "assistant",
-                "content": f"[{prefix}: {exc}]",
-            })
-            break
-        except KeyboardInterrupt:
-            thinking_spinner.stop()
-            sys.stderr.write("\nInterrupted.\n")
-            break
-
-        # ---------------------------------------------------------------
-        # 2. Append the assistant message to the conversation history.
-        #    Thinking content is intentionally excluded — it lives in
-        #    full_response["thinking"] (set by collect_streaming_response)
-        #    and must NOT be part of the message dict appended here, to
-        #    avoid wasting context window space on internal reasoning.
-        # ---------------------------------------------------------------
-        assistant_message = full_response["message"]
-        # Defensive: strip any "thinking" key that may have leaked into
-        # the message dict (should not happen, but belt-and-suspenders).
-        if "thinking" in assistant_message:
-            assistant_message = {
-                k: v for k, v in assistant_message.items() if k != "thinking"
-            }
-        messages.append(assistant_message)
-
-        # Log thinking content in debug mode for diagnostics.
-        thinking_content = full_response.get("thinking", "")
-        if debug and thinking_content:
-            # Show a truncated preview of the thinking content.
-            preview = _truncate(thinking_content, max_len=500)
-            sys.stderr.write(f"[debug] Thinking: {preview}\n")
-
-        if debug:
-            tc_count = len(assistant_message.get("tool_calls", []))
-            sys.stderr.write(
-                f"[debug] Assistant responded: "
-                f"{len(assistant_message.get('content', ''))} chars, "
-                f"{tc_count} tool call(s)\n"
-            )
-
-        # ---------------------------------------------------------------
-        # 3. Check for tool calls.  If none, we may be done -- but first
-        #    nudge once if the model printed code instead of using a tool.
-        # ---------------------------------------------------------------
-        tool_calls = assistant_message.get("tool_calls", [])
-        if not tool_calls:
-            if _should_nudge_to_use_tools(messages, assistant_message, nudged):
-                messages.append(dict(_TOOL_NUDGE_MESSAGE))
-                nudged = True
-                continue
-            break
-
-        # ---------------------------------------------------------------
-        # 4. Execute each tool call and append results.
-        # ---------------------------------------------------------------
-        for tc in tool_calls:
-            tool_name, arguments, tool_call_id = parse_tool_call(tc)
-            tool_name = resolve_tool_name(tool_name, tool_map) or tool_name
-            arguments = normalize_arguments(tool_name, arguments)
-
-            tool = tool_map.get(tool_name)
-            if tool is None:
-                result = f"Error: unknown tool '{tool_name}'"
-                sys.stderr.write(f"  Unknown tool: {tool_name}\n")
-            else:
-                # Check cache for cacheable tools before execution.
-                cached_result: str | None = None
-                if cache is not None and tool.cacheable:
-                    cached_result = cache.get(tool_name, arguments)
-
-                if cached_result is not None:
-                    # Cache hit — skip execution entirely.
-                    result = cached_result
-                    if debug:
-                        sys.stderr.write(
-                            f"  [debug] cache hit: {tool_name}\n"
-                        )
-                else:
-                    if cache is not None and tool.cacheable and debug:
-                        sys.stderr.write(
-                            f"  [debug] cache miss: {tool_name}\n"
-                        )
-
-                    tool_spinner = Spinner(f"Running {tool_name}")
-                    tool_spinner.start()
-
-                    try:
-                        result = _execute_tool(tool, arguments, debug=debug)
-                        tool_spinner.stop()
-                    except KeyboardInterrupt:
-                        tool_spinner.stop()
-                        result = "Error: tool execution interrupted by user."
-                        sys.stderr.write(
-                            f"  Tool {tool_name} interrupted.\n"
-                        )
-                        tool_msg: dict[str, Any] = {
-                            "role": "tool",
-                            "tool_name": tool_name,
-                            "content": result,
-                        }
-                        if tool_call_id is not None:
-                            tool_msg["tool_call_id"] = tool_call_id
-                        messages.append(tool_msg)
-                        raise
-
-                    # Store successful results in cache for cacheable tools.
-                    if (
-                        cache is not None
-                        and tool.cacheable
-                        and not result.startswith("Error:")
-                    ):
-                        file_path = _extract_file_path(
-                            tool_name, arguments,
-                        )
-                        cache.put(
-                            tool_name, arguments, result,
-                            file_path=file_path,
-                        )
-
-                    # Invalidate cache when a mutating tool modifies a file.
-                    if (
-                        cache is not None
-                        and not tool.cacheable
-                        and not result.startswith("Error:")
-                    ):
-                        fp = arguments.get("file_path")
-                        if isinstance(fp, str):
-                            cache.invalidate_file(fp)
-
-                # Show a truncated preview of the result to the user.
-                preview = _truncate(
-                    result.replace("\n", " ").strip(),
-                )
-                sys.stderr.write(f"  Result: {preview}\n")
-
-            # Append tool result as a 'tool' role message.
-            # Include tool_call_id when provided (critical for Claude
-            # provider which requires tool_use_id in tool results).
-            tool_msg = {
-                "role": "tool",
-                "tool_name": tool_name,
-                "content": result,
-            }
-            if tool_call_id is not None:
-                tool_msg["tool_call_id"] = tool_call_id
-            messages.append(tool_msg)
-
-        # ---------------------------------------------------------------
-        # 5. Loop back to send tool results to the LLM.
-        # ---------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Silent agent loop (for sub-agents)
+# Unified agent loop (the harness core)
 # ---------------------------------------------------------------------------
 
 # Maximum number of retries on provider overload (HTTP 503).
@@ -1150,7 +834,7 @@ def _is_overloaded_error(exc: Exception) -> bool:
     Inspects the exception message for common overload indicators
     such as HTTP 503 status codes and "Service Unavailable" messages.
     Used to decide whether to retry a failed provider request in
-    :func:`sub_agent_loop`.
+    :func:`run_agent`.
 
     Args:
         exc: The exception to check.
@@ -1162,185 +846,975 @@ def _is_overloaded_error(exc: Exception) -> bool:
     return "503" in msg or "service unavailable" in msg or "overloaded" in msg
 
 
-def _chat_with_retry_silent(
+def _collect_stream_emitting(
+    stream: Generator[dict[str, Any], None, None],
+    emit: EmitFn,
+    tracker: TokenTracker | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    reraise_interrupt: bool = False,
+) -> dict[str, Any]:
+    """Accumulate a streaming chat response, emitting deltas as events.
+
+    Event-driven variant of :func:`collect_streaming_response`: instead
+    of writing tokens to stdout, each thinking/content delta is emitted
+    as an :class:`~local_cli.harness.AgentEvent` so the front-end decides
+    how (and whether) to render it.
+
+    A ``KeyboardInterrupt`` during streaming emits an ``interrupted``
+    event and returns the partial response, mirroring the classic
+    collector's behaviour.
+
+    Args:
+        stream: A generator yielding parsed streaming chunks.
+        emit: The event callback.
+        tracker: Optional :class:`TokenTracker` for usage recording.
+        should_stop: Optional callback checked per chunk; when it
+            returns ``True`` streaming stops and the partial response
+            is returned (used by the JSON-line server's stop button).
+
+    Returns:
+        The assembled response dict, in the same shape as
+        :func:`collect_streaming_response` (including a top-level
+        ``"thinking"`` key when the model produced any).
+
+    Raises:
+        ProviderStreamError: Re-raised on a mid-stream provider error.
+    """
+    content_parts: list[str] = []
+    thinking_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    last_chunk: dict[str, Any] = {}
+
+    try:
+        for chunk in stream:
+            if should_stop is not None and should_stop():
+                break
+            last_chunk = chunk
+            message = chunk.get("message", {})
+
+            thinking_delta = message.get("thinking", "")
+            if thinking_delta:
+                thinking_parts.append(thinking_delta)
+                emit(AgentEvent("thinking_delta", {"text": thinking_delta}))
+
+            delta = message.get("content", "")
+            if delta:
+                content_parts.append(delta)
+                emit(AgentEvent("content_delta", {"text": delta}))
+
+            chunk_tool_calls = message.get("tool_calls")
+            if chunk_tool_calls:
+                tool_calls.extend(chunk_tool_calls)
+
+    except KeyboardInterrupt:
+        if reraise_interrupt:
+            # Sub-agent mode: the caller owns interrupt semantics.
+            raise
+        # User interrupted streaming.  Keep what we have so far.
+        emit(AgentEvent("interrupted", {"where": "stream"}))
+
+    assembled_message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    if tool_calls:
+        assembled_message["tool_calls"] = tool_calls
+
+    result: dict[str, Any] = dict(last_chunk)
+    result["message"] = assembled_message
+    if thinking_parts:
+        result["thinking"] = "".join(thinking_parts)
+
+    if tracker is not None:
+        if "usage" in result:
+            tracker.record_from_claude(result)
+        else:
+            tracker.record_from_ollama(result)
+
+    return result
+
+
+def _stream_with_retry(
     provider: LLMProvider,
     model: str,
     messages: list[dict[str, Any]],
-    tool_defs: list[dict[str, Any]],
+    chat_kwargs: dict[str, Any],
+    emit: EmitFn,
+    retry_on_overload: bool,
+    tracker: TokenTracker | None,
+    should_stop: Callable[[], bool] | None = None,
+    reraise_interrupt: bool = False,
 ) -> dict[str, Any]:
-    """Call provider.chat_stream with retry on overload (HTTP 503).
+    """Call ``provider.chat_stream`` with retry on overload (HTTP 503).
 
-    Silent variant (no I/O) suitable for sub-agent execution in
-    threads.  Retries up to ``_RETRY_MAX_ATTEMPTS`` times with
-    exponential backoff (1s, 2s, 4s) when the provider returns an
-    overload error.  Non-overload request errors are raised
-    immediately without retry.
+    Retries up to ``_RETRY_MAX_ATTEMPTS`` times with exponential backoff
+    (1s, 2s, 4s) when the provider raises an overload error *before*
+    streaming starts.  Mid-stream errors are never retried (partial
+    output may already have been emitted).
 
     Args:
-        provider: The LLM provider instance.
+        provider: The LLM provider (or duck-typed client).
         model: Model name for the chat request.
         messages: Conversation history.
-        tool_defs: Tool definitions in the provider's format.
+        chat_kwargs: Extra keyword arguments for ``chat_stream``.
+        emit: The event callback (``retry`` events are emitted here).
+        retry_on_overload: When ``False``, the first error propagates.
+        tracker: Optional token tracker, forwarded to the collector.
 
     Returns:
-        The assembled response dict from the silent collector.
+        The assembled response dict.
 
     Raises:
-        ProviderRequestError: If retries are exhausted or the error
-            is not an overload condition.
-        ProviderStreamError: If a mid-stream error occurs (not
-            retried).
+        ProviderRequestError: If retries are exhausted or the error is
+            not an overload condition.
+        ProviderStreamError: On a mid-stream error (never retried).
     """
-    for attempt in range(_RETRY_MAX_ATTEMPTS + 1):
+    attempts = _RETRY_MAX_ATTEMPTS if retry_on_overload else 0
+    for attempt in range(attempts + 1):
         if attempt > 0:
-            # Exponential backoff: 1s, 2s, 4s.
             delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            emit(AgentEvent("retry", {"attempt": attempt, "delay": delay}))
             time.sleep(delay)
         try:
-            stream = provider.chat_stream(model, messages, tools=tool_defs)
-            return _collect_silent_response(stream)
+            stream = provider.chat_stream(model, messages, **chat_kwargs)
+            return _collect_stream_emitting(
+                stream, emit, tracker=tracker, should_stop=should_stop,
+                reraise_interrupt=reraise_interrupt,
+            )
         except ProviderRequestError as exc:
-            if not _is_overloaded_error(exc):
+            if not _is_overloaded_error(exc) or attempt == attempts:
                 raise
-            if attempt == _RETRY_MAX_ATTEMPTS:
-                raise
-            # Will retry on next iteration.
+            # Will retry on the next iteration.
 
-    # Unreachable -- the loop always returns or raises.
-    raise ProviderRequestError(  # pragma: no cover
+    raise ProviderRequestError(  # pragma: no cover -- unreachable
         "Provider overloaded after retries"
     )
 
 
-def sub_agent_loop(
+def _summary_compact(
+    provider: LLMProvider,
+    model: str,
+    messages: list[dict[str, Any]],
+    keep_recent: int,
+    emit: EmitFn,
+    debug: bool = False,
+) -> None:
+    """Compact history by asking the model to summarize the older span.
+
+    Replaces everything between the leading system messages and the
+    *keep_recent* most recent messages with a single summary message.
+    Falls back to the classic in-place truncation
+    (:func:`compact_messages`) when there is nothing to summarize, the
+    summarizer call fails, or it returns an empty summary — compaction
+    must never leave the history over-threshold.
+
+    Args:
+        provider: The LLM provider used for the summarizer call.
+        model: Model name for the summarizer call.
+        messages: The conversation history (mutated in place).
+        keep_recent: Number of trailing messages preserved verbatim.
+        emit: The event callback (``compaction`` events).
+        debug: Forwarded to the truncation fallback.
+    """
+    before_tokens = _estimate_tokens(messages)
+    bounds = compaction_bounds(messages, keep_recent=keep_recent)
+    summary = ""
+    if bounds is not None:
+        system_end, recent_start = bounds
+        try:
+            request = build_summary_request(messages[system_end:recent_start])
+            stream = provider.chat_stream(model, request)
+            response = _collect_stream_emitting(stream, null_emit)
+            summary = (response.get("message") or {}).get("content", "").strip()
+        except Exception:
+            summary = ""
+
+    if bounds is not None and summary:
+        system_end, recent_start = bounds
+        apply_summary(messages, summary, system_end, recent_start)
+        mode = "summarize"
+    else:
+        compact_messages(messages, debug=debug)
+        mode = "truncate"
+
+    emit(AgentEvent("compaction", {
+        "mode": mode,
+        "before_tokens": before_tokens,
+        "after_tokens": _estimate_tokens(messages),
+    }))
+
+
+def _tool_message(
+    tool_name: str,
+    result: str,
+    tool_call_id: str | None,
+) -> dict[str, Any]:
+    """Build a ``role: "tool"`` message, attaching the id when present.
+
+    The ``tool_call_id`` is critical for providers like Claude that
+    require ``tool_use_id`` on tool results.
+    """
+    msg: dict[str, Any] = {
+        "role": "tool",
+        "tool_name": tool_name,
+        "content": result,
+    }
+    if tool_call_id is not None:
+        msg["tool_call_id"] = tool_call_id
+    return msg
+
+
+def run_agent(
     provider: LLMProvider,
     model: str,
     tools: list[Tool],
     messages: list[dict[str, Any]],
+    *,
+    emit: EmitFn = null_emit,
+    harness: HarnessConfig | None = None,
+    cache: ToolCache | None = None,
+    tracker: TokenTracker | None = None,
+    options: dict[str, Any] | None = None,
+    think: bool | None = None,
+    chat_extra: dict[str, Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    raise_provider_errors: bool = False,
     debug: bool = False,
 ) -> str:
-    """Silent agent loop for sub-agent execution.
+    """The unified agent loop: prompt the LLM, run tools, repeat.
 
-    Structurally identical to :func:`agent_loop` but operates silently:
-    no ``sys.stdout`` / ``sys.stderr`` output and no spinners.  Uses
-    :func:`_collect_silent_response` for response accumulation and
-    ``provider.format_tools(tools)`` for tool definitions (provider-
-    agnostic, unlike :func:`agent_loop` which uses ``to_ollama_tool()``).
+    This is the single core loop shared by every front-end — the CLI
+    REPL, the JSON-line server, the web monitor, and sub-agents.  The
+    loop performs no I/O of its own; every observable moment is emitted
+    as an :class:`~local_cli.harness.AgentEvent` through *emit*, and each
+    front-end renders the events it cares about.
 
-    The *messages* list is mutated in place -- each assistant response and
-    tool result is appended so the caller retains the full conversation
-    history.
+    On top of the classic loop it layers the deterministic harness
+    interventions that let small local models sustain long agentic
+    sessions (see :mod:`local_cli.harness`):
 
-    Returns the final assistant message content string instead of
-    ``None``.
+    - **Text tool-call rescue** — when the model wrote its tool call as
+      text (``<tool_call>`` tags, fenced JSON, bare JSON) instead of a
+      structured call, the call is parsed and executed anyway.
+    - **Loop detection** — repeated identical calls first draw a
+      corrective reminder, then pause tool access for a final summary.
+    - **Post-write verification** — ``.py``/``.json`` files are
+      syntax-checked immediately after write/edit and a warning is
+      appended to the tool result on failure.
+    - **Todo staleness reminders** — a stale todo list is re-surfaced
+      so multi-step work is not silently abandoned.
+    - **Step limit** — after ``max_iterations`` the model gets one final
+      tool-free turn to summarize.
+    - **Overload retry** — HTTP 503s are retried with backoff.
+    - **Context compaction** — truncation (classic) or LLM
+      summarization with truncation fallback.
 
     Args:
         provider: An :class:`~local_cli.providers.base.LLMProvider`
-            instance.  Must be a **fresh** instance (not shared with
-            other agents) for thread safety.
+            instance (or any object with a compatible
+            ``chat_stream(model, messages, ...)`` method — including
+            :class:`OllamaClient`, accepted via duck typing).  Providers
+            without ``format_tools`` fall back to the Ollama tool format.
         model: The model name to use (e.g. ``"qwen3:8b"``).
-        tools: A list of :class:`Tool` instances available for the LLM.
+        tools: The :class:`Tool` instances available to the LLM.
         messages: The conversation history (mutated in place).
-        debug: Unused (kept for signature parity with :func:`agent_loop`).
+        emit: Event callback; defaults to a no-op (silent execution).
+        harness: Harness intervention switches; defaults to
+            :class:`HarnessConfig`'s defaults.
+        cache: Optional :class:`ToolCache` for idempotent tools.
+        tracker: Optional :class:`TokenTracker` for usage recording.
+        options: Optional inference parameters forwarded to the
+            provider.  A ``num_ctx`` key dynamically sets the compaction
+            threshold to 75% of the context window.
+        think: Optional thinking-mode flag forwarded to the provider.
+        chat_extra: Extra keyword arguments merged into every
+            ``chat_stream`` call (e.g. ``keep_alive`` for Ollama).
+        should_stop: Optional callback polled at every loop checkpoint
+            (per stream chunk, per iteration, per tool call); when it
+            returns ``True`` the loop stops gracefully, emitting a
+            ``stopped`` event.  Used by GUI front-ends' stop buttons.
+        raise_provider_errors: When ``True``, provider errors propagate
+            to the caller instead of being recorded in the history —
+            sub-agents use this so their runner can report an error
+            status.
+        debug: Emit extra ``debug`` events (rendered on stderr by the
+            console emitter).
 
     Returns:
-        The final assistant message content string.  Returns an empty
-        string if the LLM produces no content (e.g. on error).
-    """
-    tool_map: dict[str, Tool] = {t.name: t for t in tools}
-    tool_defs: list[dict[str, Any]] = provider.format_tools(tools)
+        The final assistant message content (empty string when the
+        loop produced none).
 
+    Raises:
+        KeyboardInterrupt: Propagated if the user interrupts tool
+            execution (streaming interrupts are handled gracefully).
+        ProviderRequestError: Only when *raise_provider_errors* is set.
+        ProviderConnectionError: Only when *raise_provider_errors* is set.
+        ProviderStreamError: Only when *raise_provider_errors* is set.
+    """
+    hc = harness or HarnessConfig()
+    tool_map: dict[str, Tool] = {t.name: t for t in tools}
+    if isinstance(provider, LLMProvider):
+        tool_defs: list[dict[str, Any]] = provider.format_tools(tools)
+    else:
+        # Duck-typed clients (e.g. OllamaClient, mocks) lack
+        # format_tools; fall back to the Ollama function-call format.
+        tool_defs = [t.to_ollama_tool() for t in tools]
+
+    compact_token_threshold: int | None = None
+    if options and "num_ctx" in options:
+        compact_token_threshold = int(options["num_ctx"] * 0.75)
+        if debug:
+            emit(AgentEvent("debug", {"text": (
+                f"[debug] Dynamic compaction threshold: "
+                f"{compact_token_threshold} tokens "
+                f"(75% of num_ctx={options['num_ctx']})"
+            )}))
+
+    detector = LoopDetector() if hc.loop_detection else None
+    reminder = TodoReminder() if hc.todo_reminders else None
+    nudged = False  # whether we've already nudged "use the tools" this turn
+    error_nudged = False  # one push-back per turn for finishing on an error
+    empty_nudged = False  # one push-back per turn for an empty reply
+    force_final = False  # when True, the next LLM call gets no tools
+    tools_disabled = False  # endpoint rejected tools; text-driven fallback
     final_content = ""
+    iteration = 0
 
     while True:
-        # ---------------------------------------------------------------
-        # 0. Compact conversation history if thresholds are exceeded.
-        # ---------------------------------------------------------------
-        if _needs_compaction(messages):
-            compact_messages(messages, debug=False)
+        iteration += 1
 
         # ---------------------------------------------------------------
-        # 1. Send messages to the LLM and collect the response silently.
-        #    Retries on HTTP 503 overload with exponential backoff.
+        # 0. Front-end stop request (GUI stop button).
         # ---------------------------------------------------------------
+        if should_stop is not None and should_stop():
+            emit(AgentEvent("stopped", {"where": "loop"}))
+            break
+
+        # ---------------------------------------------------------------
+        # 0a. Step limit: pause tools and ask the model to wrap up.
+        # ---------------------------------------------------------------
+        if (
+            hc.max_iterations
+            and iteration > hc.max_iterations
+            and not force_final
+        ):
+            force_final = True
+            emit(AgentEvent("limit", {"iterations": hc.max_iterations}))
+            messages.append(step_limit_message(hc.max_iterations))
+
+        # ---------------------------------------------------------------
+        # 0b. Compact conversation history if thresholds are exceeded.
+        # ---------------------------------------------------------------
+        if _needs_compaction(messages, token_threshold=compact_token_threshold):
+            if hc.compact_mode == "summarize":
+                _summary_compact(
+                    provider, model, messages, hc.keep_recent, emit,
+                    debug=debug,
+                )
+            else:
+                compact_messages(messages, debug=debug)
+
+        # ---------------------------------------------------------------
+        # 0c. Todo staleness reminder.
+        # ---------------------------------------------------------------
+        if reminder is not None and not force_final:
+            reminder_text = reminder.check(iteration, tools)
+            if reminder_text:
+                messages.append({"role": "user", "content": reminder_text})
+                emit(AgentEvent("reminder", {"text": reminder_text}))
+
+        # ---------------------------------------------------------------
+        # 1. Send messages to the LLM and stream the response.
+        # ---------------------------------------------------------------
+        emit(AgentEvent("llm_start", {
+            "iteration": iteration,
+            "message_count": len(messages),
+            "model": model,
+        }))
+
+        chat_kwargs: dict[str, Any] = {}
+        if not force_final and not tools_disabled:
+            chat_kwargs["tools"] = tool_defs
+        if options is not None:
+            chat_kwargs["options"] = options
+        if think is not None:
+            chat_kwargs["think"] = think
+        if chat_extra:
+            chat_kwargs.update(chat_extra)
+
         try:
-            full_response = _chat_with_retry_silent(
-                provider, model, messages, tool_defs,
+            full_response = _stream_with_retry(
+                provider, model, messages, chat_kwargs, emit,
+                retry_on_overload=hc.retry_on_overload, tracker=tracker,
+                should_stop=should_stop,
+                reraise_interrupt=raise_provider_errors,
             )
-        except ProviderStreamError:
-            # Record the error in the message history and stop.
+        except ProviderStreamError as exc:
+            if raise_provider_errors:
+                raise
+            # Use provider-specific prefix when possible for backward
+            # compatibility (existing tests assert "Error from Ollama").
+            if isinstance(exc, OllamaStreamError):
+                prefix = "Error from Ollama"
+            else:
+                prefix = "Error from provider"
+            emit(AgentEvent("error", {
+                "message": f"{prefix}: {exc}",
+                "source": "stream",
+                "detail": str(exc),
+            }))
             messages.append({
                 "role": "assistant",
-                "content": "[Error from provider during streaming]",
+                "content": f"[{prefix}: {exc}]",
+            })
+            break
+        except ProviderConnectionError as exc:
+            if raise_provider_errors:
+                raise
+            emit(AgentEvent("error", {
+                "message": f"Error from provider: {exc}",
+                "source": "connection",
+                "detail": str(exc),
+            }))
+            messages.append({
+                "role": "assistant",
+                "content": f"[Error from provider: {exc}]",
             })
             break
         except ProviderRequestError as exc:
-            # Request error (including exhausted 503 retries).
+            # A model whose chat template has no tool support rejects
+            # the request outright.  Fall back to text-driven tools:
+            # drop the tools parameter, teach the model the fenced-JSON
+            # call shape, and let extract_text_tool_calls rescue its
+            # calls — such models can still act as agents.
+            if (
+                not tools_disabled
+                and "tools" in chat_kwargs
+                and hc.text_tool_rescue
+                and is_tools_unsupported_error(exc)
+            ):
+                tools_disabled = True
+                messages.append(text_tools_fallback_message(tools))
+                emit(AgentEvent("tools_fallback", {"model": model}))
+                continue
+            if raise_provider_errors:
+                raise
+            emit(AgentEvent("error", {
+                "message": f"Error from provider: {exc}",
+                "source": "request",
+                "detail": str(exc),
+            }))
             messages.append({
                 "role": "assistant",
                 "content": f"[Error from provider: {exc}]",
             })
             break
         except KeyboardInterrupt:
+            if raise_provider_errors:
+                raise
+            emit(AgentEvent("interrupted", {"where": "llm"}))
             break
 
         # ---------------------------------------------------------------
         # 2. Append the assistant message to the conversation history.
+        #    Thinking content is intentionally excluded — it lives in
+        #    full_response["thinking"] and must NOT be appended, to avoid
+        #    wasting context window space on internal reasoning.
         # ---------------------------------------------------------------
         assistant_message = full_response["message"]
+        if "thinking" in assistant_message:
+            assistant_message = {
+                k: v for k, v in assistant_message.items() if k != "thinking"
+            }
         messages.append(assistant_message)
         final_content = assistant_message.get("content", "")
 
+        emit(AgentEvent("assistant_message", {
+            "message": assistant_message,
+            "thinking": full_response.get("thinking", ""),
+        }))
+
         # ---------------------------------------------------------------
-        # 3. Check for tool calls.  If none, we're done.
+        # 3. Determine tool calls: structured first, then text rescue.
         # ---------------------------------------------------------------
         tool_calls = assistant_message.get("tool_calls", [])
-        if not tool_calls:
+
+        if not tool_calls and not force_final and hc.text_tool_rescue:
+            rescued = extract_text_tool_calls(
+                assistant_message.get("content", "") or "",
+                lambda name: resolve_tool_name(name, tool_map),
+            )
+            if rescued:
+                # Attach to the (already appended) assistant message so
+                # the history stays consistent with the tool results.
+                assistant_message["tool_calls"] = rescued
+                tool_calls = rescued
+                emit(AgentEvent("rescue", {"count": len(rescued)}))
+
+        if not tool_calls or force_final:
+            if not force_final and _should_nudge_to_use_tools(
+                messages, assistant_message, nudged,
+            ):
+                # On the no-tool-support fallback the standard "call the
+                # write tool" wording is meaningless — restate the
+                # fenced-JSON call shape instead.
+                if tools_disabled:
+                    messages.append(text_tool_nudge_message())
+                else:
+                    messages.append(dict(_TOOL_NUDGE_MESSAGE))
+                nudged = True
+                emit(AgentEvent("nudge", {}))
+                continue
+            # Empty-response guard: the model said nothing at all
+            # (observed on small models after a tool result — the task
+            # is half done and the turn would just end).  Push back once.
+            if (
+                not force_final
+                and hc.empty_response_guard
+                and not empty_nudged
+                and not (assistant_message.get("content") or "").strip()
+            ):
+                messages.append(empty_response_message())
+                empty_nudged = True
+                emit(AgentEvent("empty_response", {}))
+                continue
+            # Error-stop guard: the model is finishing right after a
+            # failed tool call (small models routinely ignore the error
+            # and declare success).  Push back once.
+            if (
+                not force_final
+                and hc.error_stop_guard
+                and not error_nudged
+                and last_tool_result_errored(messages)
+            ):
+                messages.append(error_stop_message())
+                error_nudged = True
+                emit(AgentEvent("error_stop", {}))
+                continue
             break
 
         # ---------------------------------------------------------------
         # 4. Execute each tool call and append results.
         # ---------------------------------------------------------------
-        for tc in tool_calls:
-            tool_name, arguments, tool_call_id = parse_tool_call(tc)
-            tool_name = resolve_tool_name(tool_name, tool_map) or tool_name
-            arguments = normalize_arguments(tool_name, arguments)
+        # Search-then-write ordering guard: when this turn mixes
+        # discovery calls with mutations, the mutations were decided
+        # before the discovery results existed — defer them so the
+        # model re-issues them with the results in hand.
+        defer_mutations = False
+        if hc.defer_writes_after_search and len(tool_calls) > 1:
+            turn_names = set()
+            for tc in tool_calls:
+                name, _, _ = parse_tool_call(tc)
+                resolved_name = resolve_tool_name(name, tool_map)
+                if resolved_name is not None:
+                    turn_names.add(resolved_name)
+            defer_mutations = bool(turn_names & DISCOVERY_TOOLS) and bool(
+                turn_names & MUTATION_TOOLS
+            )
 
+        loop_broken = False
+        stopped = False
+        for tc in tool_calls:
+            raw_name, arguments, tool_call_id = parse_tool_call(tc)
+            resolved = resolve_tool_name(raw_name, tool_map)
+            tool_name = resolved or raw_name
+            if resolved is not None:
+                arguments = normalize_arguments(resolved, arguments)
             tool = tool_map.get(tool_name)
+
+            # Front-end stop request between tool calls.  Remaining
+            # calls still get a result message so no tool_call is left
+            # unanswered in the history.
+            if not stopped and should_stop is not None and should_stop():
+                stopped = True
+                emit(AgentEvent("stopped", {"where": "tools"}))
+            if stopped:
+                result = "Error: stopped by user."
+                messages.append(_tool_message(tool_name, result, tool_call_id))
+                continue
+
+            # Loop detection: classify before executing, so a run that
+            # crossed the break threshold is not executed yet again.
+            verdict = "ok"
+            if detector is not None and not loop_broken:
+                verdict = detector.record(tool_name, arguments)
+
+            if loop_broken or verdict == "break":
+                if not loop_broken:
+                    loop_broken = True
+                    force_final = True
+                    messages.append(loop_break_message())
+                    emit(AgentEvent("loop_break", {"tool_name": tool_name}))
+                result = "Error: skipped (tool loop detected)."
+                emit(AgentEvent("tool_result", {
+                    "tool_name": tool_name,
+                    "result": result,
+                    "cached": False,
+                    "skipped": True,
+                    "tool_call_id": tool_call_id,
+                }))
+                messages.append(_tool_message(tool_name, result, tool_call_id))
+                continue
+
             if tool is None:
                 result = f"Error: unknown tool '{tool_name}'"
-            else:
+                emit(AgentEvent("tool_result", {
+                    "tool_name": tool_name,
+                    "result": result,
+                    "cached": False,
+                    "unknown": True,
+                    "tool_call_id": tool_call_id,
+                }))
+                messages.append(_tool_message(tool_name, result, tool_call_id))
+                continue
+
+            if defer_mutations and tool_name in MUTATION_TOOLS:
+                result = deferred_write_result(tool_name)
+                emit(AgentEvent("write_deferred", {
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                }))
+                emit(AgentEvent("tool_result", {
+                    "tool_name": tool_name,
+                    "result": result,
+                    "cached": False,
+                    "deferred": True,
+                    "tool_call_id": tool_call_id,
+                }))
+                messages.append(_tool_message(tool_name, result, tool_call_id))
+                continue
+
+            # Check cache for cacheable tools before execution.
+            cached = False
+            result = None
+            if cache is not None and tool.cacheable:
+                hit = cache.get(tool_name, arguments)
+                if hit is not None:
+                    result = hit
+                    cached = True
+                    if debug:
+                        emit(AgentEvent("debug", {
+                            "text": f"  [debug] cache hit: {tool_name}",
+                        }))
+                elif debug:
+                    emit(AgentEvent("debug", {
+                        "text": f"  [debug] cache miss: {tool_name}",
+                    }))
+
+            if result is None:
+                emit(AgentEvent("tool_start", {
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "tool_call_id": tool_call_id,
+                }))
                 try:
-                    result = tool.execute(**arguments)
+                    result = _execute_tool(tool, arguments, debug=debug)
                 except KeyboardInterrupt:
                     result = "Error: tool execution interrupted by user."
-                    tool_msg: dict[str, Any] = {
-                        "role": "tool",
+                    emit(AgentEvent("interrupted", {
+                        "where": "tool",
                         "tool_name": tool_name,
-                        "content": result,
-                    }
-                    if tool_call_id is not None:
-                        tool_msg["tool_call_id"] = tool_call_id
-                    messages.append(tool_msg)
+                    }))
+                    messages.append(
+                        _tool_message(tool_name, result, tool_call_id)
+                    )
                     raise
-                except Exception as exc:
-                    result = f"Error: {type(exc).__name__}: {exc}"
 
-            # Append tool result as a 'tool' role message.
-            tool_msg = {
-                "role": "tool",
+                # Store successful results in cache for cacheable tools.
+                if (
+                    cache is not None
+                    and tool.cacheable
+                    and not result.startswith("Error:")
+                ):
+                    cache.put(
+                        tool_name, arguments, result,
+                        file_path=_extract_file_path(tool_name, arguments),
+                    )
+
+                # Invalidate cache when a mutating tool modifies a file.
+                if (
+                    cache is not None
+                    and not tool.cacheable
+                    and not result.startswith("Error:")
+                ):
+                    fp = arguments.get("file_path")
+                    if isinstance(fp, str):
+                        cache.invalidate_file(fp)
+
+            # Post-write verification gate: surface syntax errors in the
+            # file the model just produced while it still has context.
+            if hc.verify_writes:
+                warning = verify_file_write(tool_name, arguments, result)
+                if warning is not None:
+                    result = f"{result}\n\n{warning}"
+                    emit(AgentEvent("verify_warning", {
+                        "file_path": arguments.get("file_path", ""),
+                        "message": warning,
+                    }))
+
+            emit(AgentEvent("tool_result", {
                 "tool_name": tool_name,
-                "content": result,
-            }
-            if tool_call_id is not None:
-                tool_msg["tool_call_id"] = tool_call_id
-            messages.append(tool_msg)
+                "result": result,
+                "cached": cached,
+                "tool_call_id": tool_call_id,
+            }))
+            messages.append(_tool_message(tool_name, result, tool_call_id))
+
+            if reminder is not None:
+                reminder.note_tool_use(iteration, tool_name)
+
+            if verdict == "warn":
+                messages.append(loop_warning_message(tool_name))
+                emit(AgentEvent("loop_warning", {"tool_name": tool_name}))
+
+        if stopped:
+            break
 
         # ---------------------------------------------------------------
         # 5. Loop back to send tool results to the LLM.
         # ---------------------------------------------------------------
 
     return final_content
+
+
+# ---------------------------------------------------------------------------
+# Console emitter (classic CLI presentation)
+# ---------------------------------------------------------------------------
+
+
+class _ConsoleEmitter:
+    """Render agent events with the classic CLI presentation.
+
+    Reproduces exactly the stdout/stderr behaviour the REPL always had:
+    streamed content on stdout, ``> ``-prefixed thinking lines, spinners
+    while waiting, indented tool-result previews on stderr, and
+    ``[debug]`` diagnostics when debug mode is on.  Harness events that
+    did not exist before (rescue, loop detection, verification, retries)
+    are surfaced as brief ``[harness]`` lines on stderr.
+    """
+
+    def __init__(self, debug: bool = False) -> None:
+        self._debug = debug
+        self._spinner: Spinner | None = None
+        self._had_thinking = False
+        self._had_content = False
+
+    def _start_spinner(self, message: str) -> None:
+        self._stop_spinner()
+        self._spinner = Spinner(message)
+        self._spinner.start()
+
+    def _stop_spinner(self) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+
+    def close(self) -> None:
+        """Stop any live spinner (called when the loop exits)."""
+        self._stop_spinner()
+
+    def __call__(self, event: AgentEvent) -> None:
+        kind = event.kind
+        data = event.data
+
+        if kind == "llm_start":
+            self._had_thinking = False
+            self._had_content = False
+            if self._debug:
+                sys.stderr.write(
+                    f"[debug] Sending {data['message_count']} messages "
+                    f"to {data['model']}\n"
+                )
+            self._start_spinner("Thinking")
+
+        elif kind == "thinking_delta":
+            self._stop_spinner()
+            self._had_thinking = True
+            for line in data["text"].splitlines(keepends=True):
+                sys.stdout.write(f"> {line}")
+            sys.stdout.flush()
+
+        elif kind == "content_delta":
+            self._stop_spinner()
+            if self._had_thinking and not self._had_content:
+                sys.stdout.write("\n")
+            self._had_content = True
+            sys.stdout.write(data["text"])
+            sys.stdout.flush()
+
+        elif kind == "assistant_message":
+            self._stop_spinner()
+            if self._had_content:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            if self._debug:
+                message = data["message"]
+                thinking = data.get("thinking", "")
+                if thinking:
+                    preview = _truncate(thinking, max_len=500)
+                    sys.stderr.write(f"[debug] Thinking: {preview}\n")
+                tc_count = len(message.get("tool_calls", []))
+                sys.stderr.write(
+                    f"[debug] Assistant responded: "
+                    f"{len(message.get('content', ''))} chars, "
+                    f"{tc_count} tool call(s)\n"
+                )
+
+        elif kind == "tool_start":
+            self._start_spinner(f"Running {data['tool_name']}")
+
+        elif kind == "tool_result":
+            self._stop_spinner()
+            if data.get("unknown"):
+                sys.stderr.write(f"  Unknown tool: {data['tool_name']}\n")
+            else:
+                preview = _truncate(
+                    data["result"].replace("\n", " ").strip(),
+                )
+                sys.stderr.write(f"  Result: {preview}\n")
+
+        elif kind == "interrupted":
+            self._stop_spinner()
+            where = data.get("where", "")
+            if where == "stream":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            elif where == "tool":
+                sys.stderr.write(
+                    f"  Tool {data.get('tool_name', '?')} interrupted.\n"
+                )
+            else:
+                sys.stderr.write("\nInterrupted.\n")
+
+        elif kind == "error":
+            self._stop_spinner()
+            sys.stderr.write(f"{data['message']}\n")
+
+        elif kind == "rescue":
+            sys.stderr.write(
+                f"  [harness] rescued {data['count']} tool call(s) "
+                "written as text\n"
+            )
+
+        elif kind == "tools_fallback":
+            sys.stderr.write(
+                f"  [harness] {data.get('model', 'model')} does not "
+                "support structured tool calls — switching to "
+                "text-driven tools\n"
+            )
+
+        elif kind == "error_stop":
+            sys.stderr.write(
+                "  [harness] model tried to finish on a failed tool "
+                "call — pushing back\n"
+            )
+
+        elif kind == "write_deferred":
+            sys.stderr.write(
+                f"  [harness] {data['tool_name']} deferred — issued "
+                "alongside a search; the model should use the search "
+                "results first\n"
+            )
+
+        elif kind == "empty_response":
+            sys.stderr.write(
+                "  [harness] model replied with nothing — pushing back\n"
+            )
+
+        elif kind == "verify_warning":
+            sys.stderr.write(
+                f"  [harness] post-write check failed: "
+                f"{data['file_path']}\n"
+            )
+
+        elif kind == "loop_warning":
+            sys.stderr.write(
+                f"  [harness] repeated tool call detected "
+                f"({data['tool_name']}) — nudging the model\n"
+            )
+
+        elif kind == "loop_break":
+            sys.stderr.write(
+                "  [harness] tool loop detected — asking the model "
+                "to wrap up\n"
+            )
+
+        elif kind == "limit":
+            sys.stderr.write(
+                f"  [harness] step limit reached "
+                f"({data['iterations']} iterations) — wrapping up\n"
+            )
+
+        elif kind == "retry":
+            sys.stderr.write(
+                f"  [harness] provider overloaded — retrying in "
+                f"{data['delay']:.0f}s (attempt {data['attempt']})\n"
+            )
+
+        elif kind == "debug":
+            if self._debug:
+                sys.stderr.write(data["text"] + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Classic CLI agent loop (thin wrapper over run_agent)
+# ---------------------------------------------------------------------------
+
+
+def agent_loop(
+    client: LLMProvider,
+    model: str,
+    tools: list[Tool],
+    messages: list[dict[str, Any]],
+    debug: bool = False,
+    cache: ToolCache | None = None,
+    tracker: TokenTracker | None = None,
+    options: dict[str, Any] | None = None,
+    think: bool | None = None,
+    harness: HarnessConfig | None = None,
+) -> None:
+    """Core agent loop with the classic CLI presentation.
+
+    Thin wrapper over :func:`run_agent` using :class:`_ConsoleEmitter`,
+    preserving the historical stdout/stderr behaviour (streamed tokens,
+    spinners, indented result previews).  All loop logic — including the
+    deterministic harness interventions — lives in :func:`run_agent`.
+
+    Args:
+        client: An :class:`~local_cli.providers.base.LLMProvider`
+            instance (or any object with a compatible ``chat_stream``
+            method — including :class:`OllamaClient`, accepted via duck
+            typing for backward compatibility).
+        model: The model name to use (e.g. ``"qwen3:8b"``).
+        tools: A list of :class:`Tool` instances available for the LLM.
+        messages: The conversation history (mutated in place).
+        debug: If True, print extra diagnostic information to stderr.
+        cache: Optional :class:`ToolCache` for cacheable tools.
+        tracker: Optional :class:`TokenTracker` for usage recording.
+        options: Optional inference parameters (``num_ctx`` also tunes
+            the compaction threshold).
+        think: Optional thinking-mode flag forwarded to the provider.
+        harness: Optional harness intervention switches; defaults to
+            :class:`HarnessConfig`'s defaults.
+
+    Raises:
+        KeyboardInterrupt: Propagated if the user presses Ctrl+C during
+            tool execution (streaming interrupts are handled gracefully).
+    """
+    emitter = _ConsoleEmitter(debug=debug)
+    try:
+        run_agent(
+            client, model, tools, messages,
+            emit=emitter,
+            harness=harness,
+            cache=cache,
+            tracker=tracker,
+            options=options,
+            think=think,
+            debug=debug,
+        )
+    finally:
+        emitter.close()
 
 
 # ---------------------------------------------------------------------------

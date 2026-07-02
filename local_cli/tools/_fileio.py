@@ -1,13 +1,75 @@
-"""Shared low-level file-writing helpers for tools.
+"""Shared low-level file helpers for tools.
 
 The ``edit`` and ``write`` tools both need to persist file content without
 risking a half-written file if something fails mid-write.  This module is
 the single place that implements that, so both tools behave identically.
+It also hosts the not-found path suggestion shared by ``read`` and
+``edit`` error messages.
 """
 
 import os
 import tempfile
 from pathlib import Path
+
+
+def find_similar_path(requested: str) -> str | None:
+    """Find a file under the cwd sharing the requested path's file name.
+
+    Small models frequently hallucinate an absolute prefix
+    (``/app/app.py`` for a file that is really ``./app.py``) and then
+    burn several loop iterations rediscovering the path.  When a
+    requested file does not exist but a file with the same name does —
+    in the working directory or up to two levels below it — returning
+    that path lets the model recover in one step.
+
+    The search is name-exact and shallow (``name``, ``*/name``,
+    ``*/*/name``), so it stays fast in large repositories, and a hint
+    is only returned when the match is unambiguous.
+
+    Args:
+        requested: The path the caller asked for (which did not exist).
+
+    Returns:
+        The unique matching path, relative to the cwd, or ``None``.
+    """
+    name = Path(requested).name
+    if not name:
+        return None
+    cwd = Path.cwd()
+
+    direct = cwd / name
+    if direct.is_file():
+        return name
+
+    matches: list[Path] = []
+    try:
+        for pattern in (f"*/{name}", f"*/*/{name}"):
+            for candidate in cwd.glob(pattern):
+                if candidate.is_file():
+                    matches.append(candidate)
+                    if len(matches) > 1:
+                        return None  # ambiguous — no hint
+    except OSError:
+        return None
+
+    if len(matches) == 1:
+        try:
+            return str(matches[0].relative_to(cwd))
+        except ValueError:
+            return None
+    return None
+
+
+def not_found_error(file_path: str) -> str:
+    """Build a file-not-found error, suggesting the real path when known."""
+    error = f"Error: file not found: {file_path}"
+    hint = find_similar_path(file_path)
+    if hint is not None and hint != file_path:
+        return (
+            f"{error}. A file with that name exists at '{hint}' "
+            "(relative to the working directory) — use that path."
+        )
+    return error
 
 
 def atomic_write_text(path: Path, content: str) -> None:

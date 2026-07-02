@@ -12,6 +12,11 @@ from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
+from local_cli.agent import (
+    _RETRY_BASE_DELAY,
+    _RETRY_MAX_ATTEMPTS,
+    _is_overloaded_error,
+)
 from local_cli.config import Config
 from local_cli.orchestrator import Orchestrator
 from local_cli.providers.base import (
@@ -24,12 +29,8 @@ from local_cli.sub_agent import (
     SubAgentResult,
     SubAgentRunner,
     _DEFAULT_TIMEOUT,
-    _RETRY_BASE_DELAY,
-    _RETRY_MAX_ATTEMPTS,
-    _SUB_AGENT_SYSTEM_PROMPT,
     _SubAgentTimeout,
     _WorktreeError,
-    _is_overloaded_error,
 )
 from local_cli.tools.base import Tool
 
@@ -129,6 +130,9 @@ def _setup_provider_tool_then_response(
 
     First call to chat_stream returns a tool call.
     Second call returns a simple response.
+    A third response (same content) is queued in case the harness's
+    error-stop guard pushes back on a failed tool call; it goes unused
+    on the happy path, and either way the final content is identical.
     """
     tc = [
         {
@@ -139,11 +143,11 @@ def _setup_provider_tool_then_response(
         }
     ]
     tool_call_chunks = _make_chunks([""], tool_calls=tc)
-    final_chunks = _make_chunks([final_content])
 
     provider.chat_stream.side_effect = [
         iter(tool_call_chunks),
-        iter(final_chunks),
+        iter(_make_chunks([final_content])),
+        iter(_make_chunks([final_content])),
     ]
 
 
@@ -608,7 +612,10 @@ class TestSubAgentRunSimple(unittest.TestCase):
         call_args = provider.chat_stream.call_args
         messages = call_args[0][1]  # Second positional arg is messages.
         self.assertEqual(messages[0]["role"], "system")
-        self.assertEqual(messages[0]["content"], _SUB_AGENT_SYSTEM_PROMPT)
+        # Sub-agents now share the full main-agent prompt plus a
+        # sub-agent section (previously a weak four-sentence stub).
+        self.assertIn("SUB-AGENT MODE", messages[0]["content"])
+        self.assertIn("AVAILABLE TOOLS", messages[0]["content"])
 
     def test_user_prompt_in_messages(self) -> None:
         """Messages sent to the provider include the user prompt."""
@@ -1131,82 +1138,6 @@ class TestSubAgentErrorHandling(unittest.TestCase):
 
         self.assertEqual(result.status, "error")
         self.assertEqual(result.content, "First output")
-
-
-# ---------------------------------------------------------------------------
-# SubAgent._collect_silent_response
-# ---------------------------------------------------------------------------
-
-
-class TestCollectSilentResponse(unittest.TestCase):
-    """Tests for SubAgent._collect_silent_response()."""
-
-    def test_accumulates_content(self) -> None:
-        """Content deltas across chunks are concatenated."""
-        chunks = _make_chunks(["Hello", " ", "world"])
-        result = SubAgent._collect_silent_response(iter(chunks))
-
-        self.assertEqual(result["message"]["content"], "Hello world")
-
-    def test_no_stdout_output(self) -> None:
-        """Silent response does not write to stdout."""
-        captured = StringIO()
-        orig_stdout = sys.stdout
-
-        try:
-            sys.stdout = captured
-            chunks = _make_chunks(["Hello", " world"])
-            SubAgent._collect_silent_response(iter(chunks))
-        finally:
-            sys.stdout = orig_stdout
-
-        self.assertEqual(captured.getvalue(), "")
-
-    def test_tool_calls_collected(self) -> None:
-        """Tool calls from the final chunk are collected."""
-        tc = [{"function": {"name": "read", "arguments": {"path": "a.py"}}}]
-        chunks = _make_chunks([""], tool_calls=tc)
-        result = SubAgent._collect_silent_response(iter(chunks))
-
-        self.assertIn("tool_calls", result["message"])
-        self.assertEqual(len(result["message"]["tool_calls"]), 1)
-
-    def test_no_tool_calls_omits_key(self) -> None:
-        """When no tool calls are present, 'tool_calls' is not in the message."""
-        chunks = _make_chunks(["Hello"])
-        result = SubAgent._collect_silent_response(iter(chunks))
-        self.assertNotIn("tool_calls", result["message"])
-
-    def test_empty_stream(self) -> None:
-        """An empty stream produces empty content."""
-        result = SubAgent._collect_silent_response(iter([]))
-        self.assertEqual(result["message"]["content"], "")
-
-    def test_provider_stream_error_reraised(self) -> None:
-        """ProviderStreamError from the stream is re-raised."""
-
-        def error_stream():
-            yield {
-                "message": {"role": "assistant", "content": "partial"},
-                "done": False,
-            }
-            raise ProviderStreamError("broken stream")
-
-        with self.assertRaises(ProviderStreamError):
-            SubAgent._collect_silent_response(error_stream())
-
-    def test_keyboard_interrupt_reraised(self) -> None:
-        """KeyboardInterrupt from the stream is re-raised."""
-
-        def interrupted_stream():
-            yield {
-                "message": {"role": "assistant", "content": "partial"},
-                "done": False,
-            }
-            raise KeyboardInterrupt()
-
-        with self.assertRaises(KeyboardInterrupt):
-            SubAgent._collect_silent_response(interrupted_stream())
 
 
 # ---------------------------------------------------------------------------
@@ -3077,7 +3008,7 @@ class TestOllama503RetryWithBackoff(unittest.TestCase):
             timeout=60.0,
         )
 
-        with patch("local_cli.sub_agent.time.sleep"):
+        with patch("local_cli.agent.time.sleep"):
             result = agent.run()
 
         self.assertEqual(result.status, "error")
@@ -3109,7 +3040,7 @@ class TestOllama503RetryWithBackoff(unittest.TestCase):
         # Should have been called exactly once (no retries).
         self.assertEqual(provider.chat_stream.call_count, 1)
 
-    @patch("local_cli.sub_agent.time.sleep")
+    @patch("local_cli.agent.time.sleep")
     def test_retry_uses_exponential_backoff(
         self, mock_sleep: MagicMock,
     ) -> None:
@@ -3397,17 +3328,6 @@ class TestKeyboardInterruptDuringSubAgent(unittest.TestCase):
         finally:
             runner.shutdown()
 
-    def test_keyboard_interrupt_in_collect_silent_response(self) -> None:
-        """KeyboardInterrupt during _collect_silent_response is re-raised."""
-        def interrupted_stream():
-            yield {
-                "message": {"role": "assistant", "content": "start"},
-                "done": False,
-            }
-            raise KeyboardInterrupt()
-
-        with self.assertRaises(KeyboardInterrupt):
-            SubAgent._collect_silent_response(interrupted_stream())
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,7 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server._tool_cache = ToolCache()
     server._token_tracker = TokenTracker()
     server._ideation_active = False
+    server._skills_loader = None
     return server
 
 
@@ -118,6 +119,37 @@ class TestHandleChat(unittest.TestCase):
         self.assertTrue(
             any(m.get("role") == "assistant" for m in server._messages)
         )
+
+    def test_matching_skills_injected_before_user_message(self) -> None:
+        """Server chat injects matching skills like the CLI does."""
+
+        class _Skill:
+            name = "deploy-guide"
+            content = "Always run the smoke test first."
+
+        class _Loader:
+            def get_matching_skills(self, text):
+                return [_Skill()] if "deploy" in text else []
+
+        turn1 = [{"message": {"content": "done"}, "done": True}]
+        server = _make_server(self._provider([turn1]), [])
+        server._skills_loader = _Loader()
+
+        with patch("local_cli.server._send"):
+            server._handle_chat(1, "deploy the app")
+
+        roles = [m.get("role") for m in server._messages]
+        skill_idx = next(
+            i for i, m in enumerate(server._messages)
+            if "deploy-guide" in m.get("content", "")
+        )
+        user_idx = next(
+            i for i, m in enumerate(server._messages)
+            if m.get("role") == "user"
+        )
+        self.assertEqual(server._messages[skill_idx]["role"], "system")
+        self.assertLess(skill_idx, user_idx)
+        self.assertIn("smoke test", server._messages[skill_idx]["content"])
 
     def test_nudges_on_code_only_build_answer(self) -> None:
         """A code-only answer to a build request triggers one nudge."""
