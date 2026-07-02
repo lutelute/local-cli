@@ -96,6 +96,10 @@ class HarnessConfig:
             defer the mutations — they were decided before the search
             results existed, and small models write "fixes" into brand
             new files while the search correctly locates the real one.
+        empty_response_guard: When the model replies with nothing at
+            all (no content, no tool calls), push back once — small
+            models go silent mid-task after a tool result instead of
+            continuing or reporting.
         compact_mode: ``"truncate"`` (classic in-place truncation) or
             ``"summarize"`` (ask the model to summarize older history,
             falling back to truncation on failure).
@@ -112,6 +116,7 @@ class HarnessConfig:
     todo_reminders: bool = True
     error_stop_guard: bool = True
     defer_writes_after_search: bool = True
+    empty_response_guard: bool = True
     compact_mode: str = "truncate"
     keep_recent: int = 10
     retry_on_overload: bool = True
@@ -470,6 +475,24 @@ def last_tool_result_errored(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def empty_response_message() -> dict[str, Any]:
+    """Build the push-back injected when the model replies with nothing.
+
+    Observed live (LFM2.5-JP): after a successful tool result the model
+    emitted an entirely empty reply and the turn ended with the task
+    half done.  One deterministic push-back makes it either continue
+    or state the result.
+    """
+    return {
+        "role": "user",
+        "content": (
+            "<system-reminder>Your reply was empty. If the task is not "
+            "finished, make the next tool call now. If it is finished, "
+            "state the result in one or two sentences.</system-reminder>"
+        ),
+    }
+
+
 def error_stop_message() -> dict[str, Any]:
     """Build the push-back injected when finishing on a failed tool call.
 
@@ -596,7 +619,10 @@ def text_tools_fallback_message(tools: list[Any]) -> dict[str, Any]:
             "```\n"
             "Available tools and their arguments:\n"
             + "\n".join(lines)
-            + "\nMake one tool call per reply. The result will come "
+            + "\nTo change part of an existing file, call edit "
+            "(old_text -> new_text) — do NOT overwrite the whole file "
+            "with write.\n"
+            "Make one tool call per reply. The result will come "
             "back as the next message; continue until the task is done, "
             "then answer normally with no JSON.</system-reminder>"
         ),

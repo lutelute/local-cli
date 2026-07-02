@@ -24,6 +24,7 @@ from local_cli.harness import (
     build_summary_request,
     compaction_bounds,
     deferred_write_result,
+    empty_response_message,
     error_stop_message,
     extract_text_tool_calls,
     is_tools_unsupported_error,
@@ -1173,6 +1174,7 @@ def run_agent(
     reminder = TodoReminder() if hc.todo_reminders else None
     nudged = False  # whether we've already nudged "use the tools" this turn
     error_nudged = False  # one push-back per turn for finishing on an error
+    empty_nudged = False  # one push-back per turn for an empty reply
     force_final = False  # when True, the next LLM call gets no tools
     tools_disabled = False  # endpoint rejected tools; text-driven fallback
     final_content = ""
@@ -1362,6 +1364,19 @@ def run_agent(
                     messages.append(dict(_TOOL_NUDGE_MESSAGE))
                 nudged = True
                 emit(AgentEvent("nudge", {}))
+                continue
+            # Empty-response guard: the model said nothing at all
+            # (observed on small models after a tool result — the task
+            # is half done and the turn would just end).  Push back once.
+            if (
+                not force_final
+                and hc.empty_response_guard
+                and not empty_nudged
+                and not (assistant_message.get("content") or "").strip()
+            ):
+                messages.append(empty_response_message())
+                empty_nudged = True
+                emit(AgentEvent("empty_response", {}))
                 continue
             # Error-stop guard: the model is finishing right after a
             # failed tool call (small models routinely ignore the error
@@ -1699,6 +1714,11 @@ class _ConsoleEmitter:
                 f"  [harness] {data['tool_name']} deferred — issued "
                 "alongside a search; the model should use the search "
                 "results first\n"
+            )
+
+        elif kind == "empty_response":
+            sys.stderr.write(
+                "  [harness] model replied with nothing — pushing back\n"
             )
 
         elif kind == "verify_warning":

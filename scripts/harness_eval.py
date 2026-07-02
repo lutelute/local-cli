@@ -250,6 +250,33 @@ TASKS = [
         "setup": None,
         "check": _check_todo_multi,
     },
+    # Japanese-language variants: the harness must work when the user
+    # writes Japanese (the JA build-intent nudge keywords, and models
+    # like LFM2.5-JP, are exercised only on this path).
+    {
+        "name": "ja_create",
+        "prompt": "greet.py というファイルを作って、'hello' と出力するようにしてください。",
+        "setup": None,
+        "check": _check_create,
+    },
+    {
+        "name": "ja_edit",
+        "prompt": (
+            "app.py の add 関数が間違っていて引き算になっています。"
+            "a + b を返すように修正してください。"
+        ),
+        "setup": _setup_edit,
+        "check": _check_edit,
+    },
+    {
+        "name": "ja_multi",
+        "prompt": (
+            "2つのファイルを作成してください: one.txt には 'first'、"
+            "two.txt には 'second' と書いてください。"
+        ),
+        "setup": None,
+        "check": _check_multi,
+    },
 ]
 
 # Harness intervention events worth counting.
@@ -262,6 +289,7 @@ HARNESS_EVENTS = (
     "nudge",
     "error_stop",
     "write_deferred",
+    "empty_response",
     "reminder",
     "limit",
     "retry",

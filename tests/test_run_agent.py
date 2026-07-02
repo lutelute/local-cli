@@ -756,6 +756,59 @@ class TestErrorStopGuard(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Empty-response guard
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyResponseGuard(unittest.TestCase):
+    """A completely empty reply draws one push-back."""
+
+    def test_empty_reply_after_tool_pushes_back(self) -> None:
+        tool = _DummyTool()
+        client = _ScriptedClient([
+            _turn("", [_call("dummy", {"arg": "1"})]),
+            _turn(""),                    # silent mid-task
+            _turn("finished the task"),   # reply to the push-back
+        ])
+        events, emit = _recorder()
+        messages = [{"role": "user", "content": "do the thing"}]
+        result = run_agent(client, "m", [tool], messages, emit=emit)
+
+        self.assertEqual(result, "finished the task")
+        self.assertIn("empty_response", _kinds(events))
+        pushbacks = [
+            m for m in messages
+            if m.get("role") == "user"
+            and "reply was empty" in m.get("content", "")
+        ]
+        self.assertEqual(len(pushbacks), 1)
+
+    def test_pushback_only_once_per_turn(self) -> None:
+        client = _ScriptedClient([_turn(""), _turn("")])
+        events, emit = _recorder()
+        result = run_agent(client, "m", [],
+                           [{"role": "user", "content": "hi"}], emit=emit)
+        self.assertEqual(result, "")
+        self.assertEqual(_kinds(events).count("empty_response"), 1)
+
+    def test_normal_answer_not_pushed(self) -> None:
+        client = _ScriptedClient([_turn("here you go")])
+        events, emit = _recorder()
+        run_agent(client, "m", [],
+                  [{"role": "user", "content": "hi"}], emit=emit)
+        self.assertNotIn("empty_response", _kinds(events))
+
+    def test_guard_disabled_by_config(self) -> None:
+        client = _ScriptedClient([_turn("")])
+        events, emit = _recorder()
+        run_agent(
+            client, "m", [], [{"role": "user", "content": "hi"}],
+            emit=emit, harness=HarnessConfig(empty_response_guard=False),
+        )
+        self.assertNotIn("empty_response", _kinds(events))
+
+
+# ---------------------------------------------------------------------------
 # Search-then-write ordering guard
 # ---------------------------------------------------------------------------
 
