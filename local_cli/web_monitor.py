@@ -16,13 +16,8 @@ import queue
 import threading
 from typing import Any
 
-from local_cli.agent import (
-    _TOOL_NUDGE_MESSAGE,
-    _should_nudge_to_use_tools,
-    parse_tool_call,
-    run_tool,
-    truncate_tool_output,
-)
+from local_cli.agent import run_agent, truncate_tool_output
+from local_cli.harness import AgentEvent, HarnessConfig
 from local_cli.config import Config
 from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
@@ -231,114 +226,119 @@ def _run_agent(
     eq: queue.Queue,
     messages: list[dict[str, Any]],
 ) -> None:
-    """Run the agent loop, pushing SSE events to *eq*.
+    """Run the unified agent loop, pushing SSE events to *eq*.
+
+    Thin adapter over :func:`local_cli.agent.run_agent` — the same core
+    loop (and deterministic harness interventions) used by the CLI, the
+    JSON-line server, and sub-agents.  Previously this was a hand-rolled
+    copy with no compaction, no tool-name resolution and no loop guard.
 
     *messages* is the shared conversation history (mutated in place).
+    *tool_defs* / *tool_map* are retained for signature compatibility;
+    the unified loop derives both from *tools*.
     """
+    del tool_defs, tool_map  # derived inside run_agent
+
     messages.append({"role": "user", "content": task})
 
-    # Build inference options.
-    inference_options: dict[str, Any] = {"num_ctx": config.num_ctx}
-    if config.temperature is not None:
-        inference_options["temperature"] = config.temperature
-
-    chat_kwargs: dict[str, Any] = {
-        "model": config.model,
-        "messages": messages,
-        "tools": tool_defs,
-    }
+    # Provider-specific kwargs: only Ollama accepts inference options /
+    # think / keep_alive.
+    options: dict[str, Any] | None = None
+    think: bool | None = None
+    chat_extra: dict[str, Any] | None = None
     if provider.name == "ollama":
-        chat_kwargs["options"] = inference_options
+        options = {"num_ctx": config.num_ctx}
+        if config.temperature is not None:
+            options["temperature"] = config.temperature
         family = get_model_family(config.model)
         if config.think_mode and family in SUPPORTS_THINKING:
-            chat_kwargs["think"] = True
+            think = True
         if config.keep_alive is not None:
-            chat_kwargs["keep_alive"] = config.keep_alive
+            chat_extra = {"keep_alive": config.keep_alive}
 
     import time as _time
 
-    total_gen_tokens = 0
-    total_gen_time = 0.0
-    nudged = False  # one "use the tools" nudge per turn (see agent_loop)
+    stats = {"turn_chunks": 0, "turn_start": 0.0, "tokens": 0, "time": 0.0}
 
-    for _ in range(15):
-        eq.put(json.dumps({"type": "stream_start"}))
-
-        text_buf = ""
-        tool_calls: list[dict[str, Any]] = []
-        gen_start = _time.monotonic()
-        chunk_count = 0
-
-        try:
-            for chunk in provider.chat_stream(**chat_kwargs):
-                msg = chunk.get("message", {})
-                delta = msg.get("content", "")
-                if delta:
-                    text_buf += delta
-                    chunk_count += 1
-                    eq.put(json.dumps({"type": "token", "content": delta}))
-                if msg.get("tool_calls"):
-                    tool_calls = msg["tool_calls"]
-                if chunk.get("done"):
-                    break
-        except (ProviderConnectionError, ProviderRequestError, ProviderStreamError) as exc:
-            eq.put(json.dumps({"type": "tool_result", "output": f"Error: {exc}", "error": True}))
-            break
-        except Exception as exc:
-            eq.put(json.dumps({"type": "tool_result", "output": f"Error: {exc}", "error": True}))
-            break
-
-        gen_elapsed = _time.monotonic() - gen_start
-        total_gen_tokens += chunk_count
-        total_gen_time += gen_elapsed
-        if gen_elapsed > 0 and chunk_count > 0:
-            speed = chunk_count / gen_elapsed
-            eq.put(json.dumps({"type": "stats", "gen_speed": round(speed, 1), "tokens": chunk_count}))
-
-        assistant_msg: dict[str, Any] = {"role": "assistant", "content": text_buf}
-        if tool_calls:
-            assistant_msg["tool_calls"] = tool_calls
-        messages.append(assistant_msg)
-
-        if not tool_calls:
-            if _should_nudge_to_use_tools(messages, assistant_msg, nudged):
-                messages.append(dict(_TOOL_NUDGE_MESSAGE))
-                nudged = True
-                continue
-            break
-
-        for tc in tool_calls:
-            tool_name, tool_args, tool_call_id = parse_tool_call(tc)
-
-            eq.put(json.dumps({"type": "tool_call", "name": tool_name, "args": tool_args}))
-
-            output = run_tool(tool_name, tool_args, tool_map)
-            is_error = output.startswith("Error:")
-
+    def _emit(event: AgentEvent) -> None:
+        kind = event.kind
+        data = event.data
+        if kind == "llm_start":
+            stats["turn_chunks"] = 0
+            stats["turn_start"] = _time.monotonic()
+            eq.put(json.dumps({"type": "stream_start"}))
+        elif kind == "content_delta":
+            stats["turn_chunks"] += 1
+            eq.put(json.dumps({"type": "token", "content": data["text"]}))
+        elif kind == "assistant_message":
+            elapsed = _time.monotonic() - stats["turn_start"]
+            chunks = stats["turn_chunks"]
+            stats["tokens"] += chunks
+            stats["time"] += elapsed
+            if elapsed > 0 and chunks > 0:
+                eq.put(json.dumps({
+                    "type": "stats",
+                    "gen_speed": round(chunks / elapsed, 1),
+                    "tokens": chunks,
+                }))
+        elif kind == "tool_start":
+            eq.put(json.dumps({
+                "type": "tool_call",
+                "name": data["tool_name"],
+                "args": data["arguments"],
+            }))
+        elif kind == "tool_result":
+            result = data["result"]
             eq.put(json.dumps({
                 "type": "tool_result",
-                "output": truncate_tool_output(output),
-                "error": is_error,
+                "output": truncate_tool_output(result),
+                "error": result.startswith("Error:"),
+            }))
+        elif kind == "error":
+            detail = data.get("detail") or data.get("message", "")
+            eq.put(json.dumps({
+                "type": "tool_result",
+                "output": f"Error: {detail}",
+                "error": True,
+            }))
+        elif kind in (
+            "rescue", "loop_warning", "loop_break", "limit",
+            "reminder", "verify_warning", "compaction", "retry",
+        ):
+            eq.put(json.dumps({
+                "type": "harness",
+                "event": kind,
+                "data": data,
             }))
 
-            # Include tool_name and tool_call_id.  tool_name was previously
-            # omitted on this path (unlike the CLI/server loops), which
-            # breaks Claude tool-result matching.
-            tool_msg: dict[str, Any] = {
-                "role": "tool",
-                "tool_name": tool_name,
-                "content": output,
-            }
-            if tool_call_id:
-                tool_msg["tool_call_id"] = tool_call_id
-            messages.append(tool_msg)
+    try:
+        run_agent(
+            provider,
+            config.model,
+            tools,
+            messages,
+            emit=_emit,
+            harness=HarnessConfig(
+                max_iterations=config.max_iterations,
+                compact_mode=config.compact_mode,
+            ),
+            options=options,
+            think=think,
+            chat_extra=chat_extra,
+        )
+    except Exception as exc:
+        eq.put(json.dumps({
+            "type": "tool_result",
+            "output": f"Error: {exc}",
+            "error": True,
+        }))
 
-    avg_speed = total_gen_tokens / total_gen_time if total_gen_time > 0 else 0
+    avg_speed = stats["tokens"] / stats["time"] if stats["time"] > 0 else 0
     eq.put(json.dumps({
         "type": "done",
-        "total_tokens": total_gen_tokens,
+        "total_tokens": stats["tokens"],
         "avg_speed": round(avg_speed, 1),
-        "elapsed": round(total_gen_time, 2),
+        "elapsed": round(stats["time"], 2),
     }))
     eq.put(None)  # sentinel
 

@@ -10,7 +10,7 @@ import json
 import re
 import sys
 import time
-from typing import Any, Generator
+from typing import Any, Callable, Generator
 
 from local_cli.harness import (
     AgentEvent,
@@ -31,6 +31,7 @@ from local_cli.harness import (
 from local_cli.ollama_client import OllamaClient, OllamaStreamError
 from local_cli.providers.base import (
     LLMProvider,
+    ProviderConnectionError,
     ProviderRequestError,
     ProviderStreamError,
 )
@@ -840,6 +841,8 @@ def _collect_stream_emitting(
     stream: Generator[dict[str, Any], None, None],
     emit: EmitFn,
     tracker: TokenTracker | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    reraise_interrupt: bool = False,
 ) -> dict[str, Any]:
     """Accumulate a streaming chat response, emitting deltas as events.
 
@@ -856,6 +859,9 @@ def _collect_stream_emitting(
         stream: A generator yielding parsed streaming chunks.
         emit: The event callback.
         tracker: Optional :class:`TokenTracker` for usage recording.
+        should_stop: Optional callback checked per chunk; when it
+            returns ``True`` streaming stops and the partial response
+            is returned (used by the JSON-line server's stop button).
 
     Returns:
         The assembled response dict, in the same shape as
@@ -872,6 +878,8 @@ def _collect_stream_emitting(
 
     try:
         for chunk in stream:
+            if should_stop is not None and should_stop():
+                break
             last_chunk = chunk
             message = chunk.get("message", {})
 
@@ -890,6 +898,9 @@ def _collect_stream_emitting(
                 tool_calls.extend(chunk_tool_calls)
 
     except KeyboardInterrupt:
+        if reraise_interrupt:
+            # Sub-agent mode: the caller owns interrupt semantics.
+            raise
         # User interrupted streaming.  Keep what we have so far.
         emit(AgentEvent("interrupted", {"where": "stream"}))
 
@@ -922,6 +933,8 @@ def _stream_with_retry(
     emit: EmitFn,
     retry_on_overload: bool,
     tracker: TokenTracker | None,
+    should_stop: Callable[[], bool] | None = None,
+    reraise_interrupt: bool = False,
 ) -> dict[str, Any]:
     """Call ``provider.chat_stream`` with retry on overload (HTTP 503).
 
@@ -955,7 +968,10 @@ def _stream_with_retry(
             time.sleep(delay)
         try:
             stream = provider.chat_stream(model, messages, **chat_kwargs)
-            return _collect_stream_emitting(stream, emit, tracker=tracker)
+            return _collect_stream_emitting(
+                stream, emit, tracker=tracker, should_stop=should_stop,
+                reraise_interrupt=reraise_interrupt,
+            )
         except ProviderRequestError as exc:
             if not _is_overloaded_error(exc) or attempt == attempts:
                 raise
@@ -1051,6 +1067,9 @@ def run_agent(
     tracker: TokenTracker | None = None,
     options: dict[str, Any] | None = None,
     think: bool | None = None,
+    chat_extra: dict[str, Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    raise_provider_errors: bool = False,
     debug: bool = False,
 ) -> str:
     """The unified agent loop: prompt the LLM, run tools, repeat.
@@ -1099,6 +1118,16 @@ def run_agent(
             provider.  A ``num_ctx`` key dynamically sets the compaction
             threshold to 75% of the context window.
         think: Optional thinking-mode flag forwarded to the provider.
+        chat_extra: Extra keyword arguments merged into every
+            ``chat_stream`` call (e.g. ``keep_alive`` for Ollama).
+        should_stop: Optional callback polled at every loop checkpoint
+            (per stream chunk, per iteration, per tool call); when it
+            returns ``True`` the loop stops gracefully, emitting a
+            ``stopped`` event.  Used by GUI front-ends' stop buttons.
+        raise_provider_errors: When ``True``, provider errors propagate
+            to the caller instead of being recorded in the history —
+            sub-agents use this so their runner can report an error
+            status.
         debug: Emit extra ``debug`` events (rendered on stderr by the
             console emitter).
 
@@ -1109,6 +1138,9 @@ def run_agent(
     Raises:
         KeyboardInterrupt: Propagated if the user interrupts tool
             execution (streaming interrupts are handled gracefully).
+        ProviderRequestError: Only when *raise_provider_errors* is set.
+        ProviderConnectionError: Only when *raise_provider_errors* is set.
+        ProviderStreamError: Only when *raise_provider_errors* is set.
     """
     hc = harness or HarnessConfig()
     tool_map: dict[str, Tool] = {t.name: t for t in tools}
@@ -1138,6 +1170,13 @@ def run_agent(
 
     while True:
         iteration += 1
+
+        # ---------------------------------------------------------------
+        # 0. Front-end stop request (GUI stop button).
+        # ---------------------------------------------------------------
+        if should_stop is not None and should_stop():
+            emit(AgentEvent("stopped", {"where": "loop"}))
+            break
 
         # ---------------------------------------------------------------
         # 0a. Step limit: pause tools and ask the model to wrap up.
@@ -1188,28 +1227,55 @@ def run_agent(
             chat_kwargs["options"] = options
         if think is not None:
             chat_kwargs["think"] = think
+        if chat_extra:
+            chat_kwargs.update(chat_extra)
 
         try:
             full_response = _stream_with_retry(
                 provider, model, messages, chat_kwargs, emit,
                 retry_on_overload=hc.retry_on_overload, tracker=tracker,
+                should_stop=should_stop,
+                reraise_interrupt=raise_provider_errors,
             )
         except ProviderStreamError as exc:
+            if raise_provider_errors:
+                raise
             # Use provider-specific prefix when possible for backward
             # compatibility (existing tests assert "Error from Ollama").
             if isinstance(exc, OllamaStreamError):
                 prefix = "Error from Ollama"
             else:
                 prefix = "Error from provider"
-            emit(AgentEvent("error", {"message": f"{prefix}: {exc}"}))
+            emit(AgentEvent("error", {
+                "message": f"{prefix}: {exc}",
+                "source": "stream",
+                "detail": str(exc),
+            }))
             messages.append({
                 "role": "assistant",
                 "content": f"[{prefix}: {exc}]",
             })
             break
-        except ProviderRequestError as exc:
+        except ProviderConnectionError as exc:
+            if raise_provider_errors:
+                raise
             emit(AgentEvent("error", {
                 "message": f"Error from provider: {exc}",
+                "source": "connection",
+                "detail": str(exc),
+            }))
+            messages.append({
+                "role": "assistant",
+                "content": f"[Error from provider: {exc}]",
+            })
+            break
+        except ProviderRequestError as exc:
+            if raise_provider_errors:
+                raise
+            emit(AgentEvent("error", {
+                "message": f"Error from provider: {exc}",
+                "source": "request",
+                "detail": str(exc),
             }))
             messages.append({
                 "role": "assistant",
@@ -1217,6 +1283,8 @@ def run_agent(
             })
             break
         except KeyboardInterrupt:
+            if raise_provider_errors:
+                raise
             emit(AgentEvent("interrupted", {"where": "llm"}))
             break
 
@@ -1270,6 +1338,7 @@ def run_agent(
         # 4. Execute each tool call and append results.
         # ---------------------------------------------------------------
         loop_broken = False
+        stopped = False
         for tc in tool_calls:
             raw_name, arguments, tool_call_id = parse_tool_call(tc)
             resolved = resolve_tool_name(raw_name, tool_map)
@@ -1277,6 +1346,17 @@ def run_agent(
             if resolved is not None:
                 arguments = normalize_arguments(resolved, arguments)
             tool = tool_map.get(tool_name)
+
+            # Front-end stop request between tool calls.  Remaining
+            # calls still get a result message so no tool_call is left
+            # unanswered in the history.
+            if not stopped and should_stop is not None and should_stop():
+                stopped = True
+                emit(AgentEvent("stopped", {"where": "tools"}))
+            if stopped:
+                result = "Error: stopped by user."
+                messages.append(_tool_message(tool_name, result, tool_call_id))
+                continue
 
             # Loop detection: classify before executing, so a run that
             # crossed the break threshold is not executed yet again.
@@ -1395,6 +1475,9 @@ def run_agent(
             if verdict == "warn":
                 messages.append(loop_warning_message(tool_name))
                 emit(AgentEvent("loop_warning", {"tool_name": tool_name}))
+
+        if stopped:
+            break
 
         # ---------------------------------------------------------------
         # 5. Loop back to send tool results to the LLM.
@@ -1572,6 +1655,7 @@ def agent_loop(
     tracker: TokenTracker | None = None,
     options: dict[str, Any] | None = None,
     think: bool | None = None,
+    harness: HarnessConfig | None = None,
 ) -> None:
     """Core agent loop with the classic CLI presentation.
 
@@ -1594,6 +1678,8 @@ def agent_loop(
         options: Optional inference parameters (``num_ctx`` also tunes
             the compaction threshold).
         think: Optional thinking-mode flag forwarded to the provider.
+        harness: Optional harness intervention switches; defaults to
+            :class:`HarnessConfig`'s defaults.
 
     Raises:
         KeyboardInterrupt: Propagated if the user presses Ctrl+C during
@@ -1604,6 +1690,7 @@ def agent_loop(
         run_agent(
             client, model, tools, messages,
             emit=emitter,
+            harness=harness,
             cache=cache,
             tracker=tracker,
             options=options,

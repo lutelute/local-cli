@@ -26,6 +26,7 @@ from local_cli.clipboard import (
 )
 from local_cli.config import Config
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
+from local_cli.harness import HarnessConfig
 from local_cli.ideation import IdeationEngine
 from local_cli.knowledge import KnowledgeError, KnowledgeNotFoundError, KnowledgeStore
 from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_model_preset
@@ -34,6 +35,8 @@ from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.prompts import build_system_prompt
 from local_cli.session import SessionManager
 from local_cli.skills import SkillsLoader
+from local_cli.token_tracker import TokenTracker
+from local_cli.tool_cache import ToolCache
 from local_cli.tools.base import Tool
 
 # ---------------------------------------------------------------------------
@@ -1358,6 +1361,18 @@ def run_repl(
     # Session manager for /save command.
     session_manager = SessionManager(config.state_dir)
 
+    # Session-scoped tool cache and token tracker.  These were created
+    # but never wired into the loop before, so /usage always read zero
+    # and repeated reads always hit the disk.
+    tool_cache = ToolCache()
+    token_tracker = TokenTracker()
+
+    # Harness intervention switches (shared by every turn this session).
+    harness_config = HarnessConfig(
+        max_iterations=config.max_iterations,
+        compact_mode=config.compact_mode,
+    )
+
     # Build the REPL context for slash commands.
     ctx = _ReplContext(
         config=config,
@@ -1370,6 +1385,8 @@ def run_repl(
         rag_topk=rag_topk,
         orchestrator=orchestrator,
         model_manager=model_manager,
+        token_tracker=token_tracker,
+        tool_cache=tool_cache,
         sub_agent_runner=sub_agent_runner,
         plan_manager=plan_manager,
         knowledge_store=knowledge_store,
@@ -1491,16 +1508,40 @@ def run_repl(
         if family in SUPPORTS_THINKING:
             think = True if config.think_mode else False
 
+        # Resolve the active provider so /provider switches actually take
+        # effect.  The REPL previously always chatted through the raw
+        # Ollama client, silently ignoring a switch to Claude or
+        # llama-server.  Ollama stays on the raw client (identical
+        # behaviour); only non-Ollama providers go through the
+        # orchestrator, and they do not receive Ollama-only options.
+        active_client: object = client
+        chat_options: dict | None = inference_options
+        chat_think: bool | None = think
+        if orchestrator is not None:
+            active_name = orchestrator.get_active_provider_name()
+            if active_name != "ollama":
+                try:
+                    active_client = orchestrator.get_active_provider()
+                    chat_options = None
+                    chat_think = None
+                except ValueError as exc:
+                    sys.stderr.write(
+                        f"Provider error: {exc}; falling back to Ollama.\n"
+                    )
+
         # Run the agent loop (streams response to stdout).
         try:
             agent_loop(
-                client=client,
+                client=active_client,
                 model=config.model,
                 tools=tools,
                 messages=messages,
                 debug=config.debug,
-                options=inference_options,
-                think=think,
+                cache=tool_cache,
+                tracker=token_tracker,
+                options=chat_options,
+                think=chat_think,
+                harness=harness_config,
             )
         except KeyboardInterrupt:
             print("\nInterrupted.")

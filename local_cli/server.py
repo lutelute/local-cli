@@ -32,14 +32,12 @@ from typing import Any
 
 from local_cli.agent import (
     _COMPACT_TOKEN_THRESHOLD,
-    _TOOL_NUDGE_MESSAGE,
     _estimate_tokens,
     _needs_compaction,
-    _should_nudge_to_use_tools,
-    parse_tool_call,
-    run_tool,
+    run_agent,
     truncate_tool_output,
 )
+from local_cli.harness import AgentEvent, HarnessConfig
 from local_cli.clipboard import (
     ClipboardError,
     ClipboardUnavailableError,
@@ -318,124 +316,94 @@ class JsonLineServer:
         family = get_model_family(self._config.model)
         think = True if self._config.think_mode and family in SUPPORTS_THINKING else None
 
-        # Build keep_alive from config.
-        keep_alive = self._config.keep_alive
+        # Provider-specific kwargs: only Ollama accepts inference
+        # options / think / keep_alive.
+        options: dict[str, Any] | None = None
+        think_flag: bool | None = None
+        chat_extra: dict[str, Any] | None = None
+        if self._provider.name == "ollama":
+            options = inference_options
+            think_flag = think
+            if self._config.keep_alive is not None:
+                chat_extra = {"keep_alive": self._config.keep_alive}
 
-        # Build extra kwargs for providers that support them (Ollama).
-        chat_kwargs: dict[str, Any] = {
-            "model": self._config.model,
-            "messages": self._messages,
-            "tools": self._tool_defs,
-        }
-        if hasattr(self._provider, "chat_stream") and self._provider.name == "ollama":
-            chat_kwargs["options"] = inference_options
-            if think is not None:
-                chat_kwargs["think"] = think
-            if keep_alive is not None:
-                chat_kwargs["keep_alive"] = keep_alive
+        error_seen = False
 
-        max_iterations = 15
-        nudged = False  # one "use the tools" nudge per turn (see agent_loop)
-        for _ in range(max_iterations):
-            if self._stop_flag.is_set():
-                _send({"id": req_id, "type": "done"})
-                return
-
-            # Stream response from LLM.
-            full_content = ""
-            tool_calls = []
-
-            try:
-                for chunk in self._provider.chat_stream(**chat_kwargs):
-                    if self._stop_flag.is_set():
-                        break
-
-                    msg = chunk.get("message", {})
-                    delta = msg.get("content", "")
-                    if delta:
-                        full_content += delta
-                        _send({"id": req_id, "type": "stream", "content": delta})
-
-                    if msg.get("tool_calls"):
-                        tool_calls = msg["tool_calls"]
-
-                    if chunk.get("done"):
-                        break
-
-            except ProviderRequestError as exc:
-                _send({"id": req_id, "type": "error", "message": f"API error: {exc}"})
-                return
-            except ProviderConnectionError as exc:
-                _send({"id": req_id, "type": "error", "message": f"Connection error: {exc}"})
-                return
-            except ProviderStreamError as exc:
-                _send({"id": req_id, "type": "error", "message": f"Stream error: {exc}"})
-                return
-            except Exception as exc:
-                _send({"id": req_id, "type": "error", "message": str(exc)})
-                return
-
-            if self._stop_flag.is_set():
-                # Save whatever was generated so far.
-                if full_content:
-                    self._messages.append({"role": "assistant", "content": full_content})
-                _send({"id": req_id, "type": "done"})
-                return
-
-            # Append assistant message to history.
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": full_content}
-            if tool_calls:
-                assistant_msg["tool_calls"] = tool_calls
-            self._messages.append(assistant_msg)
-
-            # If no tool calls, we may be done -- but first nudge once if the
-            # model printed code instead of using a tool.
-            if not tool_calls:
-                if _should_nudge_to_use_tools(self._messages, assistant_msg, nudged):
-                    self._messages.append(dict(_TOOL_NUDGE_MESSAGE))
-                    nudged = True
-                    continue
-                _send({"id": req_id, "type": "done"})
-                return
-
-            # Execute tool calls.
-            for tc in tool_calls:
-                if self._stop_flag.is_set():
-                    _send({"id": req_id, "type": "done"})
-                    return
-
-                tool_name, tool_args, tool_call_id = parse_tool_call(tc)
-
+        def _emit(event: AgentEvent) -> None:
+            nonlocal error_seen
+            kind = event.kind
+            data = event.data
+            if kind == "content_delta":
+                _send({"id": req_id, "type": "stream", "content": data["text"]})
+            elif kind == "tool_start":
                 _send({
                     "id": req_id,
                     "type": "tool_call",
-                    "name": tool_name,
-                    "args": tool_args,
+                    "name": data["tool_name"],
+                    "args": data["arguments"],
                 })
-
-                result = run_tool(tool_name, tool_args, self._tool_map)
-
+            elif kind == "tool_result":
                 _send({
                     "id": req_id,
                     "type": "tool_result",
-                    "name": tool_name,
-                    "output": truncate_tool_output(result),
+                    "name": data["tool_name"],
+                    "output": truncate_tool_output(data["result"]),
+                })
+            elif kind == "error":
+                error_seen = True
+                prefix = {
+                    "request": "API error",
+                    "connection": "Connection error",
+                    "stream": "Stream error",
+                }.get(data.get("source", ""), "Error")
+                detail = data.get("detail") or data.get("message", "")
+                _send({
+                    "id": req_id,
+                    "type": "error",
+                    "message": f"{prefix}: {detail}",
+                })
+            elif kind in (
+                "rescue", "loop_warning", "loop_break", "limit",
+                "reminder", "verify_warning", "compaction", "retry",
+            ):
+                # Harness interventions, surfaced for UIs that want them.
+                _send({
+                    "id": req_id,
+                    "type": "harness",
+                    "event": kind,
+                    "data": data,
                 })
 
-                # Include tool_name and tool_call_id in the tool result
-                # message (critical for Claude compatibility).
-                tool_msg: dict[str, Any] = {
-                    "role": "tool",
-                    "tool_name": tool_name,
-                    "content": result,
-                }
-                if tool_call_id:
-                    tool_msg["tool_call_id"] = tool_call_id
-                self._messages.append(tool_msg)
+        # The unified agent loop (shared with the CLI, web monitor and
+        # sub-agents) brings compaction, tool-name resolution, text
+        # tool-call rescue, loop detection, the verification gate and
+        # overload retry to this path — previously a hand-rolled copy
+        # with none of those.
+        try:
+            run_agent(
+                self._provider,
+                self._config.model,
+                self._tools,
+                self._messages,
+                emit=_emit,
+                harness=HarnessConfig(
+                    max_iterations=self._config.max_iterations,
+                    compact_mode=self._config.compact_mode,
+                ),
+                cache=self._tool_cache,
+                tracker=self._token_tracker,
+                options=options,
+                think=think_flag,
+                chat_extra=chat_extra,
+                should_stop=self._stop_flag.is_set,
+            )
+        except Exception as exc:
+            _send({"id": req_id, "type": "error", "message": str(exc)})
+            return
 
-            # Loop back to let LLM process tool results.
-
-        _send({"id": req_id, "type": "done"})
+        # Preserve the historical contract: no "done" after an error.
+        if not error_seen:
+            _send({"id": req_id, "type": "done"})
 
     def _handle_command(self, req_id: int, command: str) -> None:
         parts = command.strip().split(maxsplit=1)

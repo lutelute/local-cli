@@ -32,6 +32,8 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "think_mode": False,
     "keep_alive": None,
     "llama_server_url": "http://localhost:8090",
+    "compact_mode": "truncate",
+    "max_iterations": 40,
 }
 
 # Mapping of environment variable names to config keys.
@@ -48,6 +50,8 @@ ENV_VAR_MAP: dict[str, str] = {
     "LOCAL_CLI_THINK_MODE": "think_mode",
     "LOCAL_CLI_KEEP_ALIVE": "keep_alive",
     "LLAMA_SERVER_URL": "llama_server_url",
+    "LOCAL_CLI_COMPACT_MODE": "compact_mode",
+    "LOCAL_CLI_MAX_ITERATIONS": "max_iterations",
 }
 
 # Maximum config file size in bytes (10KB).
@@ -240,6 +244,10 @@ class Config:
         self.think_mode: bool = _parse_bool(merged["think_mode"])
         self.keep_alive: str | None = _parse_optional_str(merged["keep_alive"])
         self.llama_server_url: str = str(merged["llama_server_url"]).rstrip("/")
+        # Harness settings: "truncate" (fast) or "summarize" (LLM-written
+        # summary with truncation fallback); 0 iterations = unlimited.
+        self.compact_mode: str = str(merged["compact_mode"])
+        self.max_iterations: int = int(merged["max_iterations"])  # type: ignore[arg-type]
 
     @property
     def has_claude_access(self) -> bool:
