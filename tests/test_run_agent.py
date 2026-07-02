@@ -756,6 +756,92 @@ class TestErrorStopGuard(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Search-then-write ordering guard
+# ---------------------------------------------------------------------------
+
+
+class TestSearchThenWriteGuard(unittest.TestCase):
+    """Mutations issued alongside discovery calls are deferred."""
+
+    def test_mixed_turn_defers_write_but_runs_search(self) -> None:
+        grep = _DummyTool(name="grep", result="src/utils.py:5:def calc_total")
+        write = _DummyTool(name="write", result="wrote")
+        client = _ScriptedClient([
+            _turn("", [
+                _call("grep", {"pattern": "calc_total"}),
+                _call("write", {"file_path": "new.py", "content": "x"}),
+            ]),
+            # Re-issues the write alone after seeing the search results.
+            _turn("", [_call("write", {
+                "file_path": "src/utils.py", "content": "fixed",
+            })]),
+            _turn("done"),
+        ])
+        events, emit = _recorder()
+        messages = [{"role": "user", "content": "find and fix calc_total"}]
+        result = run_agent(client, "m", [grep, write], messages, emit=emit)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(len(grep.calls), 1)      # search ran
+        self.assertEqual(len(write.calls), 1)     # only the re-issue ran
+        self.assertEqual(write.calls[0]["file_path"], "src/utils.py")
+        self.assertIn("write_deferred", _kinds(events))
+        deferred = [
+            m for m in messages
+            if m.get("role") == "tool" and "deferred" in m.get("content", "")
+        ]
+        self.assertEqual(len(deferred), 1)
+
+    def test_write_only_turn_not_deferred(self) -> None:
+        write = _DummyTool(name="write", result="wrote")
+        client = _ScriptedClient([
+            _turn("", [_call("write", {"file_path": "a.py", "content": "x"})]),
+            _turn("done"),
+        ])
+        events, emit = _recorder()
+        run_agent(client, "m", [write],
+                  [{"role": "user", "content": "write a.py"}], emit=emit)
+        self.assertEqual(len(write.calls), 1)
+        self.assertNotIn("write_deferred", _kinds(events))
+
+    def test_read_plus_write_not_deferred(self) -> None:
+        """Only grep/glob defer writes; read+write stays allowed."""
+        read = _DummyTool(name="read", result="contents")
+        write = _DummyTool(name="write", result="wrote")
+        client = _ScriptedClient([
+            _turn("", [
+                _call("read", {"file_path": "a.py"}),
+                _call("write", {"file_path": "b.py", "content": "x"}),
+            ]),
+            _turn("done"),
+        ])
+        events, emit = _recorder()
+        run_agent(client, "m", [read, write],
+                  [{"role": "user", "content": "copy a to b"}], emit=emit)
+        self.assertEqual(len(write.calls), 1)
+        self.assertNotIn("write_deferred", _kinds(events))
+
+    def test_guard_disabled_by_config(self) -> None:
+        grep = _DummyTool(name="grep", result="hit")
+        write = _DummyTool(name="write", result="wrote")
+        client = _ScriptedClient([
+            _turn("", [
+                _call("grep", {"pattern": "x"}),
+                _call("write", {"file_path": "a.py", "content": "x"}),
+            ]),
+            _turn("done"),
+        ])
+        events, emit = _recorder()
+        run_agent(
+            client, "m", [grep, write],
+            [{"role": "user", "content": "go"}], emit=emit,
+            harness=HarnessConfig(defer_writes_after_search=False),
+        )
+        self.assertEqual(len(write.calls), 1)
+        self.assertNotIn("write_deferred", _kinds(events))
+
+
+# ---------------------------------------------------------------------------
 # Summary compaction
 # ---------------------------------------------------------------------------
 

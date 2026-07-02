@@ -261,6 +261,7 @@ HARNESS_EVENTS = (
     "verify_warning",
     "nudge",
     "error_stop",
+    "write_deferred",
     "reminder",
     "limit",
     "retry",

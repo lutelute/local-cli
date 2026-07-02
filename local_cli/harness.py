@@ -91,6 +91,11 @@ class HarnessConfig:
         error_stop_guard: When the model tries to finish right after a
             failed tool call, push back once — small models routinely
             ignore the error and declare the task done.
+        defer_writes_after_search: When one assistant turn mixes
+            discovery calls (grep/glob) with mutations (write/edit),
+            defer the mutations — they were decided before the search
+            results existed, and small models write "fixes" into brand
+            new files while the search correctly locates the real one.
         compact_mode: ``"truncate"`` (classic in-place truncation) or
             ``"summarize"`` (ask the model to summarize older history,
             falling back to truncation on failure).
@@ -106,6 +111,7 @@ class HarnessConfig:
     verify_writes: bool = True
     todo_reminders: bool = True
     error_stop_guard: bool = True
+    defer_writes_after_search: bool = True
     compact_mode: str = "truncate"
     keep_recent: int = 10
     retry_on_overload: bool = True
@@ -483,6 +489,30 @@ def error_stop_message() -> dict[str, Any]:
             "</system-reminder>"
         ),
     }
+
+
+# Discovery tools whose results should be seen before a same-turn write.
+DISCOVERY_TOOLS = frozenset({"grep", "glob"})
+
+# Mutation tools deferred when issued alongside discovery calls.
+MUTATION_TOOLS = frozenset({"write", "edit"})
+
+
+def deferred_write_result(tool_name: str) -> str:
+    """Result string for a mutation deferred by the ordering guard.
+
+    Observed live (qwen3:0.6b): one turn issued ``grep("calc_total")``
+    plus a ``write`` of a brand-new file — the "fix" was decided before
+    the search results existed, while grep correctly located the real
+    function.  Deferring the mutation makes the model re-issue it with
+    the search results in hand.
+    """
+    return (
+        f"Error: {tool_name} deferred: it was issued in the same turn "
+        "as a search (grep/glob), so it could not have used the search "
+        "results. Read the search results above, then re-issue the "
+        f"{tool_name} against the correct existing file."
+    )
 
 
 def text_tool_nudge_message() -> dict[str, Any]:

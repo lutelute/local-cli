@@ -13,6 +13,8 @@ import time
 from typing import Any, Callable, Generator
 
 from local_cli.harness import (
+    DISCOVERY_TOOLS,
+    MUTATION_TOOLS,
     AgentEvent,
     EmitFn,
     HarnessConfig,
@@ -21,6 +23,7 @@ from local_cli.harness import (
     apply_summary,
     build_summary_request,
     compaction_bounds,
+    deferred_write_result,
     error_stop_message,
     extract_text_tool_calls,
     is_tools_unsupported_error,
@@ -1378,6 +1381,22 @@ def run_agent(
         # ---------------------------------------------------------------
         # 4. Execute each tool call and append results.
         # ---------------------------------------------------------------
+        # Search-then-write ordering guard: when this turn mixes
+        # discovery calls with mutations, the mutations were decided
+        # before the discovery results existed — defer them so the
+        # model re-issues them with the results in hand.
+        defer_mutations = False
+        if hc.defer_writes_after_search and len(tool_calls) > 1:
+            turn_names = set()
+            for tc in tool_calls:
+                name, _, _ = parse_tool_call(tc)
+                resolved_name = resolve_tool_name(name, tool_map)
+                if resolved_name is not None:
+                    turn_names.add(resolved_name)
+            defer_mutations = bool(turn_names & DISCOVERY_TOOLS) and bool(
+                turn_names & MUTATION_TOOLS
+            )
+
         loop_broken = False
         stopped = False
         for tc in tool_calls:
@@ -1429,6 +1448,22 @@ def run_agent(
                     "result": result,
                     "cached": False,
                     "unknown": True,
+                    "tool_call_id": tool_call_id,
+                }))
+                messages.append(_tool_message(tool_name, result, tool_call_id))
+                continue
+
+            if defer_mutations and tool_name in MUTATION_TOOLS:
+                result = deferred_write_result(tool_name)
+                emit(AgentEvent("write_deferred", {
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                }))
+                emit(AgentEvent("tool_result", {
+                    "tool_name": tool_name,
+                    "result": result,
+                    "cached": False,
+                    "deferred": True,
                     "tool_call_id": tool_call_id,
                 }))
                 messages.append(_tool_message(tool_name, result, tool_call_id))
@@ -1657,6 +1692,13 @@ class _ConsoleEmitter:
             sys.stderr.write(
                 "  [harness] model tried to finish on a failed tool "
                 "call — pushing back\n"
+            )
+
+        elif kind == "write_deferred":
+            sys.stderr.write(
+                f"  [harness] {data['tool_name']} deferred — issued "
+                "alongside a search; the model should use the search "
+                "results first\n"
             )
 
         elif kind == "verify_warning":
