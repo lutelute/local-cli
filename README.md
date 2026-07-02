@@ -52,6 +52,22 @@ Think of it as a local, offline-capable alternative to cloud-based AI coding ass
 ### Agent Loop
 The LLM autonomously calls tools to complete tasks. It reads files, writes code, runs commands, and iterates until the task is done — no manual step-by-step prompting required.
 
+### Deterministic Harness
+A single unified loop (shared by the CLI, server, web monitor, and sub-agents) wraps the model with deterministic interventions that repair the failure modes of small local models — so a 1-9B model can sustain agentic sessions that would otherwise need a frontier model:
+
+| Intervention | What it fixes |
+|--------------|---------------|
+| **Text tool-call rescue** | Models that print their tool call as text (`<tool_call>` tags, fenced JSON, bare JSON) instead of a structured call still act |
+| **No-tool-support fallback** | Models whose endpoint rejects `tools` entirely (e.g. Japanese-specialized models) are taught a fenced-JSON call format and driven by text — they still work as agents |
+| **Tool-name / argument repair** | Near-miss names (`write_file` → `write`, `run` → `bash`) and keys (`path` → `file_path`) are resolved instead of erroring |
+| **Loop detection** | Repeated identical calls draw a corrective reminder, then a forced wrap-up — no more infinite retry loops |
+| **Post-write verification** | `.py`/`.json` files are syntax-checked immediately after write/edit; errors are fed straight back to the model |
+| **Edit recovery hints** | A failed `edit` shows the closest matching block from the file (with line numbers) so the next attempt copies the exact text |
+| **Todo staleness reminders** | A half-finished todo list is re-surfaced so multi-step work is not silently abandoned |
+| **Step limit** | After `max_iterations` the model gets one tool-free turn to summarize instead of running forever |
+| **Overload retry** | HTTP 503s retry with exponential backoff |
+| **Context compaction** | Truncation (default) or LLM summarization (`compact_mode=summarize`) with automatic fallback |
+
 ### 10 Built-in Tools
 
 | Tool | Description |
@@ -284,6 +300,8 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | `--server` | — | `false` | JSON-line server mode |
 | `--yes` / `-y` | — | `false` | Auto-approve risky commands (skip confirmation) |
 | `--update` | — | `false` | Check for updates |
+| — | `LOCAL_CLI_COMPACT_MODE` | `truncate` | Context compaction: `truncate` or `summarize` |
+| — | `LOCAL_CLI_MAX_ITERATIONS` | `40` | Agent step limit per turn (`0` = unlimited) |
 
 Config file location: `~/.config/local-cli/config` (key=value format).
 
@@ -318,8 +336,9 @@ Switch at runtime with `/provider claude` or `/provider ollama`.
 ```
 local-cli/
 ├── local_cli/
-│   ├── __main__.py              # Entry point
-│   ├── agent.py                 # Agent loop (LLM ↔ tools)
+│   ├── __main__.py              # Entry point (decomposed startup steps)
+│   ├── agent.py                 # Unified agent loop (run_agent + emitters)
+│   ├── harness.py               # Deterministic harness interventions
 │   ├── cli.py                   # REPL + slash commands
 │   ├── config.py                # Configuration (CLI > env > file > defaults)
 │   ├── server.py                # JSON-line server for desktop GUI
@@ -360,7 +379,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 1969 tests
+├── tests/                       # 2164 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -368,7 +387,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 1969 passed
+# 2164 passed
 ```
 
 ---
