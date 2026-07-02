@@ -15,7 +15,7 @@ retry the same wrong ``old_text`` forever.
 import difflib
 from pathlib import Path
 
-from local_cli.tools._fileio import atomic_write_text
+from local_cli.tools._fileio import atomic_write_text, not_found_error
 from local_cli.tools.base import Tool
 
 # Skip the similarity search on big inputs — it is O(lines * window).
@@ -202,7 +202,7 @@ class EditTool(Tool):
         path = Path(file_path)
 
         if not path.exists():
-            return f"Error: file not found: {file_path}"
+            return not_found_error(file_path)
 
         if not path.is_file():
             return f"Error: not a regular file: {file_path}"

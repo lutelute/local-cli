@@ -245,7 +245,7 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--timeout", type=int, default=120,
                         help="per-task timeout in seconds")
-    parser.add_argument("--max-iterations", type=int, default=6)
+    parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--out", default="",
                         help="write full JSON results to this path")
     parser.add_argument("--tasks", nargs="*", default=[],
