@@ -702,6 +702,29 @@ class TestErrorStopGuard(unittest.TestCase):
         )
         self.assertNotIn("error_stop", _kinds(events))
 
+    def test_pushback_on_unaddressed_verify_warning(self) -> None:
+        """Finishing on a syntax WARNING from the verify gate pushes back."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "bad.py")
+            client = _ScriptedClient([
+                _turn("", [_call("write", {
+                    "file_path": path, "content": "def f(:\n",
+                })]),
+                _turn("wrote it, done!"),   # ignoring the WARNING
+                _turn("let me fix that"),   # reply to the push-back
+            ])
+            events, emit = _recorder()
+            result = run_agent(
+                client, "m", [_FileWriteTool()],
+                [{"role": "user", "content": "write bad.py"}], emit=emit,
+            )
+        self.assertEqual(result, "let me fix that")
+        kinds = _kinds(events)
+        self.assertIn("verify_warning", kinds)
+        self.assertIn("error_stop", kinds)
+
 
 # ---------------------------------------------------------------------------
 # Summary compaction

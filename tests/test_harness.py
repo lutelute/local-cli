@@ -15,7 +15,9 @@ from local_cli.harness import (
     apply_summary,
     build_summary_request,
     compaction_bounds,
+    error_stop_message,
     extract_text_tool_calls,
+    last_tool_result_errored,
     loop_break_message,
     loop_warning_message,
     null_emit,
@@ -494,6 +496,92 @@ class TestTodoReminder(unittest.TestCase):
         ])]
         text = reminder.check(5, tools)
         self.assertIn("active task", text)
+
+
+# ---------------------------------------------------------------------------
+# last_tool_result_errored
+# ---------------------------------------------------------------------------
+
+
+class TestLastToolResultErrored(unittest.TestCase):
+    """Tests for the error-stop guard's finishing-on-failure detector."""
+
+    @staticmethod
+    def _history(*tail: dict) -> list[dict]:
+        base = [
+            {"role": "user", "content": "fix app.py"},
+        ]
+        return base + list(tail) + [
+            {"role": "assistant", "content": "done!"},
+        ]
+
+    def test_error_result_detected(self) -> None:
+        messages = self._history(
+            {"role": "assistant", "content": "", "tool_calls": [{}]},
+            {"role": "tool", "tool_name": "edit",
+             "content": "Error: old_text not found in app.py"},
+        )
+        self.assertTrue(last_tool_result_errored(messages))
+
+    def test_verify_warning_on_write_detected(self) -> None:
+        messages = self._history(
+            {"role": "assistant", "content": "", "tool_calls": [{}]},
+            {"role": "tool", "tool_name": "write",
+             "content": "Wrote app.py\n\nWARNING: app.py now contains a "
+                        "Python syntax error at line 1: invalid syntax."},
+        )
+        self.assertTrue(last_tool_result_errored(messages))
+
+    def test_warning_in_bash_output_not_detected(self) -> None:
+        """A stray WARNING in build output must not trigger the guard."""
+        messages = self._history(
+            {"role": "assistant", "content": "", "tool_calls": [{}]},
+            {"role": "tool", "tool_name": "bash",
+             "content": "gcc: WARNING: deprecated flag\nbuild ok"},
+        )
+        self.assertFalse(last_tool_result_errored(messages))
+
+    def test_successful_result_not_detected(self) -> None:
+        messages = self._history(
+            {"role": "assistant", "content": "", "tool_calls": [{}]},
+            {"role": "tool", "tool_name": "edit", "content": "--- diff ok"},
+        )
+        self.assertFalse(last_tool_result_errored(messages))
+
+    def test_reminder_messages_are_skipped(self) -> None:
+        """Harness-injected reminders between tool and answer are skipped."""
+        messages = self._history(
+            {"role": "assistant", "content": "", "tool_calls": [{}]},
+            {"role": "tool", "tool_name": "edit", "content": "Error: nope"},
+            {"role": "user",
+             "content": "<system-reminder>update your todos</system-reminder>"},
+            {"role": "assistant", "content": "hmm"},
+        )
+        self.assertTrue(last_tool_result_errored(messages))
+
+    def test_real_user_message_ends_the_walk(self) -> None:
+        """Errors from a previous turn are not this turn's business."""
+        messages = [
+            {"role": "user", "content": "first task"},
+            {"role": "assistant", "content": "", "tool_calls": [{}]},
+            {"role": "tool", "tool_name": "edit", "content": "Error: nope"},
+            {"role": "user", "content": "never mind, what is 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ]
+        self.assertFalse(last_tool_result_errored(messages))
+
+    def test_no_tools_this_turn(self) -> None:
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        self.assertFalse(last_tool_result_errored(messages))
+
+    def test_error_stop_message_shape(self) -> None:
+        msg = error_stop_message()
+        self.assertEqual(msg["role"], "user")
+        self.assertIn("<system-reminder>", msg["content"])
+        self.assertIn("Do not stop", msg["content"])
 
 
 # ---------------------------------------------------------------------------

@@ -424,25 +424,38 @@ def loop_break_message() -> dict[str, Any]:
 
 
 def last_tool_result_errored(messages: list[dict[str, Any]]) -> bool:
-    """Whether the most recent tool result in this turn was an error.
+    """Whether the most recent tool result in this turn demands follow-up.
 
     Walks backwards from just before the final assistant message,
     skipping harness-injected ``<system-reminder>`` user messages, and
-    reports whether the first tool message found carries an
-    ``Error:``-prefixed result.  A real user message ends the walk —
-    errors from a previous turn are not this turn's business.
+    reports whether the first tool message found carries either an
+    ``Error:``-prefixed result or a post-write verification ``WARNING:``
+    (only for write/edit results, so a stray "WARNING" in build output
+    never triggers it).  A real user message ends the walk — failures
+    from a previous turn are not this turn's business.
 
     Args:
         messages: The conversation history, whose last entry is the
             assistant message that carried no tool calls.
 
     Returns:
-        ``True`` when the model is about to finish on a failed tool call.
+        ``True`` when the model is about to finish on a failed tool
+        call or an unaddressed syntax warning.
     """
     for msg in reversed(messages[:-1]):
         role = msg.get("role")
         if role == "tool":
-            return (msg.get("content") or "").startswith("Error:")
+            content = msg.get("content") or ""
+            if content.startswith("Error:"):
+                return True
+            # The verification gate appends "WARNING: ..." to write/edit
+            # results when the file it produced fails a syntax check.
+            if (
+                msg.get("tool_name") in ("write", "edit")
+                and "WARNING:" in content
+            ):
+                return True
+            return False
         if role == "user":
             content = msg.get("content") or ""
             if content.startswith("<system-reminder>"):
@@ -454,19 +467,20 @@ def last_tool_result_errored(messages: list[dict[str, Any]]) -> bool:
 def error_stop_message() -> dict[str, Any]:
     """Build the push-back injected when finishing on a failed tool call.
 
-    Small models routinely ignore a tool error and declare the task
-    done (observed live: an edit whose ``old_text`` never matched,
-    followed by "fixed it!").  One deterministic push-back makes the
-    model either actually recover or explain the blocker.
+    Small models routinely ignore a tool error — or a syntax WARNING on
+    the file they just wrote — and declare the task done (both observed
+    live on qwen3:0.6b).  One deterministic push-back makes the model
+    either actually recover or explain the blocker.
     """
     return {
         "role": "user",
         "content": (
-            "<system-reminder>Your last tool call FAILED and you have "
-            "not fixed it. Do not stop here. Re-read the error message, "
-            "adjust the call (or read the file first to get the exact "
-            "text), and complete the task. Only if the task is truly "
-            "impossible, explain exactly why.</system-reminder>"
+            "<system-reminder>Your last tool call FAILED (or left a "
+            "syntax WARNING) and you have not fixed it. Do not stop "
+            "here. Re-read the error message, read the file to see its "
+            "current exact content, fix it, and complete the task. Only "
+            "if the task is truly impossible, explain exactly why."
+            "</system-reminder>"
         ),
     }
 

@@ -209,7 +209,9 @@ def _run_task(
             client, model, tools, messages,
             emit=emit,
             harness=HarnessConfig(max_iterations=max_iterations),
-            options={"num_ctx": 8192},
+            # Deterministic decoding so intervention changes are A/B
+            # comparable across eval runs.
+            options={"num_ctx": 8192, "temperature": 0, "seed": 42},
             think=think,
         )
     except _TaskTimeout:
