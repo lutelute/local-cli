@@ -42,6 +42,7 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [hasClaude, setHasClaude] = useState(false)
   const [rootDir, setRootDir] = useState<string | null>(null)
+  const [appVersion, setAppVersion] = useState('')
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0)
   const terminalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -59,6 +60,7 @@ export default function App() {
   // Initialize hasClaude, auth status, and rootDir on mount.
   useEffect(() => {
     if (!window.api) return
+    window.api.getAppVersion().then(setAppVersion)
     window.api.hasClaudeAccess().then(setHasClaude)
     // Don't auto-set rootDir — let the user choose via Open Folder.
     window.api.getClaudeAuth().then(auth => {
@@ -569,7 +571,7 @@ export default function App() {
             <div className="terminal-inner">
               {messages.length === 0 ? (
                 <div className="welcome">
-                  <Banner version="0.9.0" />
+                  <Banner version={appVersion} />
                   <div className="welcome-sub">
                     Local AI coding agent powered by Ollama.
                     Read, write, edit files. Run commands. Search code.

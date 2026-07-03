@@ -7,7 +7,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'path'
 
-const APP_VERSION = '0.9.0'
+// Read the real version from package.json (via Electron) instead of
+// hardcoding — a stale hardcode was shown in the UI for several releases.
+const APP_VERSION = app.getVersion()
 const GITHUB_REPO = 'lutelute/local-cli'
 
 // Claude auth credential storage path.
