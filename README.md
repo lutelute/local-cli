@@ -57,11 +57,12 @@ A single unified loop (shared by the CLI, server, web monitor, and sub-agents) w
 
 | Intervention | What it fixes |
 |--------------|---------------|
-| **Text tool-call rescue** | Models that print their tool call as text (`<tool_call>` tags, fenced JSON, bare JSON) instead of a structured call still act |
+| **Text tool-call rescue** | Models that print their tool call as text instead of a structured call still act — `<tool_call>` tags, fenced JSON, bare JSON, inlined arguments (`{"name": "write", "file_path": ...}`), tool-name-as-key (`{"write": {...}}`), and Python call syntax (`write(file_path=...)`) |
 | **No-tool-support fallback** | Models whose endpoint rejects `tools` entirely (e.g. Japanese-specialized models) are taught a fenced-JSON call format and driven by text — they still work as agents |
 | **Tool-name / argument repair** | Near-miss names (`write_file` → `write`, `run` → `bash`) and keys (`path` → `file_path`) are resolved instead of erroring |
 | **Loop detection** | Repeated identical calls draw a corrective reminder, then a forced wrap-up — no more infinite retry loops |
-| **Post-write verification** | `.py`/`.json` files are syntax-checked immediately after write/edit; errors are fed straight back to the model |
+| **Post-write verification** | `.py`/`.json`/`.toml` files are syntax-checked immediately after write/edit, and unresolved merge-conflict markers are flagged in files of any type; errors are fed straight back to the model |
+| **Finish guards** | An empty reply, or finishing right after a failed tool call — including a bash command that exited non-zero (`[exit code: N]`) — draws one deterministic push-back instead of ending the turn half-done |
 | **Edit recovery hints** | A failed `edit` shows the closest matching block from the file (with line numbers) so the next attempt copies the exact text |
 | **Todo staleness reminders** | A half-finished todo list is re-surfaced so multi-step work is not silently abandoned |
 | **Step limit** | After `max_iterations` the model gets one tool-free turn to summarize instead of running forever |
@@ -392,7 +393,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2220 tests
+├── tests/                       # 2254 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -400,7 +401,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2220 passed
+# 2254 passed
 ```
 
 ---

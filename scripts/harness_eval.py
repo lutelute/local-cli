@@ -189,6 +189,140 @@ def _check_todo_multi(workdir: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+# ---------------------------------------------------------------------------
+# Hard tasks: multi-step, self-verification, refactor.  These push past the
+# base suite's ceiling (tool-trained 4B models pass the base suite with zero
+# interventions) so the harness's marginal value on harder work is visible.
+# ---------------------------------------------------------------------------
+
+
+def _setup_hard_chain(workdir: Path) -> None:
+    (workdir / "seed.txt").write_text("7\n", encoding="utf-8")
+
+
+def _check_hard_chain(workdir: Path) -> tuple[bool, str]:
+    path = workdir / "square.txt"
+    if not path.is_file():
+        return False, "square.txt missing"
+    text = path.read_text(encoding="utf-8").strip()
+    if text != "49":
+        return False, f"square.txt is {text!r}, expected '49'"
+    return True, "ok"
+
+
+def _setup_hard_debug(workdir: Path) -> None:
+    (workdir / "buggy.py").write_text(
+        "def average(nums):\n"
+        "    return sum(nums) / len(nums)\n"
+        "\n"
+        "print(average([]))\n",
+        encoding="utf-8",
+    )
+
+
+def _check_hard_debug(workdir: Path) -> tuple[bool, str]:
+    namespace: dict = {}
+    path = workdir / "buggy.py"
+    if not path.is_file():
+        return False, "buggy.py missing"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(path.read_text(encoding="utf-8"), namespace)
+        avg = namespace["average"]
+        empty = avg([])
+        normal = avg([2, 4])
+    except Exception as exc:
+        return False, f"buggy.py still crashes: {exc}"
+    if empty != 0:
+        return False, f"average([]) returned {empty}, expected 0"
+    if normal != 3:
+        return False, f"average([2, 4]) returned {normal}, expected 3"
+    return True, "ok"
+
+
+def _setup_hard_refactor(workdir: Path) -> None:
+    (workdir / "mathlib.py").write_text(
+        "def compute(x):\n"
+        "    return x * 2\n"
+        "\n"
+        "print(compute(3))\n"
+        "print(compute(5))\n"
+        "result = compute(10)\n",
+        encoding="utf-8",
+    )
+
+
+def _check_hard_refactor(workdir: Path) -> tuple[bool, str]:
+    path = workdir / "mathlib.py"
+    if not path.is_file():
+        return False, "mathlib.py missing"
+    text = path.read_text(encoding="utf-8")
+    if "compute" in text:
+        return False, "old name 'compute' still present"
+    if "def double(" not in text:
+        return False, "double() not defined"
+    namespace: dict = {}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(text, namespace)
+    except Exception as exc:
+        return False, f"mathlib.py broken: {exc}"
+    fn = namespace.get("double")
+    if fn is None or fn(4) != 8:
+        return False, "double(4) != 8"
+    return True, "ok"
+
+
+def _check_hard_five(workdir: Path) -> tuple[bool, str]:
+    expected = {
+        "n1.txt": "1", "n2.txt": "1", "n3.txt": "2",
+        "n4.txt": "3", "n5.txt": "5",
+    }
+    for name, word in expected.items():
+        path = workdir / name
+        if not path.is_file():
+            return False, f"{name} missing"
+        if word not in path.read_text(encoding="utf-8"):
+            return False, f"{name} content wrong (want {word})"
+    return True, "ok"
+
+
+def _setup_hard_dependency(workdir: Path) -> None:
+    (workdir / "config.py").write_text("RATE = 5\n", encoding="utf-8")
+    (workdir / "billing.py").write_text(
+        "from config import RATE\n"
+        "\n"
+        "def total(qty):\n"
+        "    return qty + RATE\n"
+        "\n"
+        "print(total(10))\n",
+        encoding="utf-8",
+    )
+
+
+def _check_hard_dependency(workdir: Path) -> tuple[bool, str]:
+    if not (workdir / "billing.py").is_file():
+        return False, "billing.py missing"
+    cfg = (workdir / "config.py").read_text(encoding="utf-8")
+    if "RATE=5" not in cfg.replace(" ", ""):
+        return False, "config.py was altered (RATE must stay 5)"
+    # Run through a fresh importer so total() is exercised for real.
+    (workdir / "_run_dep.py").write_text(
+        "from billing import total\nprint(total(10))\n", encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, "_run_dep.py"],
+        cwd=str(workdir), capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        return False, f"billing.py broken: {detail[-1] if detail else '?'}"
+    out = (proc.stdout or "").strip().splitlines()
+    if not out or out[-1].strip() != "50":
+        return False, f"total(10) printed {out[-1] if out else '?'}, want 50"
+    return True, "ok"
+
+
 TASKS = [
     {
         "name": "create_file",
@@ -276,6 +410,60 @@ TASKS = [
         ),
         "setup": None,
         "check": _check_multi,
+    },
+]
+
+
+HARD_TASKS = [
+    {
+        "name": "hard_chain",
+        "prompt": (
+            "Read seed.txt, square the number it contains, and write the "
+            "result to square.txt. Then read square.txt back to confirm "
+            "it holds the correct value."
+        ),
+        "setup": _setup_hard_chain,
+        "check": _check_hard_chain,
+    },
+    {
+        "name": "hard_debug",
+        "prompt": (
+            "Running buggy.py crashes. Run it to see the error, then fix "
+            "average() so it returns 0 for an empty list, and run it "
+            "again to confirm it no longer crashes."
+        ),
+        "setup": _setup_hard_debug,
+        "check": _check_hard_debug,
+    },
+    {
+        "name": "hard_refactor",
+        "prompt": (
+            "In mathlib.py, rename the function compute to double. Update "
+            "the definition and every call site, then run it to confirm "
+            "it still works."
+        ),
+        "setup": _setup_hard_refactor,
+        "check": _check_hard_refactor,
+    },
+    {
+        "name": "hard_five",
+        "prompt": (
+            "Create five files n1.txt through n5.txt containing the first "
+            "five Fibonacci numbers: 1, 1, 2, 3, 5 (one number per file, "
+            "in order). Use the todo_write tool to track your progress."
+        ),
+        "setup": None,
+        "check": _check_hard_five,
+    },
+    {
+        "name": "hard_dependency",
+        "prompt": (
+            "Running billing.py prints total(10) as 15, but it should be "
+            "50 (qty * RATE). Find and fix the bug. Do NOT change the "
+            "RATE value in config.py."
+        ),
+        "setup": _setup_hard_dependency,
+        "check": _check_hard_dependency,
     },
 ]
 
@@ -478,11 +666,17 @@ def main() -> None:
                         help="leave-one-out ablation over the harness "
                              "interventions (baseline + one run per "
                              "intervention disabled)")
+    parser.add_argument("--hard", action="store_true",
+                        help="run the harder task suite (multi-step, "
+                             "self-verification, refactor) instead of the "
+                             "base suite")
     args = parser.parse_args()
 
-    tasks = TASKS
+    tasks = HARD_TASKS if args.hard else TASKS
     if args.tasks:
-        tasks = [t for t in TASKS if t["name"] in set(args.tasks)]
+        tasks = [
+            t for t in TASKS + HARD_TASKS if t["name"] in set(args.tasks)
+        ]
 
     client = OllamaClient()
 

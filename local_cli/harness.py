@@ -33,6 +33,10 @@ Components (all self-contained; no imports from the rest of local_cli):
 import ast
 import json
 import re
+try:  # tomllib is stdlib from Python 3.11; absent on 3.10
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - runtime-version dependent
+    tomllib = None
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -236,6 +240,21 @@ def _coerce_tool_call(obj: Any) -> tuple[str, dict[str, Any]] | None:
             name = value.strip()
             break
     if name is None:
+        # Some models emit the tool name as the sole key with the
+        # arguments as its value: {"write": {"file_path": "a.py", ...}}.
+        # Treat that shape as (key, value); the caller's resolver rejects
+        # it if the key is not a real tool, so false positives are gated.
+        if len(obj) == 1:
+            only_key, only_val = next(iter(obj.items()))
+            if (
+                isinstance(only_key, str)
+                and only_key.strip()
+                and only_key not in _NAME_KEYS
+                and only_key not in _ARGS_KEYS
+                and only_key != "function"
+                and isinstance(only_val, dict)
+            ):
+                return only_key.strip(), only_val
         return None
 
     args: Any = None
@@ -249,10 +268,98 @@ def _coerce_tool_call(obj: Any) -> tuple[str, dict[str, Any]] | None:
         except (json.JSONDecodeError, ValueError):
             args = None
     if args is None:
-        args = {}
+        # Fallback: some small models inline the arguments as top-level
+        # keys ({"name": "write", "file_path": "a.py", "content": "..."})
+        # instead of nesting them under "arguments"/"args".  Treat every
+        # key that is not a name or args key as an inlined argument, so the
+        # call is rescued with its arguments intact instead of empty.
+        args = {
+            k: v
+            for k, v in obj.items()
+            if k not in _NAME_KEYS and k not in _ARGS_KEYS and k != "function"
+        }
     if not isinstance(args, dict):
         return None
     return name, args
+
+
+# A Python-style call opener: an identifier immediately followed by "(".
+_PY_CALL_START_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+
+def _scan_python_calls(
+    text: str, limit: int = 8
+) -> list[tuple[str, dict[str, Any]]]:
+    """Find Python-style calls — ``name(key="v", ...)`` — in *text*.
+
+    Some small models emit a tool call as Python call syntax rather than
+    JSON.  Each ``identifier(`` opener is matched to its closing ``)``
+    with a string-aware, balanced-paren scan, the span is parsed with
+    :mod:`ast`, and calls whose arguments are all ``keyword=constant``
+    are returned as ``(name, arguments)``.  Positional args and
+    non-constant values are ignored; a call with no keyword arguments is
+    skipped (too ambiguous, and a common false positive in prose).
+
+    Args:
+        text: Arbitrary text possibly containing Python-style calls.
+        limit: Maximum number of calls to return.
+
+    Returns:
+        A list of ``(name, arguments)`` tuples in order of appearance.
+    """
+    results: list[tuple[str, dict[str, Any]]] = []
+    for match in _PY_CALL_START_RE.finditer(text):
+        if len(results) >= limit:
+            break
+        open_paren = match.end() - 1
+        depth = 0
+        in_str = False
+        quote = ""
+        esc = False
+        end = -1
+        for j in range(open_paren, len(text)):
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == quote:
+                    in_str = False
+            elif c in ("'", '"'):
+                in_str = True
+                quote = c
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            continue
+        span = text[match.start():end + 1].strip()
+        try:
+            node = ast.parse(span, mode="eval")
+        except (SyntaxError, ValueError):
+            continue
+        call = node.body
+        if not isinstance(call, ast.Call) or not isinstance(
+            call.func, ast.Name
+        ):
+            continue
+        if not call.keywords:
+            continue
+        args: dict[str, Any] = {}
+        ok = True
+        for kw in call.keywords:
+            if kw.arg is None or not isinstance(kw.value, ast.Constant):
+                ok = False
+                break
+            args[kw.arg] = kw.value.value
+        if ok:
+            results.append((call.func.id, args))
+    return results
 
 
 def extract_text_tool_calls(
@@ -283,7 +390,7 @@ def extract_text_tool_calls(
         ``{"function": {"name", "arguments"}, "id"}`` shape (ids are
         synthetic: ``text_rescue_N``), or an empty list.
     """
-    if not content or "{" not in content:
+    if not content or ("{" not in content and "(" not in content):
         return []
 
     candidates: list[Any] = []
@@ -320,6 +427,31 @@ def extract_text_tool_calls(
                 "id": f"text_rescue_{len(calls)}",
             }
         )
+
+    # Fallback: only when no JSON-shaped call was found, look for a
+    # Python-style call — write(file_path="a.py", content="...") — that
+    # some models emit instead of JSON.  Gated by the resolver like above.
+    if not calls:
+        for name, args in _scan_python_calls(content):
+            if len(calls) >= limit:
+                break
+            if resolver(name) is None:
+                continue
+            try:
+                key = name + "\x00" + json.dumps(
+                    args, sort_keys=True, default=str
+                )
+            except (TypeError, ValueError):
+                key = name + "\x00" + str(args)
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(
+                {
+                    "function": {"name": name, "arguments": args},
+                    "id": f"text_rescue_{len(calls)}",
+                }
+            )
     return calls
 
 
@@ -434,6 +566,22 @@ def loop_break_message() -> dict[str, Any]:
     }
 
 
+# The bash tool appends this marker only when a command exits non-zero.
+_BASH_EXIT_FAIL_RE = re.compile(r"\[exit code: (\d+)\]")
+
+
+def _bash_exit_failed(content: str) -> bool:
+    """Whether a bash tool result reports a non-zero exit code.
+
+    The bash tool appends ``[exit code: N]`` only when the command failed
+    (``returncode != 0``), so any match already means failure — the
+    ``!= "0"`` guard is defensive in case that convention ever changes.
+    """
+    return any(
+        m.group(1) != "0" for m in _BASH_EXIT_FAIL_RE.finditer(content)
+    )
+
+
 def last_tool_result_errored(messages: list[dict[str, Any]]) -> bool:
     """Whether the most recent tool result in this turn demands follow-up.
 
@@ -465,6 +613,12 @@ def last_tool_result_errored(messages: list[dict[str, Any]]) -> bool:
                 msg.get("tool_name") in ("write", "edit")
                 and "WARNING:" in content
             ):
+                return True
+            # A bash command that exited non-zero (a failing test or a
+            # crashing script) carries no "Error:" prefix — the bash tool
+            # appends an "[exit code: N]" marker instead.  Small models run
+            # a failing test, watch it fail, and still declare done.
+            if msg.get("tool_name") == "bash" and _bash_exit_failed(content):
                 return True
             return False
         if role == "user":
@@ -666,8 +820,10 @@ def verify_file_write(
     appending a warning to the tool result puts the error in front of
     the model while it still has the file in context.
 
-    Only ``.py`` (via ``ast.parse``) and ``.json`` (via ``json.loads``)
-    are checked — both come with the stdlib and are cheap.
+    Merge-conflict markers (``<<<<<<<`` / ``>>>>>>>``) are flagged for
+    any file type; ``.py`` (``ast.parse``), ``.json`` (``json.loads``)
+    and ``.toml`` (``tomllib``) are additionally syntax-checked — all
+    stdlib and cheap.
 
     Args:
         tool_name: The resolved tool name that just ran.
@@ -688,8 +844,6 @@ def verify_file_write(
 
     path = Path(file_path)
     suffix = path.suffix.lower()
-    if suffix not in (".py", ".json"):
-        return None
 
     try:
         if not path.is_file() or path.stat().st_size > _VERIFY_MAX_BYTES:
@@ -697,6 +851,16 @@ def verify_file_write(
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
+    # Merge-conflict markers break a file of any type and are almost never
+    # legitimate; require both an opener and a closer so a decorative
+    # "=======" rule alone never triggers a false positive.  This is the
+    # only post-write check that applies to every suffix.
+    if "<<<<<<<" in text and ">>>>>>>" in text:
+        return (
+            f"WARNING: {file_path} contains unresolved merge-conflict "
+            "markers (<<<<<<< / >>>>>>>). Remove them before finishing."
+        )
 
     if suffix == ".py":
         try:
@@ -707,12 +871,20 @@ def verify_file_write(
                 f"at line {exc.lineno}: {exc.msg}. Read the surrounding "
                 "lines and fix it before finishing."
             )
-    else:  # .json
+    elif suffix == ".json":
         try:
             json.loads(text)
         except ValueError as exc:
             return (
                 f"WARNING: {file_path} is not valid JSON after this "
+                f"change: {exc}. Fix it before finishing."
+            )
+    elif suffix == ".toml" and tomllib is not None:
+        try:
+            tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            return (
+                f"WARNING: {file_path} is not valid TOML after this "
                 f"change: {exc}. Fix it before finishing."
             )
     return None
