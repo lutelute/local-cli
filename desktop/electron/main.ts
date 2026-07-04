@@ -511,6 +511,53 @@ ipcMain.handle('check-app-update', async () => {
   }
 })
 
+// Write a self-deleting install script for the pending update.
+//
+// Hardened after a real 0.11.0 → 0.12.0 field failure:
+// - Waits on the exact main-process PID (`kill -0`), NOT `pgrep -f <name>`
+//   — name matching also hits unrelated processes whose command line merely
+//   contains the app name (a terminal, a watcher script), blocking the
+//   install forever while the app re-downloads in a loop.
+// - Unique script path per update — the old fixed path let a second update
+//   overwrite the script file while an earlier bash was still executing it.
+// - macOS swap is restorable: the old bundle is moved aside and put back if
+//   the swap fails, instead of being `rm -rf`ed before the `mv`.
+function writeInstallScript(opts: {
+  currentAppPath: string
+  newAppPath: string
+  tmpArchive: string
+  tmpDir?: string
+}): string {
+  const installScript = path.join(os.tmpdir(), `local-cli-update-${Date.now()}.sh`)
+  if (process.platform === 'darwin') {
+    fs.writeFileSync(installScript, `#!/bin/bash
+while kill -0 ${process.pid} 2>/dev/null; do sleep 0.5; done
+TRASH="${opts.currentAppPath}.old-${Date.now()}"
+mv "${opts.currentAppPath}" "$TRASH" || exit 1
+if mv "${opts.newAppPath}" "${opts.currentAppPath}"; then
+  rm -rf "$TRASH"
+else
+  mv "$TRASH" "${opts.currentAppPath}"
+fi
+rm -f "${opts.tmpArchive}"
+${opts.tmpDir ? `rm -rf "${opts.tmpDir}"` : ':'}
+open "${opts.currentAppPath}"
+rm -f "${installScript}"
+`, { mode: 0o755 })
+  } else {
+    fs.writeFileSync(installScript, `#!/bin/bash
+while kill -0 ${process.pid} 2>/dev/null; do sleep 0.5; done
+cp "${opts.newAppPath}" "${opts.currentAppPath}"
+chmod +x "${opts.currentAppPath}"
+rm -f "${opts.tmpArchive}"
+${opts.tmpDir ? `rm -rf "${opts.tmpDir}"` : ':'}
+"${opts.currentAppPath}" &
+rm -f "${installScript}"
+`, { mode: 0o755 })
+  }
+  return installScript
+}
+
 ipcMain.handle('install-app-update', async (_event, zipUrl: string) => {
   // Download ZIP, extract, replace current app, restart.
   // Progress events sent via mainWindow.webContents.send('update-progress', ...)
@@ -546,7 +593,7 @@ ipcMain.handle('install-app-update', async (_event, zipUrl: string) => {
     }
     sendProgress('extracting', 100)
 
-    const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
+    let installScript: string
 
     if (process.platform === 'darwin') {
       // macOS: Find the .app bundle in extracted contents.
@@ -564,18 +611,9 @@ ipcMain.handle('install-app-update', async (_event, zipUrl: string) => {
       }
 
       sendProgress('installing', 0)
-      fs.writeFileSync(installScript, `#!/bin/bash
-sleep 1
-while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do
-  sleep 0.5
-done
-rm -rf "${currentAppPath}"
-mv "${newAppPath}" "${currentAppPath}"
-rm -f "${tmpZip}"
-rm -rf "${tmpDir}"
-open "${currentAppPath}"
-rm -f "${installScript}"
-`, { mode: 0o755 })
+      installScript = writeInstallScript({
+        currentAppPath, newAppPath, tmpArchive: tmpZip, tmpDir,
+      })
     } else if (process.platform === 'linux') {
       // Linux: Replace AppImage in place.
       const entries = fs.readdirSync(tmpDir)
@@ -586,18 +624,9 @@ rm -f "${installScript}"
       const currentAppPath = process.env.APPIMAGE || app.getPath('exe')
 
       sendProgress('installing', 0)
-      fs.writeFileSync(installScript, `#!/bin/bash
-sleep 1
-while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do
-  sleep 0.5
-done
-cp "${newAppPath}" "${currentAppPath}"
-chmod +x "${currentAppPath}"
-rm -f "${tmpZip}"
-rm -rf "${tmpDir}"
-"${currentAppPath}" &
-rm -f "${installScript}"
-`, { mode: 0o755 })
+      installScript = writeInstallScript({
+        currentAppPath, newAppPath, tmpArchive: tmpZip, tmpDir,
+      })
     } else {
       throw new Error('Auto-update is not supported on this platform.')
     }
@@ -723,17 +752,9 @@ app.whenReady().then(async () => {
 
             if (currentAppPath.endsWith('.app')) {
               sendProgress('installing', 50)
-              const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
-              fs.writeFileSync(installScript, `#!/bin/bash
-sleep 1
-while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do sleep 0.5; done
-rm -rf "${currentAppPath}"
-mv "${newAppPath}" "${currentAppPath}"
-rm -f "${tmpFile}"
-rm -rf "${tmpDir}"
-open "${currentAppPath}"
-rm -f "${installScript}"
-`, { mode: 0o755 })
+              const installScript = writeInstallScript({
+                currentAppPath, newAppPath, tmpArchive: tmpFile, tmpDir,
+              })
 
               spawn('bash', [installScript], { detached: true, stdio: 'ignore' }).unref()
               sendProgress('installing', 100)
@@ -744,16 +765,9 @@ rm -f "${installScript}"
           // Linux: Replace AppImage in place.
           const currentAppPath = process.env.APPIMAGE || app.getPath('exe')
           sendProgress('installing', 50)
-          const installScript = path.join(os.tmpdir(), 'local-cli-update.sh')
-          fs.writeFileSync(installScript, `#!/bin/bash
-sleep 1
-while pgrep -f "${path.basename(currentAppPath)}" > /dev/null 2>&1; do sleep 0.5; done
-cp "${tmpFile}" "${currentAppPath}"
-chmod +x "${currentAppPath}"
-rm -f "${tmpFile}"
-"${currentAppPath}" &
-rm -f "${installScript}"
-`, { mode: 0o755 })
+          const installScript = writeInstallScript({
+            currentAppPath, newAppPath: tmpFile, tmpArchive: tmpFile,
+          })
 
           spawn('bash', [installScript], { detached: true, stdio: 'ignore' }).unref()
           sendProgress('installing', 100)
