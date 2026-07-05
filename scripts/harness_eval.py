@@ -189,6 +189,35 @@ def _check_todo_multi(workdir: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _setup_ja_report(workdir: Path) -> None:
+    """Field-failure shape: a small project to read and summarize.
+
+    Deliberately seeds README.txt (not .md) so the check below can
+    assert the model created a NEW markdown file.
+    """
+    (workdir / "app.py").write_text(
+        "def add(a, b):\n    return a + b\n\nprint(add(2, 3))\n",
+        encoding="utf-8",
+    )
+    (workdir / "utils.py").write_text(
+        "def clamp(v, lo, hi):\n    return max(lo, min(hi, v))\n",
+        encoding="utf-8",
+    )
+    (workdir / "README.txt").write_text(
+        "demo project: small math utilities\n", encoding="utf-8",
+    )
+
+
+def _check_ja_report(workdir: Path) -> tuple[bool, str]:
+    md_files = sorted(workdir.glob("*.md"))
+    if not md_files:
+        return False, "no .md file created (report dumped to chat?)"
+    text = md_files[0].read_text(encoding="utf-8")
+    if len(text.strip()) < 80:
+        return False, f"{md_files[0].name} too short ({len(text)} chars)"
+    return True, "ok"
+
+
 # ---------------------------------------------------------------------------
 # Hard tasks: multi-step, self-verification, refactor.  These push past the
 # base suite's ceiling (tool-trained 4B models pass the base suite with zero
@@ -411,6 +440,20 @@ TASKS = [
         "setup": None,
         "check": _check_multi,
     },
+    # Field-failure shape (desktop, 0.12.0): read a folder, write a
+    # report as a .md file.  The model used to print the whole report
+    # into chat and finish without writing anything — the shape the
+    # deliverable guard exists for.  Kept in the base suite so this
+    # blind spot cannot reopen silently.
+    {
+        "name": "ja_report",
+        "prompt": (
+            "このフォルダのファイルを読んで、プロジェクトの内容をまとめた"
+            "報告書を mdファイルで作成してください。"
+        ),
+        "setup": _setup_ja_report,
+        "check": _check_ja_report,
+    },
 ]
 
 
@@ -475,6 +518,7 @@ HARNESS_EVENTS = (
     "loop_break",
     "verify_warning",
     "nudge",
+    "deliverable_nudge",
     "error_stop",
     "write_deferred",
     "empty_response",
@@ -500,6 +544,7 @@ ABLATIONS: list[tuple[str, dict]] = [
     ("-defer_writes", {"defer_writes_after_search": False}),
     ("-empty_guard", {"empty_response_guard": False}),
     ("-todo_reminders", {"todo_reminders": False}),
+    ("-deliverable_guard", {"deliverable_guard": False}),
 ]
 
 
