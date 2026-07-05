@@ -318,9 +318,18 @@ class JsonLineServer:
             user_options["top_k"] = self._config.top_k
         inference_options = {**default_options, **preset_options, **user_options}
 
-        # Determine think mode (only for models that support it).
+        # Determine think mode (only for models that support it).  For
+        # thinking-capable families the flag is passed EXPLICITLY (True or
+        # False, matching the CLI) — leaving it unset lets e.g. qwen3.5
+        # default to thinking, which swallows the reply into the thinking
+        # channel: the GUI then shows tool calls followed by nothing
+        # (observed live on the desktop app, 0.12.0).
         family = get_model_family(self._config.model)
-        think = True if self._config.think_mode and family in SUPPORTS_THINKING else None
+        think = (
+            bool(self._config.think_mode)
+            if family in SUPPORTS_THINKING
+            else None
+        )
 
         # Provider-specific kwargs: only Ollama accepts inference
         # options / think / keep_alive.
@@ -368,9 +377,19 @@ class JsonLineServer:
                     "type": "error",
                     "message": f"{prefix}: {detail}",
                 })
+            elif kind == "thinking_delta":
+                # Surface thinking so the GUI can show progress instead
+                # of dead air during long reasoning stretches.
+                _send({
+                    "id": req_id,
+                    "type": "thinking",
+                    "content": data.get("text", ""),
+                })
             elif kind in (
                 "rescue", "loop_warning", "loop_break", "limit",
                 "reminder", "verify_warning", "compaction", "retry",
+                "nudge", "error_stop", "empty_response",
+                "tools_fallback", "write_deferred", "deliverable_nudge",
             ):
                 # Harness interventions, surfaced for UIs that want them.
                 _send({

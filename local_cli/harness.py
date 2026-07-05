@@ -104,6 +104,11 @@ class HarnessConfig:
             all (no content, no tool calls), push back once — small
             models go silent mid-task after a tool result instead of
             continuing or reporting.
+        deliverable_guard: When the request named a file/document
+            deliverable (report, レポート, an explicit .md/.txt name)
+            and the model is about to finish without any write/edit
+            this turn, push back once — models print the report into
+            chat and never create the file.
         compact_mode: ``"truncate"`` (classic in-place truncation) or
             ``"summarize"`` (ask the model to summarize older history,
             falling back to truncation on failure).
@@ -121,6 +126,7 @@ class HarnessConfig:
     error_stop_guard: bool = True
     defer_writes_after_search: bool = True
     empty_response_guard: bool = True
+    deliverable_guard: bool = True
     compact_mode: str = "truncate"
     keep_recent: int = 10
     retry_on_overload: bool = True
@@ -643,6 +649,65 @@ def empty_response_message() -> dict[str, Any]:
             "<system-reminder>Your reply was empty. If the task is not "
             "finished, make the next tool call now. If it is finished, "
             "state the result in one or two sentences.</system-reminder>"
+        ),
+    }
+
+
+# File-deliverable nouns: the user asked for a document to be produced.
+# Japanese stems match as substrings; English words match on word boundaries.
+_DELIVERABLE_KEYWORDS_JA: tuple[str, ...] = (
+    "報告書", "レポート", "ドキュメント", "資料", "議事録",
+    "手順書", "仕様書", "まとめ",
+)
+_DELIVERABLE_KEYWORDS_EN: frozenset[str] = frozenset({
+    "report", "summary", "document", "documentation", "writeup",
+})
+
+# An explicit file extension in the request is also a deliverable signal.
+_DELIVERABLE_EXT_RE = re.compile(
+    r"\.(md|txt|csv|json|html|rst)\b", re.IGNORECASE,
+)
+
+
+def mentions_file_deliverable(user_text: str) -> bool:
+    """Whether the user's request names a file/document deliverable.
+
+    Field failure (0.12.0): "このフォルダを読んで報告書をmdで作成して" — the
+    model read the files, then printed the report as *chat prose* and
+    finished without writing any file.  The code-print nudge never fired
+    because a prose report contains no code fence.  This detector feeds
+    the deliverable guard, which catches exactly that shape.
+
+    Args:
+        user_text: The most recent user message text.
+
+    Returns:
+        True when the request names a document/file to produce.
+    """
+    if _DELIVERABLE_EXT_RE.search(user_text):
+        return True
+    if any(stem in user_text for stem in _DELIVERABLE_KEYWORDS_JA):
+        return True
+    words = set(re.findall(r"[a-z]+", user_text.lower()))
+    return bool(words & _DELIVERABLE_KEYWORDS_EN)
+
+
+def deliverable_missing_message() -> dict[str, Any]:
+    """Build the push-back injected when finishing without the deliverable.
+
+    Fired once per turn when the request asked for a file/document, no
+    write/edit ran, and the model is about to finish (typically after
+    printing the whole report into chat).
+    """
+    return {
+        "role": "user",
+        "content": (
+            "<system-reminder>The request asked for a file deliverable "
+            "(a report/document), but no file has been written this "
+            "turn. Create it NOW with the write tool — pick a sensible "
+            "file name (e.g. report.md) and put your full findings in "
+            "it. Only if no file is actually needed, say so explicitly."
+            "</system-reminder>"
         ),
     }
 

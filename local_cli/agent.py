@@ -24,6 +24,7 @@ from local_cli.harness import (
     build_summary_request,
     compaction_bounds,
     deferred_write_result,
+    deliverable_missing_message,
     empty_response_message,
     error_stop_message,
     extract_text_tool_calls,
@@ -31,6 +32,7 @@ from local_cli.harness import (
     last_tool_result_errored,
     loop_break_message,
     loop_warning_message,
+    mentions_file_deliverable,
     null_emit,
     step_limit_message,
     text_tool_nudge_message,
@@ -1175,6 +1177,7 @@ def run_agent(
     nudged = False  # whether we've already nudged "use the tools" this turn
     error_nudged = False  # one push-back per turn for finishing on an error
     empty_nudged = False  # one push-back per turn for an empty reply
+    deliverable_nudged = False  # one push-back for finishing without the asked file
     force_final = False  # when True, the next LLM call gets no tools
     tools_disabled = False  # endpoint rejected tools; text-driven fallback
     final_content = ""
@@ -1390,6 +1393,22 @@ def run_agent(
                 messages.append(error_stop_message())
                 error_nudged = True
                 emit(AgentEvent("error_stop", {}))
+                continue
+            # Deliverable guard: the request named a file/document to
+            # produce, nothing was written this turn, and the model is
+            # about to finish — typically after printing the whole
+            # report into chat (observed live on the desktop app).
+            if (
+                not force_final
+                and hc.deliverable_guard
+                and not deliverable_nudged
+                and mentions_file_deliverable(_last_user_text(messages))
+                and _mentions_build_intent(_last_user_text(messages))
+                and not _wrote_file_this_turn(messages)
+            ):
+                messages.append(deliverable_missing_message())
+                deliverable_nudged = True
+                emit(AgentEvent("deliverable_nudge", {}))
                 continue
             break
 

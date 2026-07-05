@@ -154,6 +154,21 @@ export default function App() {
           break
         }
 
+        case 'thinking': {
+          // The model is reasoning with no visible output yet. Re-arm the
+          // thinking indicator (tool_call clears it) so a long reasoning
+          // stretch after tool calls doesn't look like a dead session.
+          setMessages(prev => {
+            const last = prev[prev.length - 1]
+            if (last?.id === activeMessageId.current && last.role === 'assistant' && !last.content) {
+              if (last.thinking) return prev
+              return [...prev.slice(0, -1), { ...last, thinking: true, streaming: true }]
+            }
+            return prev
+          })
+          break
+        }
+
         case 'tool_call': {
           const tc: ToolCall = { name: msg.name || '', args: msg.args || {} }
           setMessages(prev => {
