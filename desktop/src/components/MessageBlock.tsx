@@ -4,7 +4,17 @@ import type { Message } from '../types'
 type Props = { message: Message }
 
 export function MessageBlock({ message }: Props) {
-  const { role, content, toolCalls, toolResults, streaming, thinking } = message
+  const { role, content, toolCalls, toolResults, streaming, thinking, harnessEvents } = message
+
+  const harnessChips = harnessEvents && harnessEvents.length > 0 ? (
+    <div className="harness-events">
+      {harnessEvents.map((ev, i) => (
+        <span key={`h-${i}`} className="harness-chip" title={`harness intervention: ${ev}`}>
+          {harnessLabel(ev)}
+        </span>
+      ))}
+    </div>
+  ) : null
 
   if (role === 'system') {
     return (
@@ -32,6 +42,7 @@ export function MessageBlock({ message }: Props) {
   if (thinking && !content && !toolCalls?.length) {
     return (
       <div className="msg">
+        {harnessChips}
         <div className="msg-prompt">
           <span className="msg-marker agent">$</span>
           <span className="msg-body agent">
@@ -74,6 +85,8 @@ export function MessageBlock({ message }: Props) {
         />
       ))}
 
+      {harnessChips}
+
       {/* Waiting for next LLM response after tools executed */}
       {toolCalls && toolCalls.length > 0 && toolResults && toolResults.length >= toolCalls.length && streaming && (
         <div className="thinking-after-tool">
@@ -85,6 +98,33 @@ export function MessageBlock({ message }: Props) {
       )}
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Harness intervention labels
+// ---------------------------------------------------------------------------
+
+// The deterministic harness steers small models mid-run (rescuing text
+// tool calls, blocking premature finishes, ...).  Surfacing these as
+// chips turns "the app went silent" into "the harness is intervening".
+function harnessLabel(event: string): string {
+  switch (event) {
+    case 'rescue': return 'recovered tool call from text'
+    case 'tools_fallback': return 'text-mode tool fallback'
+    case 'loop_warning': return 'repeat loop warned'
+    case 'loop_break': return 'repeat loop broken'
+    case 'limit': return 'iteration limit reached'
+    case 'reminder': return 'todo reminder'
+    case 'verify_warning': return 'write verification warning'
+    case 'compaction': return 'context compacted'
+    case 'retry': return 'retrying after API overload'
+    case 'nudge': return 'nudged to act with tools'
+    case 'error_stop': return 'held: last tool failed'
+    case 'empty_response': return 'empty reply, retried'
+    case 'write_deferred': return 'write deferred until read'
+    case 'deliverable_nudge': return 'reminded to write the requested file'
+    default: return event
+  }
 }
 
 // ---------------------------------------------------------------------------

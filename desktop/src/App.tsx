@@ -198,13 +198,31 @@ export default function App() {
           break
         }
 
+        case 'harness': {
+          // A harness intervention fired (rescue, nudge, error stop, ...).
+          // Attach it to the active assistant message so the user sees the
+          // agent is being steered rather than a dead session.
+          const ev = msg.event || ''
+          if (!ev) break
+          setMessages(prev => {
+            const last = prev[prev.length - 1]
+            if (last?.id === activeMessageId.current && last.role === 'assistant') {
+              return [...prev.slice(0, -1), { ...last, harnessEvents: [...(last.harnessEvents || []), ev] }]
+            }
+            const newId = uid()
+            activeMessageId.current = newId
+            return [...prev, { id: newId, role: 'assistant', content: '', streaming: true, harnessEvents: [ev] }]
+          })
+          break
+        }
+
         case 'done':
         case 'stopped':
           setMessages(prev => {
             const last = prev[prev.length - 1]
             if (last?.id === activeMessageId.current) {
               // Remove empty thinking placeholders on stop.
-              if (!last.content && !last.toolCalls?.length) {
+              if (!last.content && !last.toolCalls?.length && !last.harnessEvents?.length) {
                 return prev.slice(0, -1)
               }
               return [...prev.slice(0, -1), { ...last, streaming: false, thinking: false }]

@@ -18,6 +18,7 @@ export type Message = {
   toolResults?: ToolResult[]
   streaming?: boolean
   thinking?: boolean
+  harnessEvents?: string[]
 }
 
 export type AppStatus = {
@@ -46,6 +47,7 @@ export type PythonMessage = {
   args?: Record<string, unknown>
   output?: string
   data?: unknown
+  event?: string
   model?: string
   tools?: string[]
   message?: string
