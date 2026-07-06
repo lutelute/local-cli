@@ -104,6 +104,15 @@ Create tagged snapshots before risky edits. Roll back instantly with `/rollback`
 ### Session Persistence
 Save conversations as JSONL files. Resume where you left off.
 
+### Project Instructions (LOCAL_CLI.md)
+Drop a `LOCAL_CLI.md` (or `AGENTS.md` / `CLAUDE.md`) into your project
+and it is injected into every session as system instructions — the
+per-project steering lever small models need most. Nearest directory
+wins, the lookup stops at the git root, content is clipped to 8KB.
+Live-verified: a filename mandate in LOCAL_CLI.md flips the model's
+output from its own choice to the mandated name. Disable with
+`LOCAL_CLI_PROJECT_INSTRUCTIONS=0`.
+
 ### Session Transcripts (flight recorder)
 Every session is automatically recorded as JSONL under
 `~/.local/state/local-cli/projects/<cwd-slug>/` from the moment a folder
@@ -322,6 +331,7 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | — | `LOCAL_CLI_COMPACT_MODE` | `truncate` | Context compaction: `truncate` or `summarize` |
 | — | `LOCAL_CLI_MAX_ITERATIONS` | `40` | Agent step limit per turn (`0` = unlimited) |
 | — | `LOCAL_CLI_SESSION_LOG` | `1` | Session transcripts (`0` disables). Written to `<state_dir>/projects/<cwd-slug>/` |
+| — | `LOCAL_CLI_PROJECT_INSTRUCTIONS` | `1` | Auto-inject project instruction files (`0` disables) |
 | `--mascot [style]` | `LOCAL_CLI_MASCOT` | `off` | Loca the local cat: `--mascot` for the one-line face `(=･ω･=)`, `--mascot pixel` for animated pixel art (TTY only; falls back to the face in pipes) |
 
 Config file location: `~/.config/local-cli/config` (key=value format).
@@ -402,7 +412,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2283 tests
+├── tests/                       # 2298 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -410,7 +420,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2283 passed
+# 2298 passed
 ```
 
 ---

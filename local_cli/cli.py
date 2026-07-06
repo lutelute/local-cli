@@ -33,6 +33,10 @@ from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_mod
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.prompts import build_skill_messages, build_system_prompt
+from local_cli.project_instructions import (
+    build_instruction_message,
+    load_project_instructions,
+)
 from local_cli.session import SessionManager
 from local_cli.session_log import SessionLogger
 from local_cli.skills import SkillsLoader
@@ -125,6 +129,7 @@ class _ReplContext:
         "skills_loader",
         "ideation_engine",
         "session_log",
+        "instruction_message",
         "active_plan_id",
         "current_mode",
         "ideation_messages",
@@ -150,6 +155,7 @@ class _ReplContext:
         skills_loader: SkillsLoader | None = None,
         ideation_engine: IdeationEngine | None = None,
         session_log: SessionLogger | None = None,
+        instruction_message: dict | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -170,6 +176,7 @@ class _ReplContext:
         self.skills_loader = skills_loader
         self.ideation_engine = ideation_engine
         self.session_log = session_log
+        self.instruction_message = instruction_message
         self.active_plan_id: str | None = None
         self.current_mode: str = "agent"
         self.ideation_messages: list[dict] = []
@@ -209,6 +216,8 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
     if cmd == "/clear":
         ctx.messages.clear()
         ctx.messages.append({"role": "system", "content": ctx.system_prompt})
+        if ctx.instruction_message is not None:
+            ctx.messages.append(ctx.instruction_message)
         if ctx.session_log is not None:
             # A cleared conversation is a new session — new transcript.
             ctx.session_log.log("cleared")
@@ -1396,6 +1405,20 @@ def run_repl(
         {"role": "system", "content": system_prompt},
     ]
 
+    # Project instruction file (LOCAL_CLI.md / AGENTS.md / CLAUDE.md):
+    # per-project steering, injected after the system prompt and
+    # re-injected on /clear.
+    instruction_source: str | None = None
+    instruction_message: dict | None = None
+    loaded_instructions = load_project_instructions()
+    if loaded_instructions is not None:
+        instruction_source, instruction_text = loaded_instructions
+        instruction_message = build_instruction_message(
+            instruction_source, instruction_text,
+        )
+        messages.append(instruction_message)
+        print(f"Project instructions loaded from {instruction_source}")
+
     # Session manager for /save command.
     session_manager = SessionManager(config.state_dir)
 
@@ -1412,6 +1435,8 @@ def run_repl(
         app_version=__version__,
         frontend="cli",
     )
+    if instruction_source is not None:
+        session_log.log("project_instructions", source=instruction_source)
 
     # Session-scoped tool cache and token tracker.  These were created
     # but never wired into the loop before, so /usage always read zero
@@ -1445,6 +1470,7 @@ def run_repl(
         skills_loader=skills_loader,
         ideation_engine=ideation_engine,
         session_log=session_log,
+        instruction_message=instruction_message,
     )
 
     # Set initial mode.

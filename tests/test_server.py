@@ -57,6 +57,8 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server._ideation_active = False
     server._skills_loader = None
     server._session_log = SessionLogger(".", enabled=False)
+    server._instruction_source = None
+    server._instruction_message = None
     return server
 
 

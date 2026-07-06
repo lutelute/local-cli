@@ -55,6 +55,10 @@ from local_cli.plan_manager import PlanManager
 from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRequestError, ProviderStreamError
 from local_cli.providers.claude_provider import ClaudeProvider
 from local_cli.providers.ollama_provider import OllamaProvider
+from local_cli.project_instructions import (
+    build_instruction_message,
+    load_project_instructions,
+)
 from local_cli.security import validate_model_name
 from local_cli.session_log import SessionLogger
 from local_cli.skills import SkillsLoader
@@ -139,6 +143,19 @@ class JsonLineServer:
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
         ]
+
+        # Project instruction file (LOCAL_CLI.md / AGENTS.md / CLAUDE.md):
+        # the per-project steering lever, injected right after the system
+        # prompt and re-injected on /clear.
+        self._instruction_source: str | None = None
+        self._instruction_message: dict[str, Any] | None = None
+        loaded_instructions = load_project_instructions()
+        if loaded_instructions is not None:
+            self._instruction_source, instruction_text = loaded_instructions
+            self._instruction_message = build_instruction_message(
+                self._instruction_source, instruction_text,
+            )
+            self._messages.append(self._instruction_message)
         self._tool_defs = self._provider.format_tools(self._tools)
         self._tool_map = {t.name: t for t in self._tools}
         self._stop_flag = threading.Event()
@@ -159,6 +176,10 @@ class JsonLineServer:
             app_version=__version__,
             frontend="server",
         )
+        if self._instruction_source is not None:
+            self._session_log.log(
+                "project_instructions", source=self._instruction_source,
+            )
 
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
@@ -960,6 +981,8 @@ class JsonLineServer:
     def _handle_clear(self, req_id: int) -> None:
         self._messages.clear()
         self._messages.append({"role": "system", "content": self._system_prompt})
+        if self._instruction_message is not None:
+            self._messages.append(self._instruction_message)
         self._tool_cache.clear()
         self._token_tracker.clear()
         # A cleared conversation is a new session — start a fresh transcript.
