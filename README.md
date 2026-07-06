@@ -104,6 +104,13 @@ Create tagged snapshots before risky edits. Roll back instantly with `/rollback`
 ### Session Persistence
 Save conversations as JSONL files. Resume where you left off.
 
+### Conversation Autosave & Resume
+The conversation is autosaved after every turn, per project. Quitting
+the app no longer loses your chat: the CLI offers `/resume` on startup,
+and the desktop app shows a Restore button when the folder has a
+previous conversation (`/clear` discards it). Save happens *before* the
+done signal, so even an instant quit keeps the last turn.
+
 ### Project Instructions (LOCAL_CLI.md)
 Drop a `LOCAL_CLI.md` (or `AGENTS.md` / `CLAUDE.md`) into your project
 and it is injected into every session as system instructions — the
@@ -412,7 +419,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2298 tests
+├── tests/                       # 2310 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -420,7 +427,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2298 passed
+# 2310 passed
 ```
 
 ---

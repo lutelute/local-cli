@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { Message, AppStatus, PythonMessage, ToolCall, ToolResult } from './types'
+import type { Message, AppStatus, PythonMessage, ResumableInfo, ToolCall, ToolResult } from './types'
 import { Banner } from './components/Banner'
 import { MessageBlock } from './components/MessageBlock'
 import { ModelPicker, CatalogModel, SearchResult, Recommendation, SystemInfo } from './components/ModelPicker'
@@ -43,6 +43,7 @@ export default function App() {
   const [hasClaude, setHasClaude] = useState(false)
   const [rootDir, setRootDir] = useState<string | null>(null)
   const [appVersion, setAppVersion] = useState('')
+  const [resumable, setResumable] = useState<ResumableInfo | null>(null)
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0)
   const terminalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -136,6 +137,8 @@ export default function App() {
           if (msg.has_claude !== undefined) {
             setHasClaude(!!msg.has_claude)
           }
+          // Offer to restore this folder's previous conversation.
+          setResumable(msg.resumable || null)
           // Fetch catalog.
           window.api.sendToPython({ id: nextId(), type: 'catalog' })
           break
@@ -255,7 +258,27 @@ export default function App() {
 
         case 'cleared':
           setMessages([])
+          setResumable(null)
           break
+
+        case 'cwd_changed':
+          // A new folder may have its own saved conversation to offer.
+          setResumable(msg.resumable || null)
+          break
+
+        case 'restored': {
+          // Rebuild the chat from the saved conversation.
+          const restored: Message[] = (msg.messages || [])
+            .filter(m => m.role === 'user' || m.role === 'assistant')
+            .map(m => ({
+              id: uid(),
+              role: m.role as Message['role'],
+              content: m.content,
+            }))
+          setMessages(restored)
+          setResumable(null)
+          break
+        }
 
         case 'catalog':
           if (msg.data && typeof msg.data === 'object') {
@@ -621,6 +644,26 @@ export default function App() {
                   <div className="welcome-hint">
                     Type a message below to start. Shift+Enter for newline.
                   </div>
+                  {resumable && (
+                    <div className="resume-bar">
+                      <span className="resume-text">
+                        Previous conversation ({resumable.count} messages)
+                        {resumable.preview ? ` — “${resumable.preview}”` : ''}
+                      </span>
+                      <button
+                        className="resume-btn"
+                        onClick={() => window.api.sendToPython({ id: nextId(), type: 'resume' })}
+                      >
+                        Restore
+                      </button>
+                      <button
+                        className="resume-dismiss"
+                        onClick={() => setResumable(null)}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 messages.map(msg => <MessageBlock key={msg.id} message={msg} />)

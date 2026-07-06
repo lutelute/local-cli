@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from local_cli.config import Config
+from local_cli.conversation_store import ConversationStore
 from local_cli.session_log import SessionLogger
 from local_cli.server import JsonLineServer
 from local_cli.token_tracker import TokenTracker
@@ -59,6 +60,7 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server._session_log = SessionLogger(".", enabled=False)
     server._instruction_source = None
     server._instruction_message = None
+    server._conversation_store = ConversationStore(".", enabled=False)
     return server
 
 

@@ -354,6 +354,48 @@ body {
   40% { opacity: 1; transform: scale(1.1); }
 }
 
+/* Resume bar (welcome screen) */
+.resume-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  max-width: 560px;
+}
+
+.resume-text {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-btn,
+.resume-dismiss {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+}
+
+.resume-btn {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.resume-btn:hover { background: var(--accent); color: var(--bg); }
+.resume-dismiss:hover { border-color: var(--text-muted); }
+
 /* Harness intervention chips */
 .harness-events {
   display: flex;

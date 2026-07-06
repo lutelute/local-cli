@@ -39,6 +39,12 @@ export type ReadFileResult =
   | { content: string; error?: never; size?: never }
   | { error: 'too_large'; size: number; content?: never }
 
+export type ResumableInfo = {
+  count: number
+  saved_at?: string
+  preview?: string
+}
+
 export type PythonMessage = {
   id?: number
   type: string
@@ -48,6 +54,8 @@ export type PythonMessage = {
   output?: string
   data?: unknown
   event?: string
+  resumable?: ResumableInfo | null
+  messages?: Array<{ role: string; content: string }>
   model?: string
   tools?: string[]
   message?: string

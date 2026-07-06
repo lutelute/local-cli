@@ -45,6 +45,7 @@ from local_cli.clipboard import (
     copy_to_clipboard,
 )
 from local_cli.config import Config
+from local_cli.conversation_store import ConversationStore
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.knowledge import KnowledgeStore
 from local_cli.model_catalog import get_merged_catalog, update_catalog
@@ -181,6 +182,10 @@ class JsonLineServer:
                 "project_instructions", source=self._instruction_source,
             )
 
+        # Last-conversation autosave: quit no longer loses the chat.
+        # Saved after every turn; restored via the "resume" request.
+        self._conversation_store = ConversationStore(self._config.state_dir)
+
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
         # Send ready signal.
@@ -192,6 +197,8 @@ class JsonLineServer:
             "tools": tool_names,
             "provider": getattr(self._config, "provider", "ollama"),
             "has_claude": has_claude,
+            # Offer to restore this folder's previous conversation.
+            "resumable": self._conversation_store.info(),
         })
 
         # Background auto-update check.
@@ -295,6 +302,8 @@ class JsonLineServer:
                     self._handle_switch_model(req_id, req.get("model", ""))
                 elif req_type == "clear":
                     self._handle_clear(req_id)
+                elif req_type == "resume":
+                    self._handle_resume(req_id)
                 elif req_type == "switch_provider":
                     self._handle_switch_provider(req_id, req.get("provider", ""))
                 elif req_type == "check_update":
@@ -461,13 +470,17 @@ class JsonLineServer:
         except Exception as exc:
             self._session_log.log("error", source="fatal", message=str(exc))
             self._session_log.log_turn_end(error=True)
+            self._conversation_store.save(self._messages)
             _send({"id": req_id, "type": "error", "message": str(exc)})
             return
 
+        # Persist BEFORE signalling done: a client that quits the moment
+        # it sees "done" (or crashes right after) must not lose the turn.
+        self._session_log.log_turn_end(error=error_seen)
+        self._conversation_store.save(self._messages)
         # Preserve the historical contract: no "done" after an error.
         if not error_seen:
             _send({"id": req_id, "type": "done"})
-        self._session_log.log_turn_end(error=error_seen)
 
     def _handle_command(self, req_id: int, command: str) -> None:
         parts = command.strip().split(maxsplit=1)
@@ -898,7 +911,46 @@ class JsonLineServer:
             # Update system message in conversation history.
             if self._messages and self._messages[0].get("role") == "system":
                 self._messages[0] = {"role": "system", "content": self._system_prompt}
-            _send({"id": req_id, "type": "cwd_changed", "path": path})
+
+            # Re-anchor the project-bound subsystems: a new folder means
+            # a new transcript, its own instruction file, and its own
+            # resumable conversation.
+            self._session_log.close()
+            self._session_log = SessionLogger(self._config.state_dir)
+            self._session_log.log_session_start(
+                model=self._config.model,
+                provider=self._provider.name,
+                app_version=__version__,
+                frontend="server",
+                reason="cwd_change",
+            )
+            if (
+                self._instruction_message is not None
+                and self._instruction_message in self._messages
+            ):
+                self._messages.remove(self._instruction_message)
+            self._instruction_source = None
+            self._instruction_message = None
+            loaded_instructions = load_project_instructions()
+            if loaded_instructions is not None:
+                self._instruction_source, instruction_text = loaded_instructions
+                self._instruction_message = build_instruction_message(
+                    self._instruction_source, instruction_text,
+                )
+                self._messages.insert(1, self._instruction_message)
+                self._session_log.log(
+                    "project_instructions", source=self._instruction_source,
+                )
+            self._conversation_store = ConversationStore(
+                self._config.state_dir,
+            )
+
+            _send({
+                "id": req_id,
+                "type": "cwd_changed",
+                "path": path,
+                "resumable": self._conversation_store.info(),
+            })
         except OSError as exc:
             _send({"id": req_id, "type": "error", "message": f"Cannot change directory: {exc}"})
 
@@ -985,7 +1037,8 @@ class JsonLineServer:
             self._messages.append(self._instruction_message)
         self._tool_cache.clear()
         self._token_tracker.clear()
-        # A cleared conversation is a new session — start a fresh transcript.
+        # A cleared conversation is a new session — start a fresh transcript
+        # and discard the resume copy (there is nothing left to restore).
         self._session_log.log("cleared")
         self._session_log.rotate()
         self._session_log.log_session_start(
@@ -995,7 +1048,41 @@ class JsonLineServer:
             frontend="server",
             reason="clear",
         )
+        self._conversation_store.clear()
         _send({"id": req_id, "type": "cleared"})
+
+    def _handle_resume(self, req_id: int) -> None:
+        """Restore this folder's last saved conversation."""
+        saved = self._conversation_store.load()
+        if not saved:
+            _send({
+                "id": req_id,
+                "type": "error",
+                "message": "No saved conversation to resume",
+            })
+            return
+        self._messages.clear()
+        self._messages.append(
+            {"role": "system", "content": self._system_prompt},
+        )
+        if self._instruction_message is not None:
+            self._messages.append(self._instruction_message)
+        self._messages.extend(saved)
+        self._session_log.log("resumed", count=len(saved))
+        # Replay the visible history so the GUI can rebuild the chat:
+        # user/assistant text only (tool plumbing stays internal).
+        display = [
+            {"role": m["role"], "content": str(m.get("content", ""))}
+            for m in saved
+            if m.get("role") in ("user", "assistant")
+            and str(m.get("content", "")).strip()
+        ]
+        _send({
+            "id": req_id,
+            "type": "restored",
+            "messages": display,
+            "count": len(saved),
+        })
 
     # ------------------------------------------------------------------
     # 007: Sub-agent handlers

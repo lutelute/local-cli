@@ -33,6 +33,7 @@ from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_mod
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.prompts import build_skill_messages, build_system_prompt
+from local_cli.conversation_store import ConversationStore
 from local_cli.project_instructions import (
     build_instruction_message,
     load_project_instructions,
@@ -54,6 +55,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "/exit": "Exit the REPL.",
     "/quit": "Exit the REPL (alias for /exit).",
     "/clear": "Clear conversation history.",
+    "/resume": "Restore this folder's last conversation.",
     "/model <name>": "Switch to a different model.",
     "/status": "Show current model, message count, connection status.",
     "/save": "Save the current session.",
@@ -130,6 +132,7 @@ class _ReplContext:
         "ideation_engine",
         "session_log",
         "instruction_message",
+        "conversation_store",
         "active_plan_id",
         "current_mode",
         "ideation_messages",
@@ -156,6 +159,7 @@ class _ReplContext:
         ideation_engine: IdeationEngine | None = None,
         session_log: SessionLogger | None = None,
         instruction_message: dict | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -177,6 +181,7 @@ class _ReplContext:
         self.ideation_engine = ideation_engine
         self.session_log = session_log
         self.instruction_message = instruction_message
+        self.conversation_store = conversation_store
         self.active_plan_id: str | None = None
         self.current_mode: str = "agent"
         self.ideation_messages: list[dict] = []
@@ -225,7 +230,32 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             ctx.session_log.log_session_start(
                 model=ctx.config.model, frontend="cli", reason="clear",
             )
+        if ctx.conversation_store is not None:
+            ctx.conversation_store.clear()
         print("Conversation history cleared.")
+        return True
+
+    # -- /resume ------------------------------------------------------------
+    if cmd == "/resume":
+        if ctx.conversation_store is None:
+            print("Resume is not available in this session.")
+            return True
+        saved = ctx.conversation_store.load()
+        if not saved:
+            print("No saved conversation to resume in this folder.")
+            return True
+        ctx.messages.clear()
+        ctx.messages.append({"role": "system", "content": ctx.system_prompt})
+        if ctx.instruction_message is not None:
+            ctx.messages.append(ctx.instruction_message)
+        ctx.messages.extend(saved)
+        if ctx.session_log is not None:
+            ctx.session_log.log("resumed", count=len(saved))
+        user_turns = sum(1 for m in saved if m.get("role") == "user")
+        print(
+            f"Restored {len(saved)} messages "
+            f"({user_turns} user turns). Continue where you left off."
+        )
         return True
 
     # -- /model <name> ------------------------------------------------------
@@ -1438,6 +1468,16 @@ def run_repl(
     if instruction_source is not None:
         session_log.log("project_instructions", source=instruction_source)
 
+    # Last-conversation autosave: quit no longer loses the chat.
+    conversation_store = ConversationStore(config.state_dir)
+    resumable = conversation_store.info()
+    if resumable is not None:
+        print(
+            f"Previous conversation found ({resumable['count']} messages"
+            + (f", {resumable['saved_at']}" if resumable["saved_at"] else "")
+            + "). Type /resume to restore it."
+        )
+
     # Session-scoped tool cache and token tracker.  These were created
     # but never wired into the loop before, so /usage always read zero
     # and repeated reads always hit the disk.
@@ -1471,6 +1511,7 @@ def run_repl(
         ideation_engine=ideation_engine,
         session_log=session_log,
         instruction_message=instruction_message,
+        conversation_store=conversation_store,
     )
 
     # Set initial mode.
@@ -1625,3 +1666,4 @@ def run_repl(
             session_log.log("error", source="fatal", message=str(exc))
             sys.stderr.write(f"Error: {exc}\n")
         session_log.log_turn_end(error=turn_error)
+        conversation_store.save(messages)
