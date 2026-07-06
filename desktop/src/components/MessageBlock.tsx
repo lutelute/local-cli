@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import type { Message } from '../types'
+import { Markdown } from './Markdown'
 
 type Props = { message: Message }
 
@@ -69,7 +70,7 @@ export function MessageBlock({ message }: Props) {
         <div className="msg-prompt">
           <span className="msg-marker agent">$</span>
           <span className="msg-body agent">
-            {content}
+            <Markdown text={content} />
             {streaming && !toolCalls?.length && <span className="cursor" />}
           </span>
         </div>

@@ -268,6 +268,9 @@ Terminal-style GUI with streaming chat, model management, and file browsing.
 
 ### Features
 - **Streaming chat** with real-time tool call display
+- **Markdown rendering** — headings, code blocks, lists, tables and links render properly (zero-dependency renderer; text stays text nodes so output cannot inject markup; links open in the system browser)
+- **Harness intervention chips** — rescue / nudge / deliverable_nudge and friends show as purple chips instead of dead air
+- **Conversation restore bar** — reopen a folder and pick up the previous chat
 - **Thinking indicator** — see when the AI is processing
 - **Model picker** — Catalog (curated) + Discover (live search from ollama.com)
 - **Provider switching** — Toggle between Ollama and Claude
