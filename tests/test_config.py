@@ -704,12 +704,23 @@ class TestConfigNumCtx(unittest.TestCase):
         return saved
 
     def test_config_num_ctx_default(self) -> None:
-        """Default num_ctx is 8192 when nothing is configured."""
+        """Default num_ctx is 0 = "auto" (adaptive per model/machine)."""
         saved_env = self._save_env()
         try:
             cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
-            self.assertEqual(cfg.num_ctx, 8192)
+            self.assertEqual(cfg.num_ctx, 0)
         finally:
+            os.environ.update(saved_env)
+
+    def test_config_num_ctx_auto_string(self) -> None:
+        """An explicit "auto" (env/file) maps to the 0 sentinel."""
+        saved_env = self._save_env()
+        try:
+            os.environ["LOCAL_CLI_NUM_CTX"] = "auto"
+            cfg = Config(config_file="/tmp/nonexistent_local_cli_config")
+            self.assertEqual(cfg.num_ctx, 0)
+        finally:
+            os.environ.pop("LOCAL_CLI_NUM_CTX", None)
             os.environ.update(saved_env)
 
     def test_config_num_ctx_from_env(self) -> None:

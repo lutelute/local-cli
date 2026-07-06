@@ -25,7 +25,9 @@ CONFIG_DEFAULTS: dict[str, object] = {
     "knowledge_dir": ".agents/knowledge",
     "skills_dir": ".agents/skills",
     "default_mode": "agent",
-    "num_ctx": 8192,
+    # "auto" sizes the context window per model and machine at runtime
+    # (see context_sizing.resolve_num_ctx); an integer pins it.
+    "num_ctx": "auto",
     "temperature": None,
     "top_p": None,
     "top_k": None,
@@ -257,7 +259,10 @@ class Config:
         self.knowledge_dir: str = str(merged["knowledge_dir"])
         self.skills_dir: str = str(merged["skills_dir"])
         self.default_mode: str = str(merged["default_mode"])
-        self.num_ctx: int = int(merged["num_ctx"])  # type: ignore[arg-type]
+        # 0 = "auto": resolved per model/machine each turn by
+        # context_sizing.resolve_num_ctx; any positive integer pins it.
+        raw_num_ctx = str(merged["num_ctx"]).strip().lower()
+        self.num_ctx: int = 0 if raw_num_ctx == "auto" else int(raw_num_ctx)
         self.temperature: float | None = _parse_optional_float(merged["temperature"])
         self.top_p: float | None = _parse_optional_float(merged["top_p"])
         self.top_k: int | None = _parse_optional_int(merged["top_k"])

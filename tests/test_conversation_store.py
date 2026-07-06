@@ -126,7 +126,9 @@ class TestServerResume(unittest.TestCase):
                 {"role": "tool", "content": "internal", "tool_name": "read"},
             ])
             sent: list[dict] = []
-            with patch("local_cli.server._send", side_effect=sent.append):
+            with patch("local_cli.server._send", side_effect=sent.append), \
+                 patch("local_cli.server.project_map_message",
+                       return_value=None):
                 server._handle_resume(7)
 
             self.assertEqual(
@@ -151,7 +153,9 @@ class TestServerResume(unittest.TestCase):
             server._conversation_store.save(
                 [{"role": "user", "content": "q"}],
             )
-            with patch("local_cli.server._send"):
+            with patch("local_cli.server._send"), \
+                 patch("local_cli.server.project_map_message",
+                       return_value=None):
                 server._handle_resume(1)
             self.assertEqual(server._messages[1]["content"],
                              "PROJECT INSTRUCTIONS")

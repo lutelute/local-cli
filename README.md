@@ -111,6 +111,20 @@ and the desktop app shows a Restore button when the folder has a
 previous conversation (`/clear` discards it). Save happens *before* the
 done signal, so even an instant quit keeps the last turn.
 
+### Adaptive Context Window
+`num_ctx` now defaults to `auto`: each turn resolves
+min(model's native window, RAM tier, 32k) — qwen3.5:9b reports a native
+262k context, and the old fixed default ran it at 8k (3% of its working
+memory). On a 32GB-class machine the agent's working memory quadruples,
+which is exactly where multi-file tasks and long tool outputs hurt.
+Pin it with `LOCAL_CLI_NUM_CTX=<int>`.
+
+### Project Map
+A capped, sorted file listing (git-aware, 120 entries / 2KB max) is
+injected at session start, so small models start with exact paths
+instead of burning their first iterations exploring. Rebuilt on /clear,
+resume and folder change. Disable with `LOCAL_CLI_PROJECT_MAP=0`.
+
 ### Project Instructions (LOCAL_CLI.md)
 Drop a `LOCAL_CLI.md` (or `AGENTS.md` / `CLAUDE.md`) into your project
 and it is injected into every session as system instructions — the
@@ -342,6 +356,8 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | — | `LOCAL_CLI_MAX_ITERATIONS` | `40` | Agent step limit per turn (`0` = unlimited) |
 | — | `LOCAL_CLI_SESSION_LOG` | `1` | Session transcripts (`0` disables). Written to `<state_dir>/projects/<cwd-slug>/` |
 | — | `LOCAL_CLI_PROJECT_INSTRUCTIONS` | `1` | Auto-inject project instruction files (`0` disables) |
+| — | `LOCAL_CLI_NUM_CTX` | `auto` | Context window: auto = per model x RAM (8k-32k); an integer pins it |
+| — | `LOCAL_CLI_PROJECT_MAP` | `1` | Inject the project file map at session start (`0` disables) |
 | `--mascot [style]` | `LOCAL_CLI_MASCOT` | `off` | Loca the local cat: `--mascot` for the one-line face `(=･ω･=)`, `--mascot pixel` for animated pixel art (TTY only; falls back to the face in pipes) |
 
 Config file location: `~/.config/local-cli/config` (key=value format).
@@ -422,7 +438,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2310 tests
+├── tests/                       # 2330 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -430,7 +446,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2310 passed
+# 2330 passed
 ```
 
 ---

@@ -39,6 +39,7 @@ from local_cli.model_presets import (  # noqa: E402
     get_model_family,
 )
 from local_cli.ollama_client import OllamaClient  # noqa: E402
+from local_cli.project_map import project_map_message  # noqa: E402
 from local_cli.prompts import build_system_prompt  # noqa: E402
 from local_cli.tools import get_default_tools  # noqa: E402
 
@@ -352,6 +353,98 @@ def _check_hard_dependency(workdir: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _setup_hard_multifile(workdir: Path) -> None:
+    (workdir / "lib.py").write_text(
+        "def transform(x):\n    return x * 3\n", encoding="utf-8",
+    )
+    (workdir / "app_a.py").write_text(
+        "from lib import transform\n\nprint(transform(2))\n",
+        encoding="utf-8",
+    )
+    (workdir / "app_b.py").write_text(
+        "from lib import transform\n\nprint(transform(5))\n",
+        encoding="utf-8",
+    )
+
+
+def _check_hard_multifile(workdir: Path) -> tuple[bool, str]:
+    for name in ("lib.py", "app_a.py", "app_b.py"):
+        path = workdir / name
+        if not path.is_file():
+            return False, f"{name} missing"
+        if "transform" in path.read_text(encoding="utf-8"):
+            return False, f"'transform' still present in {name}"
+    if "def scale(" not in (workdir / "lib.py").read_text(encoding="utf-8"):
+        return False, "scale() not defined in lib.py"
+    for name, want in (("app_a.py", "6"), ("app_b.py", "15")):
+        proc = subprocess.run(
+            [sys.executable, name],
+            cwd=str(workdir), capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip().splitlines()
+            return False, f"{name} broken: {detail[-1] if detail else '?'}"
+        out = (proc.stdout or "").strip().splitlines()
+        if not out or out[-1].strip() != want:
+            return False, f"{name} printed {out[-1] if out else '?'}, want {want}"
+    return True, "ok"
+
+
+_HARD_BUGHUNT_TEST = (
+    "from report import build\n"
+    "\n"
+    "assert build([2, 4, 6]) == 'mean=4.0', build([2, 4, 6])\n"
+    "print('ok')\n"
+)
+
+
+def _setup_hard_bughunt(workdir: Path) -> None:
+    """Five files; the bug hides two imports away from the failing test."""
+    (workdir / "config.py").write_text("PRECISION = 2\n", encoding="utf-8")
+    (workdir / "stats.py").write_text(
+        "def mean(nums):\n"
+        "    total = 0\n"
+        "    for n in nums[:-1]:\n"
+        "        total += n\n"
+        "    return total / len(nums)\n",
+        encoding="utf-8",
+    )
+    (workdir / "fmt.py").write_text(
+        "from config import PRECISION\n"
+        "\n"
+        "def fmt(x):\n"
+        "    return round(x, PRECISION)\n",
+        encoding="utf-8",
+    )
+    (workdir / "report.py").write_text(
+        "from stats import mean\n"
+        "from fmt import fmt\n"
+        "\n"
+        "def build(nums):\n"
+        "    return f'mean={fmt(mean(nums))}'\n",
+        encoding="utf-8",
+    )
+    (workdir / "test_report.py").write_text(
+        _HARD_BUGHUNT_TEST, encoding="utf-8",
+    )
+
+
+def _check_hard_bughunt(workdir: Path) -> tuple[bool, str]:
+    test_path = workdir / "test_report.py"
+    if not test_path.is_file():
+        return False, "test_report.py missing"
+    if test_path.read_text(encoding="utf-8") != _HARD_BUGHUNT_TEST:
+        return False, "test_report.py was modified (forbidden)"
+    proc = subprocess.run(
+        [sys.executable, "test_report.py"],
+        cwd=str(workdir), capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return False, f"test still failing: {detail[-1] if detail else '?'}"
+    return True, "ok"
+
+
 TASKS = [
     {
         "name": "create_file",
@@ -508,6 +601,27 @@ HARD_TASKS = [
         "setup": _setup_hard_dependency,
         "check": _check_hard_dependency,
     },
+    # claude-code-shaped work: cross-file rename with verification.
+    {
+        "name": "hard_multifile",
+        "prompt": (
+            "Rename the function transform to scale across this project: "
+            "update the definition in lib.py and every caller, then run "
+            "app_a.py and app_b.py to confirm both still work."
+        ),
+        "setup": _setup_hard_multifile,
+        "check": _check_hard_multifile,
+    },
+    # claude-code-shaped work: ambiguous symptom, bug two imports away.
+    {
+        "name": "hard_bughunt",
+        "prompt": (
+            "Running test_report.py fails. Something in this project is "
+            "broken — find it and fix it. Do not modify test_report.py."
+        ),
+        "setup": _setup_hard_bughunt,
+        "check": _check_hard_bughunt,
+    },
 ]
 
 # Harness intervention events worth counting.
@@ -581,10 +695,13 @@ def _run_task(
     if task["setup"] is not None:
         task["setup"](workdir)
 
-    messages = [
-        {"role": "system", "content": build_system_prompt(tools)},
-        {"role": "user", "content": task["prompt"]},
-    ]
+    messages = [{"role": "system", "content": build_system_prompt(tools)}]
+    # Mirror the shipped harness: the project map is part of what the
+    # frontends inject, so the eval measures the same configuration.
+    map_message = project_map_message(str(workdir))
+    if map_message is not None:
+        messages.append(map_message)
+    messages.append({"role": "user", "content": task["prompt"]})
 
     family = get_model_family(model)
     think = False if family in SUPPORTS_THINKING else None

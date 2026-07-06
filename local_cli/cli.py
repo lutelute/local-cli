@@ -33,11 +33,13 @@ from local_cli.model_presets import SUPPORTS_THINKING, get_model_family, get_mod
 from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.prompts import build_skill_messages, build_system_prompt
+from local_cli.context_sizing import resolve_num_ctx
 from local_cli.conversation_store import ConversationStore
 from local_cli.project_instructions import (
     build_instruction_message,
     load_project_instructions,
 )
+from local_cli.project_map import project_map_message
 from local_cli.session import SessionManager
 from local_cli.session_log import SessionLogger
 from local_cli.skills import SkillsLoader
@@ -132,6 +134,7 @@ class _ReplContext:
         "ideation_engine",
         "session_log",
         "instruction_message",
+        "map_message",
         "conversation_store",
         "active_plan_id",
         "current_mode",
@@ -159,6 +162,7 @@ class _ReplContext:
         ideation_engine: IdeationEngine | None = None,
         session_log: SessionLogger | None = None,
         instruction_message: dict | None = None,
+        map_message: dict | None = None,
         conversation_store: ConversationStore | None = None,
     ) -> None:
         self.config = config
@@ -181,6 +185,7 @@ class _ReplContext:
         self.ideation_engine = ideation_engine
         self.session_log = session_log
         self.instruction_message = instruction_message
+        self.map_message = map_message
         self.conversation_store = conversation_store
         self.active_plan_id: str | None = None
         self.current_mode: str = "agent"
@@ -223,6 +228,10 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         ctx.messages.append({"role": "system", "content": ctx.system_prompt})
         if ctx.instruction_message is not None:
             ctx.messages.append(ctx.instruction_message)
+        # Fresh snapshot: files created during the conversation show up.
+        ctx.map_message = project_map_message()
+        if ctx.map_message is not None:
+            ctx.messages.append(ctx.map_message)
         if ctx.session_log is not None:
             # A cleared conversation is a new session — new transcript.
             ctx.session_log.log("cleared")
@@ -248,6 +257,9 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
         ctx.messages.append({"role": "system", "content": ctx.system_prompt})
         if ctx.instruction_message is not None:
             ctx.messages.append(ctx.instruction_message)
+        ctx.map_message = project_map_message()
+        if ctx.map_message is not None:
+            ctx.messages.append(ctx.map_message)
         ctx.messages.extend(saved)
         if ctx.session_log is not None:
             ctx.session_log.log("resumed", count=len(saved))
@@ -1449,6 +1461,12 @@ def run_repl(
         messages.append(instruction_message)
         print(f"Project instructions loaded from {instruction_source}")
 
+    # Project map: exact paths up front so the model reads instead of
+    # exploring.  Rebuilt on /clear and /resume.
+    map_message = project_map_message()
+    if map_message is not None:
+        messages.append(map_message)
+
     # Session manager for /save command.
     session_manager = SessionManager(config.state_dir)
 
@@ -1470,6 +1488,7 @@ def run_repl(
 
     # Last-conversation autosave: quit no longer loses the chat.
     conversation_store = ConversationStore(config.state_dir)
+    last_ctx_logged: int | None = None
     resumable = conversation_store.info()
     if resumable is not None:
         print(
@@ -1511,6 +1530,7 @@ def run_repl(
         ideation_engine=ideation_engine,
         session_log=session_log,
         instruction_message=instruction_message,
+        map_message=map_message,
         conversation_store=conversation_store,
     )
 
@@ -1607,7 +1627,13 @@ def run_repl(
         # Build merged inference options: defaults < presets < user config.
         default_options: dict = {"num_ctx": 8192}
         preset_options = get_model_preset(config.model)
-        user_options: dict = {"num_ctx": config.num_ctx}
+        # Adaptive window (config "auto"): model capability x machine RAM,
+        # instead of pinning a 256k model to the historical 8k.
+        resolved_ctx = resolve_num_ctx(client, config.model, config.num_ctx)
+        if resolved_ctx != last_ctx_logged:
+            session_log.log("context_window", num_ctx=resolved_ctx)
+            last_ctx_logged = resolved_ctx
+        user_options: dict = {"num_ctx": resolved_ctx}
         if config.temperature is not None:
             user_options["temperature"] = config.temperature
         if config.top_p is not None:

@@ -47,6 +47,10 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server = JsonLineServer.__new__(JsonLineServer)
     server._config = Config()
     server._provider = provider
+    # Raw client stub: adaptive context sizing queries show_model; an
+    # empty reply keeps the resolver at the deterministic 8192 floor.
+    server._client = MagicMock()
+    server._client.show_model.return_value = {}
     server._tools = tools
     server._tool_map = {t.name: t for t in tools}
     server._tool_defs = []
@@ -60,6 +64,7 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server._session_log = SessionLogger(".", enabled=False)
     server._instruction_source = None
     server._instruction_message = None
+    server._map_message = None
     server._conversation_store = ConversationStore(".", enabled=False)
     return server
 

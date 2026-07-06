@@ -45,6 +45,7 @@ from local_cli.clipboard import (
     copy_to_clipboard,
 )
 from local_cli.config import Config
+from local_cli.context_sizing import resolve_num_ctx
 from local_cli.conversation_store import ConversationStore
 from local_cli.git_ops import GitError, GitNotInstalledError, GitOps
 from local_cli.knowledge import KnowledgeStore
@@ -60,6 +61,7 @@ from local_cli.project_instructions import (
     build_instruction_message,
     load_project_instructions,
 )
+from local_cli.project_map import project_map_message
 from local_cli.security import validate_model_name
 from local_cli.session_log import SessionLogger
 from local_cli.skills import SkillsLoader
@@ -157,6 +159,13 @@ class JsonLineServer:
                 self._instruction_source, instruction_text,
             )
             self._messages.append(self._instruction_message)
+
+        # Project map: exact paths up front so the model reads instead
+        # of exploring.  Rebuilt on /clear, resume and folder change.
+        self._map_message = project_map_message()
+        if self._map_message is not None:
+            self._messages.append(self._map_message)
+
         self._tool_defs = self._provider.format_tools(self._tools)
         self._tool_map = {t.name: t for t in self._tools}
         self._stop_flag = threading.Event()
@@ -354,7 +363,15 @@ class JsonLineServer:
         # Build merged inference options: defaults < presets < user config.
         default_options: dict[str, Any] = {"num_ctx": 8192}
         preset_options = get_model_preset(self._config.model)
-        user_options: dict[str, Any] = {"num_ctx": self._config.num_ctx}
+        # Adaptive window (config "auto"): model capability x machine RAM,
+        # instead of pinning a 256k model to the historical 8k.
+        resolved_ctx = resolve_num_ctx(
+            self._client, self._config.model, self._config.num_ctx,
+        )
+        if resolved_ctx != getattr(self, "_last_ctx_logged", None):
+            self._session_log.log("context_window", num_ctx=resolved_ctx)
+            self._last_ctx_logged = resolved_ctx
+        user_options: dict[str, Any] = {"num_ctx": resolved_ctx}
         if self._config.temperature is not None:
             user_options["temperature"] = self._config.temperature
         if self._config.top_p is not None:
@@ -941,6 +958,15 @@ class JsonLineServer:
                 self._session_log.log(
                     "project_instructions", source=self._instruction_source,
                 )
+            if (
+                self._map_message is not None
+                and self._map_message in self._messages
+            ):
+                self._messages.remove(self._map_message)
+            self._map_message = project_map_message()
+            if self._map_message is not None:
+                insert_at = 2 if self._instruction_message is not None else 1
+                self._messages.insert(insert_at, self._map_message)
             self._conversation_store = ConversationStore(
                 self._config.state_dir,
             )
@@ -1035,6 +1061,10 @@ class JsonLineServer:
         self._messages.append({"role": "system", "content": self._system_prompt})
         if self._instruction_message is not None:
             self._messages.append(self._instruction_message)
+        # Fresh snapshot: files created during the conversation show up.
+        self._map_message = project_map_message()
+        if self._map_message is not None:
+            self._messages.append(self._map_message)
         self._tool_cache.clear()
         self._token_tracker.clear()
         # A cleared conversation is a new session — start a fresh transcript
@@ -1067,6 +1097,9 @@ class JsonLineServer:
         )
         if self._instruction_message is not None:
             self._messages.append(self._instruction_message)
+        self._map_message = project_map_message()
+        if self._map_message is not None:
+            self._messages.append(self._map_message)
         self._messages.extend(saved)
         self._session_log.log("resumed", count=len(saved))
         # Replay the visible history so the GUI can rebuild the chat:
