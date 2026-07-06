@@ -452,6 +452,7 @@ class JsonLineServer:
                 "reminder", "verify_warning", "compaction", "retry",
                 "nudge", "error_stop", "empty_response",
                 "tools_fallback", "write_deferred", "deliverable_nudge",
+                "read_gate",
             ):
                 # Harness interventions, surfaced for UIs that want them.
                 _send({

@@ -7,6 +7,7 @@ tokens arrive.
 """
 
 import json
+import os
 import re
 import sys
 import time
@@ -28,12 +29,14 @@ from local_cli.harness import (
     empty_response_message,
     error_stop_message,
     extract_text_tool_calls,
+    files_known_to_conversation,
     is_tools_unsupported_error,
     last_tool_result_errored,
     loop_break_message,
     loop_warning_message,
     mentions_file_deliverable,
     null_emit,
+    read_gate_result,
     step_limit_message,
     text_tool_nudge_message,
     text_tools_fallback_message,
@@ -1183,6 +1186,15 @@ def run_agent(
     final_content = ""
     iteration = 0
 
+    # Read-before-edit gate state: files any read/write/edit has
+    # addressed so far (seeded from the conversation history), plus the
+    # files already deferred once this run (second attempt passes).
+    known_files: set[str] = (
+        files_known_to_conversation(messages)
+        if hc.read_before_edit else set()
+    )
+    read_gate_deferred: set[str] = set()
+
     while True:
         iteration += 1
 
@@ -1503,6 +1515,41 @@ def run_agent(
                 messages.append(_tool_message(tool_name, result, tool_call_id))
                 continue
 
+            # Read-before-edit gate: editing an existing file nothing
+            # has touched means old_text is a guess — defer once so the
+            # model reads and copies exact text.  Missing files fall
+            # through to the edit tool's own (clearer) error.
+            if (
+                hc.read_before_edit
+                and tool_name == "edit"
+                and isinstance(arguments, dict)
+            ):
+                edit_path = arguments.get("file_path")
+                if isinstance(edit_path, str) and edit_path:
+                    abs_edit_path = os.path.abspath(edit_path)
+                    if (
+                        abs_edit_path not in known_files
+                        and abs_edit_path not in read_gate_deferred
+                        and os.path.isfile(abs_edit_path)
+                    ):
+                        read_gate_deferred.add(abs_edit_path)
+                        result = read_gate_result(edit_path)
+                        emit(AgentEvent("read_gate", {
+                            "file_path": edit_path,
+                            "tool_call_id": tool_call_id,
+                        }))
+                        emit(AgentEvent("tool_result", {
+                            "tool_name": tool_name,
+                            "result": result,
+                            "cached": False,
+                            "deferred": True,
+                            "tool_call_id": tool_call_id,
+                        }))
+                        messages.append(
+                            _tool_message(tool_name, result, tool_call_id),
+                        )
+                        continue
+
             # Check cache for cacheable tools before execution.
             cached = False
             result = None
@@ -1578,6 +1625,16 @@ def run_agent(
                 "tool_call_id": tool_call_id,
             }))
             messages.append(_tool_message(tool_name, result, tool_call_id))
+
+            # Any executed file-addressed call marks the path as known
+            # for the read-before-edit gate (even a failed read: the
+            # model has now seen the real error for that path).
+            if tool_name in ("read", "write", "edit") and isinstance(
+                arguments, dict,
+            ):
+                executed_path = arguments.get("file_path")
+                if isinstance(executed_path, str) and executed_path:
+                    known_files.add(os.path.abspath(executed_path))
 
             if reminder is not None:
                 reminder.note_tool_use(iteration, tool_name)

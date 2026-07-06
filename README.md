@@ -63,6 +63,7 @@ A single unified loop (shared by the CLI, server, web monitor, and sub-agents) w
 | **Loop detection** | Repeated identical calls draw a corrective reminder, then a forced wrap-up — no more infinite retry loops |
 | **Post-write verification** | `.py`/`.json`/`.toml` files are syntax-checked immediately after write/edit, and unresolved merge-conflict markers are flagged in files of any type; errors are fed straight back to the model |
 | **Finish guards** | An empty reply, or finishing right after a failed tool call — including a bash command that exited non-zero (`[exit code: N]`) — draws one deterministic push-back instead of ending the turn half-done |
+| **Read-before-edit gate** | An `edit` of an existing file that nothing has read in the conversation is deferred once — a blind `old_text` is a guess that never matches. Files the model has read (or itself wrote) pass straight through |
 | **Edit recovery hints** | A failed `edit` shows the closest matching block from the file (with line numbers) so the next attempt copies the exact text |
 | **Todo staleness reminders** | A half-finished todo list is re-surfaced so multi-step work is not silently abandoned |
 | **Step limit** | After `max_iterations` the model gets one tool-free turn to summarize instead of running forever |
@@ -438,7 +439,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2330 tests
+├── tests/                       # 2338 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -446,7 +447,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2330 passed
+# 2338 passed
 ```
 
 ---

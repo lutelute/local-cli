@@ -635,6 +635,7 @@ HARNESS_EVENTS = (
     "deliverable_nudge",
     "error_stop",
     "write_deferred",
+    "read_gate",
     "empty_response",
     "reminder",
     "limit",
@@ -659,6 +660,7 @@ ABLATIONS: list[tuple[str, dict]] = [
     ("-empty_guard", {"empty_response_guard": False}),
     ("-todo_reminders", {"todo_reminders": False}),
     ("-deliverable_guard", {"deliverable_guard": False}),
+    ("-read_before_edit", {"read_before_edit": False}),
 ]
 
 

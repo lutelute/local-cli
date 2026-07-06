@@ -98,7 +98,7 @@ def main() -> None:
         elif ev.kind in (
             "rescue", "nudge", "error_stop", "empty_response",
             "tools_fallback", "write_deferred", "deliverable_nudge",
-            "loop_warning", "loop_break", "limit",
+            "read_gate", "loop_warning", "loop_break", "limit",
         ):
             print(f"  [harness] {ev.kind}")
 

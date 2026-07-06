@@ -123,6 +123,7 @@ function harnessLabel(event: string): string {
     case 'error_stop': return 'held: last tool failed'
     case 'empty_response': return 'empty reply, retried'
     case 'write_deferred': return 'write deferred until read'
+    case 'read_gate': return 'held: read the file before editing'
     case 'deliverable_nudge': return 'reminded to write the requested file'
     default: return event
   }

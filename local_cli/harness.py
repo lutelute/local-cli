@@ -32,6 +32,7 @@ Components (all self-contained; no imports from the rest of local_cli):
 
 import ast
 import json
+import os
 import re
 try:  # tomllib is stdlib from Python 3.11; absent on 3.10
     import tomllib
@@ -100,6 +101,12 @@ class HarnessConfig:
             defer the mutations — they were decided before the search
             results existed, and small models write "fixes" into brand
             new files while the search correctly locates the real one.
+        read_before_edit: Defer an ``edit`` of an existing file that no
+            read/write/edit call has touched anywhere in the
+            conversation — small models edit blind and their
+            ``old_text`` never matches the file.  One deferral per
+            file per run; a file the model has read (or itself wrote)
+            passes straight through.
         empty_response_guard: When the model replies with nothing at
             all (no content, no tool calls), push back once — small
             models go silent mid-task after a tool result instead of
@@ -125,6 +132,7 @@ class HarnessConfig:
     todo_reminders: bool = True
     error_stop_guard: bool = True
     defer_writes_after_search: bool = True
+    read_before_edit: bool = True
     empty_response_guard: bool = True
     deliverable_guard: bool = True
     compact_mode: str = "truncate"
@@ -754,6 +762,64 @@ def deferred_write_result(tool_name: str) -> str:
         "as a search (grep/glob), so it could not have used the search "
         "results. Read the search results above, then re-issue the "
         f"{tool_name} against the correct existing file."
+    )
+
+
+# File-addressed tools: touching a path with any of these marks it as
+# known to the conversation for the read-before-edit gate.
+_FILE_TOOLS = frozenset({"read", "write", "edit"})
+
+
+def files_known_to_conversation(
+    messages: list[dict[str, Any]],
+) -> set[str]:
+    """Absolute paths of files any read/write/edit call has addressed.
+
+    Walks the assistant messages' ``tool_calls`` (Ollama shape:
+    ``{"function": {"name", "arguments"}}``; arguments may be a dict or
+    a JSON string).  Near-miss names like ``read_file`` count — the
+    history stores calls as the model emitted them, before resolution.
+    """
+    known: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name", "")).strip().lower()
+            if name.endswith("_file"):
+                name = name[: -len("_file")]
+            if name not in _FILE_TOOLS:
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    continue
+            if not isinstance(args, dict):
+                continue
+            path = args.get("file_path") or args.get("path")
+            if isinstance(path, str) and path:
+                known.add(os.path.abspath(path))
+    return known
+
+
+def read_gate_result(path: str) -> str:
+    """Result string for an edit deferred by the read-before-edit gate.
+
+    Small models edit files they have never looked at; the ``old_text``
+    they invent never matches and the edit fails (or worse, a fuzzy
+    variant would corrupt the file).  One deterministic push-back makes
+    the model read first, so the next edit copies exact text.
+    """
+    return (
+        f"Error: edit deferred: you have not read {path} in this "
+        "conversation, so your old_text is a guess. Call read on "
+        f"{path} first, copy the exact text to change, then re-issue "
+        "the edit."
     )
 
 

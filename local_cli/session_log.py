@@ -46,6 +46,7 @@ _INTERVENTION_KINDS = frozenset({
     "reminder", "verify_warning", "compaction", "retry",
     "nudge", "error_stop", "empty_response",
     "tools_fallback", "write_deferred", "deliverable_nudge",
+    "read_gate",
 })
 
 _PROJECTS_SUBDIR = "projects"
