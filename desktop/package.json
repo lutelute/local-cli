@@ -1,6 +1,6 @@
 {
   "name": "local-cli-desktop",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Desktop GUI for local-cli AI coding agent",
   "author": "lutelute",
   "license": "MIT",
@@ -46,7 +46,9 @@
       {
         "from": "../local_cli",
         "to": "local_cli",
-        "filter": ["**/*.py"]
+        "filter": [
+          "**/*.py"
+        ]
       },
       {
         "from": "../pyproject.toml",
@@ -56,15 +58,30 @@
     "icon": "build/icon.png",
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools"
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.ico"
     },
@@ -74,8 +91,18 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "category": "Development"
