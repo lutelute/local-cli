@@ -393,7 +393,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2254 tests
+├── tests/                       # 2263 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -401,7 +401,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2254 passed
+# 2263 passed
 ```
 
 ---
