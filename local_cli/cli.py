@@ -34,6 +34,7 @@ from local_cli.ollama_client import OllamaClient, OllamaConnectionError
 from local_cli.plan_manager import PlanError, PlanManager, PlanNotFoundError
 from local_cli.prompts import build_skill_messages, build_system_prompt
 from local_cli.session import SessionManager
+from local_cli.session_log import SessionLogger
 from local_cli.skills import SkillsLoader
 from local_cli.spinner import set_spinner_style
 from local_cli.token_tracker import TokenTracker
@@ -123,6 +124,7 @@ class _ReplContext:
         "knowledge_store",
         "skills_loader",
         "ideation_engine",
+        "session_log",
         "active_plan_id",
         "current_mode",
         "ideation_messages",
@@ -147,6 +149,7 @@ class _ReplContext:
         knowledge_store: KnowledgeStore | None = None,
         skills_loader: SkillsLoader | None = None,
         ideation_engine: IdeationEngine | None = None,
+        session_log: SessionLogger | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -166,6 +169,7 @@ class _ReplContext:
         self.knowledge_store = knowledge_store
         self.skills_loader = skills_loader
         self.ideation_engine = ideation_engine
+        self.session_log = session_log
         self.active_plan_id: str | None = None
         self.current_mode: str = "agent"
         self.ideation_messages: list[dict] = []
@@ -205,6 +209,13 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
     if cmd == "/clear":
         ctx.messages.clear()
         ctx.messages.append({"role": "system", "content": ctx.system_prompt})
+        if ctx.session_log is not None:
+            # A cleared conversation is a new session — new transcript.
+            ctx.session_log.log("cleared")
+            ctx.session_log.rotate()
+            ctx.session_log.log_session_start(
+                model=ctx.config.model, frontend="cli", reason="clear",
+            )
         print("Conversation history cleared.")
         return True
 
@@ -234,6 +245,8 @@ def _handle_slash_command(command: str, ctx: _ReplContext) -> bool:
             print(f"Switching to '{new_model}' anyway.")
 
         ctx.config.model = new_model
+        if ctx.session_log is not None:
+            ctx.session_log.log("model_changed", model=new_model)
         print(f"Switched to model: {new_model}")
         return True
 
@@ -1386,6 +1399,20 @@ def run_repl(
     # Session manager for /save command.
     session_manager = SessionManager(config.state_dir)
 
+    # Flight recorder: automatic per-project transcript under
+    # <state_dir>/projects/<cwd-slug>/, one file per session — unlike
+    # /save, which is manual.  LOCAL_CLI_SESSION_LOG=0 disables.
+    session_log = SessionLogger(config.state_dir)
+    session_log.log_session_start(
+        model=config.model,
+        provider=(
+            orchestrator.get_active_provider_name()
+            if orchestrator is not None else "ollama"
+        ),
+        app_version=__version__,
+        frontend="cli",
+    )
+
     # Session-scoped tool cache and token tracker.  These were created
     # but never wired into the loop before, so /usage always read zero
     # and repeated reads always hit the disk.
@@ -1417,6 +1444,7 @@ def run_repl(
         knowledge_store=knowledge_store,
         skills_loader=skills_loader,
         ideation_engine=ideation_engine,
+        session_log=session_log,
     )
 
     # Set initial mode.
@@ -1507,6 +1535,7 @@ def run_repl(
 
         # Build user message and add to history.
         messages.append({"role": "user", "content": prompt_content})
+        session_log.log_user(prompt_content)
 
         # Build merged inference options: defaults < presets < user config.
         default_options: dict = {"num_ctx": 8192}
@@ -1548,6 +1577,7 @@ def run_repl(
                     )
 
         # Run the agent loop (streams response to stdout).
+        turn_error = False
         try:
             agent_loop(
                 client=active_client,
@@ -1560,8 +1590,12 @@ def run_repl(
                 options=chat_options,
                 think=chat_think,
                 harness=harness_config,
+                tee=session_log.emit,
             )
         except KeyboardInterrupt:
             print("\nInterrupted.")
         except Exception as exc:
+            turn_error = True
+            session_log.log("error", source="fatal", message=str(exc))
             sys.stderr.write(f"Error: {exc}\n")
+        session_log.log_turn_end(error=turn_error)

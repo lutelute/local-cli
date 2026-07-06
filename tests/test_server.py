@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from local_cli.config import Config
+from local_cli.session_log import SessionLogger
 from local_cli.server import JsonLineServer
 from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
@@ -55,6 +56,7 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server._token_tracker = TokenTracker()
     server._ideation_active = False
     server._skills_loader = None
+    server._session_log = SessionLogger(".", enabled=False)
     return server
 
 

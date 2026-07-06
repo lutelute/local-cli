@@ -1791,6 +1791,7 @@ def agent_loop(
     options: dict[str, Any] | None = None,
     think: bool | None = None,
     harness: HarnessConfig | None = None,
+    tee: EmitFn | None = None,
 ) -> None:
     """Core agent loop with the classic CLI presentation.
 
@@ -1815,16 +1816,23 @@ def agent_loop(
         think: Optional thinking-mode flag forwarded to the provider.
         harness: Optional harness intervention switches; defaults to
             :class:`HarnessConfig`'s defaults.
+        tee: Optional second emit sink (e.g. a session logger) that
+            receives every event after the console emitter.
 
     Raises:
         KeyboardInterrupt: Propagated if the user presses Ctrl+C during
             tool execution (streaming interrupts are handled gracefully).
     """
     emitter = _ConsoleEmitter(debug=debug)
+    emit_fn: EmitFn = emitter
+    if tee is not None:
+        def emit_fn(event: AgentEvent) -> None:
+            emitter(event)
+            tee(event)
     try:
         run_agent(
             client, model, tools, messages,
-            emit=emitter,
+            emit=emit_fn,
             harness=harness,
             cache=cache,
             tracker=tracker,

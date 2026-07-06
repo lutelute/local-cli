@@ -30,6 +30,7 @@ import sys
 import threading
 from typing import Any
 
+from local_cli import __version__
 from local_cli.agent import (
     _COMPACT_TOKEN_THRESHOLD,
     _estimate_tokens,
@@ -55,6 +56,7 @@ from local_cli.providers import LLMProvider, ProviderConnectionError, ProviderRe
 from local_cli.providers.claude_provider import ClaudeProvider
 from local_cli.providers.ollama_provider import OllamaProvider
 from local_cli.security import validate_model_name
+from local_cli.session_log import SessionLogger
 from local_cli.skills import SkillsLoader
 from local_cli.sub_agent import SubAgentRunner
 from local_cli.token_tracker import TokenTracker
@@ -145,6 +147,18 @@ class JsonLineServer:
         self._token_tracker = TokenTracker()
         self._git_ops = GitOps()
         self._ideation_active = False
+
+        # Flight recorder: the session leaves a JSONL transcript under
+        # <state_dir>/projects/<cwd-slug>/ from the moment the folder is
+        # opened (LOCAL_CLI_SESSION_LOG=0 disables).  Fail-open: a write
+        # error silences the logger, never the session.
+        self._session_log = SessionLogger(self._config.state_dir)
+        self._session_log.log_session_start(
+            model=self._config.model,
+            provider=self._provider.name,
+            app_version=__version__,
+            frontend="server",
+        )
 
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
@@ -305,6 +319,7 @@ class JsonLineServer:
             build_skill_messages(self._skills_loader, content)
         )
         self._messages.append({"role": "user", "content": content})
+        self._session_log.log_user(content)
 
         # Build merged inference options: defaults < presets < user config.
         default_options: dict[str, Any] = {"num_ctx": 8192}
@@ -410,7 +425,7 @@ class JsonLineServer:
                 self._config.model,
                 self._tools,
                 self._messages,
-                emit=_emit,
+                emit=self._session_log.wrap_emit(_emit),
                 harness=HarnessConfig(
                     max_iterations=self._config.max_iterations,
                     compact_mode=self._config.compact_mode,
@@ -423,12 +438,15 @@ class JsonLineServer:
                 should_stop=self._stop_flag.is_set,
             )
         except Exception as exc:
+            self._session_log.log("error", source="fatal", message=str(exc))
+            self._session_log.log_turn_end(error=True)
             _send({"id": req_id, "type": "error", "message": str(exc)})
             return
 
         # Preserve the historical contract: no "done" after an error.
         if not error_seen:
             _send({"id": req_id, "type": "done"})
+        self._session_log.log_turn_end(error=error_seen)
 
     def _handle_command(self, req_id: int, command: str) -> None:
         parts = command.strip().split(maxsplit=1)
@@ -538,6 +556,7 @@ class JsonLineServer:
         context.  Orphaned tool-result messages and dangling tool_calls
         from the previous model are stripped to keep the history valid.
         """
+        self._session_log.log("model_changed", model=model)
         self._config.model = model
 
         # Remove trailing orphaned tool-result messages.
@@ -943,6 +962,16 @@ class JsonLineServer:
         self._messages.append({"role": "system", "content": self._system_prompt})
         self._tool_cache.clear()
         self._token_tracker.clear()
+        # A cleared conversation is a new session — start a fresh transcript.
+        self._session_log.log("cleared")
+        self._session_log.rotate()
+        self._session_log.log_session_start(
+            model=self._config.model,
+            provider=self._provider.name,
+            app_version=__version__,
+            frontend="server",
+            reason="clear",
+        )
         _send({"id": req_id, "type": "cleared"})
 
     # ------------------------------------------------------------------

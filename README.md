@@ -104,6 +104,14 @@ Create tagged snapshots before risky edits. Roll back instantly with `/rollback`
 ### Session Persistence
 Save conversations as JSONL files. Resume where you left off.
 
+### Session Transcripts (flight recorder)
+Every session is automatically recorded as JSONL under
+`~/.local/state/local-cli/projects/<cwd-slug>/` from the moment a folder
+is opened — user messages, tool calls, harness interventions, and
+per-turn visible/thinking character counts. A field failure can be
+diagnosed from the transcript alone. Disable with
+`LOCAL_CLI_SESSION_LOG=0`.
+
 ### Security
 - Dangerous command blocking (`rm -rf /` and its variants, fork bombs, `dd` to a device, etc.)
 - Risky-command confirmation — recursive `rm`, `sudo`, force push, `kill`, `shutdown`, etc. prompt for approval in the REPL (pass `--yes` to auto-approve)
@@ -313,6 +321,7 @@ Configuration is resolved in order: **CLI flags > environment variables > config
 | `--auto-update` | `LOCAL_CLI_AUTO_UPDATE` | `false` | Install available updates automatically on startup, then restart |
 | — | `LOCAL_CLI_COMPACT_MODE` | `truncate` | Context compaction: `truncate` or `summarize` |
 | — | `LOCAL_CLI_MAX_ITERATIONS` | `40` | Agent step limit per turn (`0` = unlimited) |
+| — | `LOCAL_CLI_SESSION_LOG` | `1` | Session transcripts (`0` disables). Written to `<state_dir>/projects/<cwd-slug>/` |
 | `--mascot [style]` | `LOCAL_CLI_MASCOT` | `off` | Loca the local cat: `--mascot` for the one-line face `(=･ω･=)`, `--mascot pixel` for animated pixel art (TTY only; falls back to the face in pipes) |
 
 Config file location: `~/.config/local-cli/config` (key=value format).
@@ -393,7 +402,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2263 tests
+├── tests/                       # 2283 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -401,7 +410,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2263 passed
+# 2283 passed
 ```
 
 ---
