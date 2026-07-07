@@ -66,6 +66,10 @@ def _make_server(provider: MagicMock, tools: list) -> JsonLineServer:
     server._instruction_message = None
     server._map_message = None
     server._conversation_store = ConversationStore(".", enabled=False)
+    server._confirm_lock = threading.Lock()
+    server._confirm_event = threading.Event()
+    server._confirm_result = False
+    server._confirm_seq = 0
     return server
 
 

@@ -69,6 +69,7 @@ from local_cli.sub_agent import SubAgentRunner
 from local_cli.token_tracker import TokenTracker
 from local_cli.tool_cache import ToolCache
 from local_cli.tools import get_default_tools, get_sub_agent_tools
+from local_cli.tools.bash_tool import BashTool
 from local_cli.prompts import build_skill_messages, build_system_prompt
 from local_cli.tools.agent_tool import AgentTool
 from local_cli.tools.base import Tool
@@ -83,6 +84,11 @@ def _send(obj: dict[str, Any]) -> None:
     with _send_lock:
         sys.stdout.write(line)
         sys.stdout.flush()
+
+
+# How long the GUI has to answer a risky-command confirmation before it
+# is refused (module-level so tests can shrink it).
+_CONFIRM_TIMEOUT_S = 180.0
 
 
 class JsonLineServer:
@@ -100,6 +106,18 @@ class JsonLineServer:
         self._provider: LLMProvider = OllamaProvider(client=self._client)
 
         self._tools = get_default_tools()
+
+        # Risky-command gate for the GUI path.  The CLI wires a stdin
+        # prompt; the desktop asks over the JSON-line protocol and the
+        # chat thread waits (deny on timeout).  Without this, risky
+        # commands (sudo, recursive rm, kill, ...) ran unconfirmed.
+        self._confirm_lock = threading.Lock()
+        self._confirm_event = threading.Event()
+        self._confirm_result = False
+        self._confirm_seq = 0
+        for i, tool in enumerate(self._tools):
+            if tool.name == "bash":
+                self._tools[i] = BashTool(confirm=self._gui_confirm)
 
         # 007: Sub-agent support — inject AgentTool into tools list.
         self._sub_agent_runner: SubAgentRunner | None = None
@@ -195,6 +213,30 @@ class JsonLineServer:
         # Saved after every turn; restored via the "resume" request.
         self._conversation_store = ConversationStore(self._config.state_dir)
 
+    def _gui_confirm(self, command: str) -> bool:
+        """Ask the GUI to approve a risky command; deny on timeout.
+
+        Called from the chat thread (bash tool).  Sends a
+        ``confirm_request`` and blocks until the main stdin loop routes
+        back a ``confirm_response`` — or the timeout elapses, in which
+        case the command is refused: a risky command must never run
+        just because nobody was watching.
+        """
+        if getattr(self._config, "auto_approve", False):
+            return True
+        with self._confirm_lock:
+            self._confirm_seq += 1
+            self._confirm_result = False
+            self._confirm_event.clear()
+            _send({
+                "type": "confirm_request",
+                "confirm_id": self._confirm_seq,
+                "command": command,
+            })
+        if self._confirm_event.wait(timeout=_CONFIRM_TIMEOUT_S):
+            return bool(self._confirm_result)
+        return False
+
     def run(self) -> None:
         """Main loop: read stdin lines, dispatch, write responses."""
         # Send ready signal.
@@ -242,6 +284,13 @@ class JsonLineServer:
             # Stop can arrive while chat is running in a thread.
             if req_type == "stop":
                 self._handle_stop(req_id)
+                continue
+
+            # Confirm responses arrive while the chat thread is blocked
+            # inside _gui_confirm — never join on these.
+            if req_type == "confirm_response":
+                self._confirm_result = bool(req.get("approved"))
+                self._confirm_event.set()
                 continue
 
             # Model switch can arrive while chat is streaming.

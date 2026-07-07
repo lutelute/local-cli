@@ -99,11 +99,16 @@ class BashTool(Tool):
             return f"Error: command blocked by security policy: {command}"
 
         # Risky-but-legitimate commands require confirmation when a confirm
-        # callback is wired up (CLI without --yes).  Declining returns a
-        # plain message the model can read and adapt to.
+        # callback is wired up (CLI prompt, GUI dialog, sub-agent policy).
+        # Declining returns a plain message the model can read and adapt to.
         if self._confirm is not None and is_command_risky(command):
             if not self._confirm(command):
-                return f"Command declined by user (not run): {command}"
+                return (
+                    f"Command declined (not run): {command}\n"
+                    "This risky command was not approved. Use a less "
+                    "destructive alternative, or ask the user to run it "
+                    "themselves."
+                )
 
         try:
             result = subprocess.run(

@@ -417,6 +417,59 @@ body {
 }
 .md-table th { font-weight: 700; background: rgba(128, 128, 128, 0.08); }
 
+/* Risky-command confirm bar */
+.confirm-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--red);
+  border-left: 3px solid var(--red);
+  border-radius: 4px;
+}
+
+.confirm-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.confirm-label {
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.confirm-command {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirm-approve,
+.confirm-deny {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.confirm-approve { border-color: var(--red); color: var(--red); }
+.confirm-approve:hover { background: var(--red); color: var(--bg); }
+.confirm-deny:hover { border-color: var(--text-muted); }
+
 /* Resume bar (welcome screen) */
 .resume-bar {
   display: flex;

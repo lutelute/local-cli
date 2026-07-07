@@ -44,6 +44,7 @@ export default function App() {
   const [rootDir, setRootDir] = useState<string | null>(null)
   const [appVersion, setAppVersion] = useState('')
   const [resumable, setResumable] = useState<ResumableInfo | null>(null)
+  const [confirmReq, setConfirmReq] = useState<{ id: number; command: string } | null>(null)
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0)
   const terminalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -219,6 +220,12 @@ export default function App() {
           break
         }
 
+        case 'confirm_request':
+          // The backend is holding a risky command until the user
+          // approves it (denied automatically on timeout).
+          setConfirmReq({ id: msg.confirm_id ?? 0, command: msg.command || '' })
+          break
+
         case 'done':
         case 'stopped':
           setMessages(prev => {
@@ -233,6 +240,7 @@ export default function App() {
             return prev
           })
           setStreaming(false)
+          setConfirmReq(null)
           break
 
         case 'error':
@@ -241,6 +249,7 @@ export default function App() {
             { id: uid(), role: 'system', content: msg.message || 'Unknown error' },
           ])
           setStreaming(false)
+          setConfirmReq(null)
           break
 
         case 'model_changed':
@@ -670,6 +679,39 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {confirmReq && (
+            <div className="confirm-bar">
+              <div className="confirm-text">
+                <span className="confirm-label">Risky command — approve?</span>
+                <code className="confirm-command">{confirmReq.command}</code>
+              </div>
+              <button
+                className="confirm-deny"
+                onClick={() => {
+                  window.api.sendToPython({
+                    id: nextId(), type: 'confirm_response',
+                    confirm_id: confirmReq.id, approved: false,
+                  })
+                  setConfirmReq(null)
+                }}
+              >
+                Deny
+              </button>
+              <button
+                className="confirm-approve"
+                onClick={() => {
+                  window.api.sendToPython({
+                    id: nextId(), type: 'confirm_response',
+                    confirm_id: confirmReq.id, approved: true,
+                  })
+                  setConfirmReq(null)
+                }}
+              >
+                Run it
+              </button>
+            </div>
+          )}
 
           <div className="input-area">
             <div className="input-row">

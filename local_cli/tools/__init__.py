@@ -62,7 +62,11 @@ def get_sub_agent_tools() -> list[Tool]:
     from local_cli.tools.write_tool import WriteTool
 
     tools: list[Tool] = [
-        BashTool(),
+        # Sub-agents have nobody to ask, so risky commands (sudo,
+        # recursive rm, kill, ...) are refused outright instead of
+        # running unconfirmed; the refusal message lets the model hand
+        # such steps back to the main agent.
+        BashTool(confirm=lambda _command: False),
         ReadTool(),
         WriteTool(),
         EditTool(),

@@ -56,6 +56,8 @@ export type PythonMessage = {
   event?: string
   resumable?: ResumableInfo | null
   messages?: Array<{ role: string; content: string }>
+  confirm_id?: number
+  command?: string
   model?: string
   tools?: string[]
   message?: string
