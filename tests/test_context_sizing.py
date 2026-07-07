@@ -34,17 +34,51 @@ class TestResolveNumCtx(unittest.TestCase):
         self.assertEqual(resolve_num_ctx(client, "m", 12345), 12345)
         client.show_model.assert_not_called()
 
-    def test_big_machine_gets_ceiling(self) -> None:
+    def test_session_start_is_fast_floor(self) -> None:
+        """No estimate (session start) -> the fast floor, not the max."""
         with patch(
             "local_cli.context_sizing._system_ram_gb", return_value=64.0,
         ):
-            self.assertEqual(resolve_num_ctx(_client(), "m", 0), 32768)
+            self.assertEqual(resolve_num_ctx(_client(), "m", 0), 8192)
 
-    def test_mid_machine_gets_16k(self) -> None:
+    def test_grows_to_16k_when_conversation_fills_8k(self) -> None:
+        with patch(
+            "local_cli.context_sizing._system_ram_gb", return_value=64.0,
+        ):
+            # 8k * 0.7 = 5734; just over it should step to 16k.
+            self.assertEqual(
+                resolve_num_ctx(_client(), "m", 0, estimated_tokens=6000),
+                16384,
+            )
+
+    def test_grows_to_32k_when_conversation_fills_16k(self) -> None:
+        with patch(
+            "local_cli.context_sizing._system_ram_gb", return_value=64.0,
+        ):
+            # 16k * 0.7 = 11469; just over it should step to 32k.
+            self.assertEqual(
+                resolve_num_ctx(_client(), "m", 0, estimated_tokens=12000),
+                32768,
+            )
+
+    def test_big_estimate_capped_by_ceiling(self) -> None:
+        with patch(
+            "local_cli.context_sizing._system_ram_gb", return_value=64.0,
+        ):
+            self.assertEqual(
+                resolve_num_ctx(_client(), "m", 0, estimated_tokens=999999),
+                32768,
+            )
+
+    def test_ram_cap_limits_growth(self) -> None:
+        """A 16GB machine never grows past 16k however big the chat."""
         with patch(
             "local_cli.context_sizing._system_ram_gb", return_value=16.0,
         ):
-            self.assertEqual(resolve_num_ctx(_client(), "m", 0), 16384)
+            self.assertEqual(
+                resolve_num_ctx(_client(), "m", 0, estimated_tokens=999999),
+                16384,
+            )
 
     def test_small_or_unknown_ram_keeps_floor(self) -> None:
         for ram in (8.0, 0.0):
@@ -62,12 +96,17 @@ class TestResolveNumCtx(unittest.TestCase):
                 resolve_num_ctx(_client(context_length=4096), "m", 0), 4096,
             )
 
-    def test_model_between_floor_and_cap(self) -> None:
+    def test_model_between_floor_and_cap_grows_to_model_max(self) -> None:
         with patch(
             "local_cli.context_sizing._system_ram_gb", return_value=64.0,
         ):
+            client = _client(context_length=20000)
+            # Session start: fast floor.
+            self.assertEqual(resolve_num_ctx(client, "m", 0), 8192)
+            # A large conversation grows to the model's own max (20000),
+            # not the 32k tier it cannot support.
             self.assertEqual(
-                resolve_num_ctx(_client(context_length=20000), "m", 0),
+                resolve_num_ctx(client, "m", 0, estimated_tokens=999999),
                 20000,
             )
 

@@ -416,6 +416,7 @@ class JsonLineServer:
         # instead of pinning a 256k model to the historical 8k.
         resolved_ctx = resolve_num_ctx(
             self._client, self._config.model, self._config.num_ctx,
+            estimated_tokens=_estimate_tokens(self._messages),
         )
         if resolved_ctx != getattr(self, "_last_ctx_logged", None):
             self._session_log.log("context_window", num_ctx=resolved_ctx)

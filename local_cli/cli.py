@@ -1629,7 +1629,10 @@ def run_repl(
         preset_options = get_model_preset(config.model)
         # Adaptive window (config "auto"): model capability x machine RAM,
         # instead of pinning a 256k model to the historical 8k.
-        resolved_ctx = resolve_num_ctx(client, config.model, config.num_ctx)
+        resolved_ctx = resolve_num_ctx(
+            client, config.model, config.num_ctx,
+            estimated_tokens=_estimate_tokens(messages),
+        )
         if resolved_ctx != last_ctx_logged:
             session_log.log("context_window", num_ctx=resolved_ctx)
             last_ctx_logged = resolved_ctx

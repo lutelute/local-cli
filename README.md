@@ -112,13 +112,15 @@ and the desktop app shows a Restore button when the folder has a
 previous conversation (`/clear` discards it). Save happens *before* the
 done signal, so even an instant quit keeps the last turn.
 
-### Adaptive Context Window
-`num_ctx` now defaults to `auto`: each turn resolves
-min(model's native window, RAM tier, 32k) — qwen3.5:9b reports a native
-262k context, and the old fixed default ran it at 8k (3% of its working
-memory). On a 32GB-class machine the agent's working memory quadruples,
-which is exactly where multi-file tasks and long tool outputs hurt.
-Pin it with `LOCAL_CLI_NUM_CTX=<int>`.
+### Adaptive Context Window (grow-on-demand)
+`num_ctx` defaults to `auto` and grows with the conversation: it starts
+at a fast 8k floor and steps up (16k, 32k, capped by the model's native
+window and a RAM tier) only when the chat actually approaches the
+current window. Measured on qwen3.5:9b, a short turn runs ~2x faster at
+8k than at 32k, so blanket-maxing the window taxed every everyday turn
+for a working-memory benefit only large conversations use — grow-on-
+demand keeps short sessions fast and still gives long ones the room.
+Pin a fixed size with `LOCAL_CLI_NUM_CTX=<int>`.
 
 ### Project Map
 A capped, sorted file listing (git-aware, 120 entries / 2KB max) is
@@ -439,7 +441,7 @@ local-cli/
 │   ├── electron/                # Main process + preload
 │   ├── src/                     # React UI components
 │   └── build/                   # App icons
-├── tests/                       # 2338 tests
+├── tests/                       # 2351 tests
 └── pyproject.toml               # Zero dependencies
 ```
 
@@ -447,7 +449,7 @@ local-cli/
 
 ```bash
 python -m pytest tests/ -q
-# 2338 passed
+# 2351 passed
 ```
 
 ---
